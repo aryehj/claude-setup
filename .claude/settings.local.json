@@ -2,7 +2,8 @@
   "permissions": {
     "allow": [
       "WebSearch",
-      "Bash(container system:*)"
+      "Bash(container system:*)",
+      "WebFetch(domain:github.com)"
     ]
   }
 }
