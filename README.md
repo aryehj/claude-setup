@@ -1,3 +1,6 @@
+# TL; DR
+The author is a dilletente who starts a lot of projects, but is slow to learn syntax and commands. Therefore, the author automated most of the creation of safe-ish containerized workspaces for LLM-aided development in a given working directory. 
+
 # new-project.sh
 
 Spins up an isolated [Apple Containers](https://developer.apple.com/documentation/virtualization)
