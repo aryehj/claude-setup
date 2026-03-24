@@ -12,7 +12,7 @@ dev environment for a project, pre-configured for Claude Code.
 
 ```bash
 # Make it available everywhere
-echo 'export PATH="/Users/Shared/claude-shared:$PATH"' >> ~/.zshrc
+echo 'export PATH="/Users/Shared/claude-setup:$PATH"' >> ~/.zshrc
 source ~/.zshrc
 ```
 
