@@ -65,7 +65,6 @@ if [[ ! -f "$PROJECT_SETTINGS_FILE" ]]; then
   mkdir -p "$PROJECT_DIR/.claude"
   cat > "$PROJECT_SETTINGS_FILE" << 'EOF'
 {
-  "theme": "light",
   "sandbox": true
 }
 EOF
@@ -76,7 +75,7 @@ fi
 if [[ "$(container inspect "$CONTAINER_NAME" 2>/dev/null)" != "[]" ]]; then
   echo "Container '$CONTAINER_NAME' already exists — attaching."
   container start "$CONTAINER_NAME" 2>/dev/null || true
-  container exec -it "${TERM_ARGS[@]}" "$CONTAINER_NAME" /bin/bash
+  container exec -it -w "$PROJECT_DIR" "${TERM_ARGS[@]}" "$CONTAINER_NAME" /bin/bash
   exit 0
 fi
 
@@ -102,7 +101,7 @@ else
   SETUP_NAME="claude-dev-setup-$$"
   trap 'container rm "$SETUP_NAME" 2>/dev/null || true' EXIT
 
-  container run --name "$SETUP_NAME" "$BASE_IMAGE" bash -c '
+  container run --name "$SETUP_NAME" -m "$CONTAINER_MEMORY" "$BASE_IMAGE" bash -c '
     set -euo pipefail
 
     # ── system packages ──────────────────────────────────────────────────────
@@ -177,4 +176,4 @@ container run \
   -w "$PROJECT_DIR" \
   "${TERM_ARGS[@]}" \
   "$IMAGE_TAG" \
-  /bin/bash
+  bash -c 'echo "{\"theme\":\"light\"}" > /root/.claude.json && exec bash'
