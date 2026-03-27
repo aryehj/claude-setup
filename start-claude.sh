@@ -138,6 +138,7 @@ BASHRC
 
   echo "==> Exporting $IMAGE_TAG"
   container export --image "$IMAGE_TAG" "$SETUP_NAME"
+  container stop "$SETUP_NAME"
   container rm "$SETUP_NAME"
   trap - EXIT
 
