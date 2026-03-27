@@ -87,6 +87,7 @@ else
   fi
 
   SETUP_NAME="claude-dev-setup-$$"
+  trap 'container rm "$SETUP_NAME" 2>/dev/null || true' EXIT
 
   container run --name "$SETUP_NAME" "$BASE_IMAGE" bash -c '
     set -euo pipefail
@@ -137,6 +138,12 @@ BASHRC
 
   echo "==> Exporting $IMAGE_TAG"
   container export --image "$IMAGE_TAG" "$SETUP_NAME"
+
+  until container inspect "$SETUP_NAME" 2>/dev/null | grep -q '"status":"stopped"'; do
+    sleep 0.1
+  done
+  container rm "$SETUP_NAME"
+  trap - EXIT
 
   # Record image build time for age check
   date +%s > "$IMAGE_STAMP"
