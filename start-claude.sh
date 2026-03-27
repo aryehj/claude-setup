@@ -59,6 +59,21 @@ if $REBUILD; then
   fi
 fi
 
+# ── inject project settings ───────────────────────────────────────────────────
+# Write .claude/settings.local.json in the project dir if it doesn't exist yet.
+# settings.local.json is gitignored by Claude Code and project-specific.
+PROJECT_SETTINGS_FILE="$PROJECT_DIR/.claude/settings.local.json"
+if [[ ! -f "$PROJECT_SETTINGS_FILE" ]]; then
+  mkdir -p "$PROJECT_DIR/.claude"
+  cat > "$PROJECT_SETTINGS_FILE" << 'EOF'
+{
+  "theme": "light",
+  "sandbox": true
+}
+EOF
+  echo "==> Created $PROJECT_SETTINGS_FILE"
+fi
+
 # ── check for existing container ──────────────────────────────────────────────
 if [[ "$(container inspect "$CONTAINER_NAME" 2>/dev/null)" != "[]" ]]; then
   echo "Container '$CONTAINER_NAME' already exists — attaching."
