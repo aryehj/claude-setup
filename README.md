@@ -17,7 +17,7 @@ dev environment for a project, pre-configured for Claude Code.
 
 ```bash
 # Optional: Make it available everywhere
-echo 'export PATH="/Path/To/claude-setup:$PATH"' >> ~/.zshrc
+echo 'export PATH="/Path/To/start-claude:$PATH"' >> ~/.zshrc
 source ~/.zshrc
 ```
 
@@ -64,10 +64,6 @@ re-attaches to the existing one rather than creating a new one.
 | Host | Container |
 |------|-----------|
 | Your project dir | Same path (e.g. `/Users/you/projects/my-app`) |
-| `~/.claude` | `/root/.claude` |
-
-`~/.claude` is shared across all containers — global memory, settings, and
-sessions stay in sync with your host Claude Code installation.
 
 **Authentication note:** Claude Code stores OAuth credentials in the macOS
 Keychain, not in `~/.claude`. The bind-mount does not carry them into the
