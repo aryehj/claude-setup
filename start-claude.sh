@@ -131,11 +131,11 @@ BASHRC
     # ── Claude Code CLI ──────────────────────────────────────────────────────
     # The installer puts the binary in ~/.local/bin, which is not in the default
     # PATH. Symlink into /usr/local/bin for invocability; also add ~/.local/bin
-    # to PATH in .bashrc so the claude binary itself doesn't warn at startup.
+    # to PATH in .bashrc so the claude binary itself does not warn at startup.
     export PATH="/root/.local/bin:$PATH"
     curl -fsSL https://claude.ai/install.sh | bash
     ln -sf /root/.local/bin/claude /usr/local/bin/claude
-    echo 'export PATH="$HOME/.local/bin:$PATH"' >> /root/.bashrc
+    echo "export PATH=\"\$HOME/.local/bin:\$PATH\"" >> /root/.bashrc
   '
 
   echo "==> Exporting $IMAGE_TAG"
