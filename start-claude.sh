@@ -169,21 +169,12 @@ fi
 echo "==> Creating container '$CONTAINER_NAME'"
 echo "    project : $PROJECT_DIR  →  $PROJECT_DIR"
 
-CLAUDE_MOUNT=()
-if [[ -d "$CLAUDE_DIR" ]]; then
-  echo "    claude  : $CLAUDE_DIR   →  /root/.claude"
-  CLAUDE_MOUNT=(-v "$CLAUDE_DIR:/root/.claude")
-else
-  echo "    claude  : $CLAUDE_DIR not found — skipping bind mount"
-fi
-
 container run \
   --name "$CONTAINER_NAME" \
   -it \
   -m "$CONTAINER_MEMORY" \
   -c "$CONTAINER_CPUS" \
   -v "$PROJECT_DIR:$PROJECT_DIR" \
-  "${CLAUDE_MOUNT[@]}" \
   -w "$PROJECT_DIR" \
   "${TERM_ARGS[@]}" \
   "$IMAGE_TAG" \
