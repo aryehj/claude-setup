@@ -63,22 +63,32 @@ fi
 # settings.local.json is gitignored by Claude Code and project-specific.
 PROJECT_SETTINGS_FILE="$PROJECT_DIR/.claude/settings.local.json"
 if [[ -f "$PROJECT_SETTINGS_FILE" ]]; then
-  # Migrate boolean sandbox to object form (Claude Code schema change)
+  # Migrate sandbox settings: bool→object form, ensure filesystem.allowWrite
   python3 - "$PROJECT_SETTINGS_FILE" << 'PYEOF'
 import json, sys
 path = sys.argv[1]
 with open(path) as f:
     data = json.load(f)
+changed = False
 if isinstance(data.get('sandbox'), bool):
     data['sandbox'] = {"enabled": True, "autoAllowBashIfSandboxed": True}
+    changed = True
+    print(f"==> Migrated sandbox boolean→object in {path}")
+sb = data.setdefault('sandbox', {})
+fs = sb.setdefault('filesystem', {})
+aw = fs.setdefault('allowWrite', [])
+if '/tmp/uv-cache' not in aw:
+    aw.append('/tmp/uv-cache')
+    changed = True
+    print(f"==> Added /tmp/uv-cache to sandbox.filesystem.allowWrite in {path}")
+if changed:
     with open(path, 'w') as f:
         json.dump(data, f, indent=2)
         f.write('\n')
-    print(f"==> Migrated sandbox boolean→object in {path}")
 PYEOF
 else
   mkdir -p "$PROJECT_DIR/.claude"
-  printf '{\n  "sandbox": {\n    "enabled": true,\n    "autoAllowBashIfSandboxed": true\n  }\n}\n' > "$PROJECT_SETTINGS_FILE"
+  printf '{\n  "sandbox": {\n    "enabled": true,\n    "autoAllowBashIfSandboxed": true,\n    "filesystem": {\n      "allowWrite": ["/tmp/uv-cache"]\n    }\n  }\n}\n' > "$PROJECT_SETTINGS_FILE"
   echo "==> Created $PROJECT_SETTINGS_FILE"
 fi
 

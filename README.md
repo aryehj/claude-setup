@@ -108,4 +108,4 @@ Once installed, invoke with `/cleanup` inside any Claude Code session.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `CLAUDE_CONTAINER_IMAGE` | `debian:bookworm-slim` | Override the base image |
-| `UV_CACHE_DIR` | `/tmp/uv-cache` | UV cache location (set automatically inside the container to avoid sandbox read-only filesystem errors) |
+| `UV_CACHE_DIR` | `/tmp/uv-cache` | UV cache location (set automatically inside the container; `/tmp/uv-cache` is also added to the sandbox's `filesystem.allowWrite` in the project's `settings.local.json`) |

@@ -43,3 +43,42 @@ belt-and-suspenders for manual shell sessions.
   does not survive container restarts. This is acceptable because UV
   re-downloads packages quickly and the cache is not large.
 - Requires `--rebuild` to take effect on existing containers.
+
+## ADR-002: Add `/tmp/uv-cache` to sandbox `filesystem.allowWrite`
+
+**Date:** 2026-04-03
+**Status:** Accepted
+
+### Context
+
+ADR-001 set `UV_CACHE_DIR=/tmp/uv-cache` as an environment variable, but this
+alone was insufficient. Claude Code's bubblewrap sandbox mounts most of `/tmp`
+as read-only. The env var told uv *where* to write, but the sandbox prevented
+the actual writes:
+
+```
+error: Failed to initialize cache at `/tmp/uv-cache`
+  Caused by: failed to create directory `/tmp/uv-cache`: Read-only file system (os error 30)
+```
+
+Setting `$TMPDIR` (`/tmp/claude`) also failed — the sandbox restricts that path
+for its own use.
+
+### Decision
+
+Add `/tmp/uv-cache` to `sandbox.filesystem.allowWrite` in each project's
+`.claude/settings.local.json`. The script now:
+
+1. **New projects:** The generated `settings.local.json` includes the
+   `filesystem.allowWrite` array with `/tmp/uv-cache`.
+2. **Existing projects:** The migration block in `start-claude.sh` checks for
+   the presence of `/tmp/uv-cache` in `allowWrite` and adds it if missing,
+   alongside the existing boolean→object migration.
+
+### Consequences
+
+- `uv` commands work inside the sandbox without any manual workarounds.
+- The env var (`UV_CACHE_DIR`) and sandbox permission (`filesystem.allowWrite`)
+  are now kept in sync by the same script.
+- Existing containers need their `settings.local.json` updated (happens
+  automatically on next `start-claude.sh` run) but do not require `--rebuild`.

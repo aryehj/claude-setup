@@ -56,7 +56,11 @@ checking the exit code.
 Claude Code's sandbox makes `/root/.cache` read-only, which breaks UV's default
 cache path. `UV_CACHE_DIR` is passed via `TERM_ARGS` (so Claude Code's sandbox
 subprocesses inherit it) and also baked into `.bashrc`, `/etc/environment`, and
-`/etc/profile.d/` for interactive sessions. See ADR-001 in `ADR.md`.
+`/etc/profile.d/` for interactive sessions. The sandbox is also configured to
+allow writes to `/tmp/uv-cache` via `sandbox.filesystem.allowWrite` in the
+project's `settings.local.json`. Without this, the bubblewrap sandbox blocks
+writes to `/tmp/uv-cache` even though the env var points there. See ADR-001 in
+`ADR.md`.
 
 **`TERM`, `COLORTERM`, and `TERM_PROGRAM` are forwarded into the container.** Without these, Claude Code falls back to a lower color mode (16 or 256 colors) and renders very differently from the host. Both `container run` (new container) and `container exec` (re-attach) pass them via `TERM_ARGS`.
 
