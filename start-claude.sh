@@ -165,11 +165,20 @@ BASHRC
   until container inspect "$SETUP_NAME" 2>/dev/null | grep -q '"status":"stopped"'; do
     sleep 0.1
   done
-  container export --image "$IMAGE_TAG" "$SETUP_NAME"
+  BUILD_TMP=$(mktemp -d)
+  container export --output "$BUILD_TMP/rootfs.tar" "$SETUP_NAME"
   container rm "$SETUP_NAME"
-  container stop buildkit 2>/dev/null || true
-  container rm buildkit 
   trap - EXIT
+  printf 'FROM scratch\nADD rootfs.tar /\nCMD ["/bin/bash"]\n' > "$BUILD_TMP/Dockerfile"
+  if ! container builder status 2>/dev/null | grep -q "running"; then
+    echo "==> Starting image builder..."
+    container builder start
+    until container builder status 2>/dev/null | grep -q "running"; do
+      sleep 1
+    done
+  fi
+  container build -t "$IMAGE_TAG" "$BUILD_TMP"
+  rm -rf "$BUILD_TMP"
 
   # Record image build time for age check
   date +%s > "$IMAGE_STAMP"

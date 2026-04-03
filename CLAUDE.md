@@ -32,11 +32,12 @@ If the named container already exists, it just starts and re-attaches it.
 is built once and reused. Each project gets its own named container so state
 (installed packages, history) is isolated between projects.
 
-**No `container build` — setup runs inline.** `container build` requires a
-builder daemon that times out on first use. Instead, the script runs setup
-commands inside a temporary `debian:bookworm-slim` container, then exports the
-result as `claude-dev:latest` via `container export --image`. Same outcome,
-no builder dependency.
+**Setup runs inline, image built via `container build`.** The script runs setup
+commands inside a temporary `debian:bookworm-slim` container, exports the
+filesystem with `container export --output`, then builds `claude-dev:latest`
+using `container build` with a `FROM scratch + ADD rootfs.tar` Dockerfile. The
+builder daemon is started automatically if not running. This replaced the old
+`container export --image` flag which was removed in v0.11.0.
 
 **`container system start` is idempotent.** The script always calls it before
 any other container operations. It returns immediately if the service is already
