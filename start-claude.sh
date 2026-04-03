@@ -70,7 +70,7 @@ path = sys.argv[1]
 with open(path) as f:
     data = json.load(f)
 if isinstance(data.get('sandbox'), bool):
-    data['sandbox'] = {}
+    data['sandbox'] = {"enabled": True, "autoAllowBashIfSandboxed": True}
     with open(path, 'w') as f:
         json.dump(data, f, indent=2)
         f.write('\n')
@@ -78,7 +78,7 @@ if isinstance(data.get('sandbox'), bool):
 PYEOF
 else
   mkdir -p "$PROJECT_DIR/.claude"
-  printf '{\n  "sandbox": {}\n}\n' > "$PROJECT_SETTINGS_FILE"
+  printf '{\n  "sandbox": {\n    "enabled": true,\n    "autoAllowBashIfSandboxed": true\n  }\n}\n' > "$PROJECT_SETTINGS_FILE"
   echo "==> Created $PROJECT_SETTINGS_FILE"
 fi
 
