@@ -179,6 +179,8 @@ BASHRC
   fi
   container build -t "$IMAGE_TAG" "$BUILD_TMP"
   rm -rf "$BUILD_TMP"
+  echo "==> Stopping image builder..."
+  container builder stop
 
   # Record image build time for age check
   date +%s > "$IMAGE_STAMP"
