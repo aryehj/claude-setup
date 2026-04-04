@@ -180,11 +180,11 @@ BASHRC
     # itself may be read-only at the mount level inside bubblewrap. Use $TMPDIR
     # dynamically so UV writes to the sandbox-writable temp dir. Fall back to
     # /tmp for interactive use outside the sandbox.
-    cat >> /root/.bashrc << 'UVEOF'
+    cat >> /root/.bashrc << '"'"'UVEOF'"'"'
 export UV_CACHE_DIR="${TMPDIR:-/tmp}/uv-cache"
 mkdir -p "$UV_CACHE_DIR" 2>/dev/null || true
 UVEOF
-    cat > /etc/profile.d/uv-cache.sh << 'UVEOF'
+    cat > /etc/profile.d/uv-cache.sh << '"'"'UVEOF'"'"'
 export UV_CACHE_DIR="${TMPDIR:-/tmp}/uv-cache"
 mkdir -p "$UV_CACHE_DIR" 2>/dev/null || true
 UVEOF
