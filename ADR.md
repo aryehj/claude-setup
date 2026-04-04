@@ -83,6 +83,48 @@ Add `/tmp/uv-cache` to `sandbox.filesystem.allowWrite` in each project's
 - Existing containers need their `settings.local.json` updated (happens
   automatically on next `start-claude.sh` run) but do not require `--rebuild`.
 
+## ADR-004: Resolve `UV_CACHE_DIR` dynamically via `$TMPDIR`
+
+**Date:** 2026-04-04
+**Status:** Accepted (supersedes parts of ADR-001 and ADR-002)
+
+### Context
+
+ADR-001 hardcoded `UV_CACHE_DIR=/tmp/uv-cache` and passed it as a static env var
+via `TERM_ARGS`. ADR-002 added `/tmp/uv-cache` to the sandbox `allowWrite` list.
+In practice, Claude Code's bubblewrap sandbox mounts `/tmp` read-only at the
+filesystem level before the allowlist is evaluated, so writes to `/tmp/uv-cache`
+still failed. Users reported that `uv run --with` (which creates temporary
+virtual environments) also failed for the same reason.
+
+The sandbox sets `$TMPDIR` to a guaranteed-writable directory at runtime. Using
+this instead of hardcoding `/tmp` resolves both issues.
+
+### Decision
+
+1. **Remove `UV_CACHE_DIR` from `TERM_ARGS`.** No longer pass it as a static
+   container env var.
+2. **Set `UV_CACHE_DIR="${TMPDIR:-/tmp}/uv-cache"` in `.bashrc` and
+   `/etc/profile.d/uv-cache.sh`.** The variable resolves at shell startup to the
+   sandbox-provided writable temp directory. Falls back to `/tmp` for interactive
+   use outside the sandbox.
+3. **Drop `/etc/environment`.** It does not support shell variable expansion, so
+   it cannot use `$TMPDIR`.
+4. **Add `$TMPDIR/uv-cache` to sandbox `filesystem.allowWrite`** alongside the
+   existing `/tmp/uv-cache` entry, as a belt-and-suspenders measure.
+5. **`mkdir -p` on every shell startup.** Each sandbox session may get a fresh
+   `$TMPDIR`, so the `uv-cache` subdirectory is created at profile load time.
+
+### Consequences
+
+- `uv run`, `uv pip`, `uvx`, and `uv run --with` all work inside the sandbox
+  without manual workarounds.
+- The cache is ephemeral per sandbox session (each may use a different `$TMPDIR`),
+  which is acceptable — UV re-downloads quickly.
+- Requires `--rebuild` to bake the new profile scripts into the image. Existing
+  containers with the old static env var will continue to use `/tmp/uv-cache`
+  (unchanged behavior) until rebuilt.
+
 ## ADR-003: Set theme in project-level settings, not global `.claude.json`
 
 **Date:** 2026-04-03

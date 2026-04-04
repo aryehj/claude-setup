@@ -28,7 +28,7 @@ CONTAINER_MEMORY="${CLAUDE_CONTAINER_MEMORY:-4G}"
 CONTAINER_CPUS="${CLAUDE_CONTAINER_CPUS:-4}"
 IMAGE_STAMP="$HOME/.claude-dev-image-built"
 CLAUDE_CONFIG_DIR="$HOME/.claude-containers/shared"
-TERM_ARGS=(-e "TERM=$TERM" -e "COLORTERM=${COLORTERM:-}" -e "TERM_PROGRAM=${TERM_PROGRAM:-}" -e "UV_CACHE_DIR=/tmp/uv-cache")
+TERM_ARGS=(-e "TERM=$TERM" -e "COLORTERM=${COLORTERM:-}" -e "TERM_PROGRAM=${TERM_PROGRAM:-}")
 
 # ── pre-flight ─────────────────────────────────────────────────────────────────
 if ! command -v container &>/dev/null; then
@@ -81,10 +81,11 @@ if isinstance(data.get('sandbox'), bool):
 sb = data.setdefault('sandbox', {})
 fs = sb.setdefault('filesystem', {})
 aw = fs.setdefault('allowWrite', [])
-if '/tmp/uv-cache' not in aw:
-    aw.append('/tmp/uv-cache')
-    changed = True
-    print(f"==> Added /tmp/uv-cache to sandbox.filesystem.allowWrite in {path}")
+for p in ['/tmp/uv-cache', '$TMPDIR/uv-cache']:
+    if p not in aw:
+        aw.append(p)
+        changed = True
+        print(f"==> Added {p} to sandbox.filesystem.allowWrite in {path}")
 if changed:
     with open(path, 'w') as f:
         json.dump(data, f, indent=2)
@@ -92,7 +93,7 @@ if changed:
 PYEOF
 else
   mkdir -p "$PROJECT_DIR/.claude"
-  printf '{\n  "theme": "light",\n  "sandbox": {\n    "enabled": true,\n    "autoAllowBashIfSandboxed": true,\n    "filesystem": {\n      "allowWrite": ["/tmp/uv-cache"]\n    }\n  }\n}\n' > "$PROJECT_SETTINGS_FILE"
+  printf '{\n  "theme": "light",\n  "sandbox": {\n    "enabled": true,\n    "autoAllowBashIfSandboxed": true,\n    "filesystem": {\n      "allowWrite": ["/tmp/uv-cache", "$TMPDIR/uv-cache"]\n    }\n  }\n}\n' > "$PROJECT_SETTINGS_FILE"
   echo "==> Created $PROJECT_SETTINGS_FILE"
 fi
 
@@ -175,11 +176,18 @@ BASHRC
     ln -sf /root/.local/bin/claude /usr/local/bin/claude
     echo "export PATH=\"\$HOME/.local/bin:\$PATH\"" >> /root/.bashrc
     # UV needs a writable cache dir; /root/.cache is read-only in the sandbox.
-    # Set it everywhere: .bashrc (interactive), /etc/environment (PAM login),
-    # and /etc/profile.d (login shells).
-    echo "export UV_CACHE_DIR=/tmp/uv-cache" >> /root/.bashrc
-    echo "UV_CACHE_DIR=/tmp/uv-cache" >> /etc/environment
-    echo "export UV_CACHE_DIR=/tmp/uv-cache" > /etc/profile.d/uv-cache.sh
+    # The sandbox sets $TMPDIR to a guaranteed-writable directory, but /tmp
+    # itself may be read-only at the mount level inside bubblewrap. Use $TMPDIR
+    # dynamically so UV writes to the sandbox-writable temp dir. Fall back to
+    # /tmp for interactive use outside the sandbox.
+    cat >> /root/.bashrc << 'UVEOF'
+export UV_CACHE_DIR="${TMPDIR:-/tmp}/uv-cache"
+mkdir -p "$UV_CACHE_DIR" 2>/dev/null || true
+UVEOF
+    cat > /etc/profile.d/uv-cache.sh << 'UVEOF'
+export UV_CACHE_DIR="${TMPDIR:-/tmp}/uv-cache"
+mkdir -p "$UV_CACHE_DIR" 2>/dev/null || true
+UVEOF
   '
 
   echo "==> Exporting $IMAGE_TAG"
