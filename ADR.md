@@ -170,3 +170,50 @@ script already creates and migrates. The `container run` entrypoint is now plain
   contains `.credentials.json`). If `.claude.json` turns out to hold state
   required for session continuity, a separate volume mount would need to be
   added.
+
+## ADR-005: Sync skills from upstream repo on new container build
+
+**Date:** 2026-04-04
+**Status:** Accepted
+
+### Context
+
+The `skills/` directory in this repo is the authoritative copy of the Claude
+Code skills we want available in every container. Previously, getting them
+into `~/.claude/skills/` was manual: the README instructed users to `cp -r`
+or symlink each skill into place. Skills drift quickly, and anyone using an
+older copy of the shared `.claude` mount had no way of knowing their skills
+were stale.
+
+The shared mount (`~/.claude-containers/shared/` → `/root/.claude`) already
+centralises skill storage across containers, so pushing updated skills into
+it once per container build propagates to every project.
+
+### Decision
+
+Right before `container run` creates a new container, the script downloads
+the upstream repo tarball (default: `main` branch of `aryehj/start-claude`,
+overridable via `CLAUDE_SKILLS_ARCHIVE_URL`), extracts it, and for each
+directory under the archive's `skills/`:
+
+1. `rm -rf` the matching directory in `~/.claude-containers/shared/skills/`
+2. `cp -R` the upstream version in its place
+
+Skills that exist locally but are absent upstream are left untouched. Fetch
+or extraction failures produce a warning and container creation proceeds.
+
+### Consequences
+
+- Every new container (including `--rebuild`, which deletes the existing
+  container first) picks up the latest upstream skills automatically.
+- Users can iterate on a skill locally (e.g. edit files under
+  `~/.claude-containers/shared/skills/plan/`) only until the next container
+  build clobbers it — local-only edits to synced skills are disposable. Users
+  who want durable customisations should fork the repo and point
+  `CLAUDE_SKILLS_ARCHIVE_URL` at their fork, or name their skill differently
+  so it doesn't collide with an upstream name.
+- The sync requires network access at container-creation time. Offline
+  builds still work but skip the sync with a warning.
+- Re-attaching to an existing container does not trigger a sync, matching
+  the existing invariant that image/container state only changes on new
+  builds.

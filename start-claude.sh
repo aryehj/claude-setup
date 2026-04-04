@@ -221,6 +221,35 @@ echo "    project : $PROJECT_DIR  →  $PROJECT_DIR"
 
 mkdir -p "$CLAUDE_CONFIG_DIR"
 
+# ── sync skills from upstream repo ────────────────────────────────────────────
+# Pulls skills/ from the upstream repo and drops each skill directory into the
+# shared ~/.claude/skills mount. Existing skills with the same name are
+# replaced wholesale; skills not present upstream are left untouched.
+SKILLS_ARCHIVE_URL="${CLAUDE_SKILLS_ARCHIVE_URL:-https://github.com/aryehj/start-claude/archive/refs/heads/main.tar.gz}"
+SKILLS_DEST="$CLAUDE_CONFIG_DIR/skills"
+echo "==> Syncing skills from upstream into $SKILLS_DEST"
+mkdir -p "$SKILLS_DEST"
+SKILLS_TMP=$(mktemp -d)
+if curl -fsSL "$SKILLS_ARCHIVE_URL" -o "$SKILLS_TMP/archive.tar.gz" \
+   && tar -xzf "$SKILLS_TMP/archive.tar.gz" -C "$SKILLS_TMP"; then
+  SKILLS_SRC=("$SKILLS_TMP"/*/skills)
+  SKILLS_SRC="${SKILLS_SRC[0]}"
+  if [[ -d "$SKILLS_SRC" ]]; then
+    for skill_path in "$SKILLS_SRC"/*/; do
+      [[ -d "$skill_path" ]] || continue
+      skill_name=$(basename "$skill_path")
+      rm -rf "$SKILLS_DEST/$skill_name"
+      cp -R "$skill_path" "$SKILLS_DEST/$skill_name"
+      echo "    injected skill: $skill_name"
+    done
+  else
+    echo "    warning: no skills/ directory found in upstream archive" >&2
+  fi
+else
+  echo "    warning: failed to fetch skills from $SKILLS_ARCHIVE_URL (continuing)" >&2
+fi
+rm -rf "$SKILLS_TMP"
+
 container run \
   --name "$CONTAINER_NAME" \
   -it \

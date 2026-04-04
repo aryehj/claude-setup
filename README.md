@@ -84,19 +84,19 @@ This removes the existing container for the project (if any) and the
 
 ## Included skills
 
-The `skills/` directory contains backups of reusable Claude Code skills
-(normally installed at `~/.claude/skills/`). To use them, copy or symlink into
-your global skills directory:
+The `skills/` directory holds reusable Claude Code skills. Whenever
+`start-claude.sh` creates a new container, it downloads the upstream repo
+archive and injects each skill directory into the shared
+`~/.claude-containers/shared/skills/` mount, replacing any existing directory
+with the same name. Skills you've added locally under other names are left
+alone.
 
-```bash
-# Copy a skill
-cp -r skills/cleanup ~/.claude/skills/cleanup
+Override the source with `CLAUDE_SKILLS_ARCHIVE_URL` (point it at a fork, a
+branch tarball, or any `*.tar.gz` whose top-level has a `skills/` directory).
+If the fetch fails, the warning is printed and the container starts anyway.
 
-# Or symlink
-ln -s "$(pwd)/skills/cleanup" ~/.claude/skills/cleanup
-```
-
-Once installed, invoke with `/cleanup` inside any Claude Code session.
+Invoke a synced skill inside any Claude Code session with its slash name, e.g.
+`/cleanup`.
 
 | Skill | What it does |
 |-------|-------------|
@@ -108,4 +108,5 @@ Once installed, invoke with `/cleanup` inside any Claude Code session.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `CLAUDE_CONTAINER_IMAGE` | `debian:bookworm-slim` | Override the base image |
+| `CLAUDE_SKILLS_ARCHIVE_URL` | upstream `main` tarball | Override the source archive for skills sync |
 | `UV_CACHE_DIR` | `${TMPDIR:-/tmp}/uv-cache` | UV cache location (resolved dynamically at shell startup; both `/tmp/uv-cache` and `$TMPDIR/uv-cache` are in the sandbox's `filesystem.allowWrite`) |

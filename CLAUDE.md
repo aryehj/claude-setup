@@ -76,6 +76,17 @@ top-level config file) is **not** persisted. The script does not write to
 `.claude.json`; anything that needs to survive container recreation goes in the
 mounted directory or in project-level `settings.local.json`.
 
+**Skills are synced from the upstream repo on every new-container build.**
+Right before `container run`, the script downloads the repo tarball from
+`$CLAUDE_SKILLS_ARCHIVE_URL` (default: the `main` branch of
+`aryehj/start-claude`), extracts it, and for each directory under the archive's
+`skills/` folder, removes the matching directory under
+`~/.claude-containers/shared/skills/` and copies the upstream version in its
+place. Skills present locally but absent upstream are left untouched — the
+clobber is per-skill-directory, not a wholesale wipe. Fetch failures warn but
+do not abort container creation. This path only runs when a new container is
+being created; re-attach to an existing container skips the sync. See ADR-005.
+
 **Theme is set at the project level, not globally.** The light theme is
 configured in each project's `.claude/settings.local.json` rather than in the
 global `~/.claude.json`. This avoids needing to persist or merge `.claude.json`
