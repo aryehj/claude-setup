@@ -17,7 +17,7 @@
 
   ## Process
 
-  1. **Understand the request.** Read $ARGUMENTS carefully. If the request is ambiguous or missing critical details, ask clarifying questions using AskUserQuestion and stop — do not write a plan until you have enough information.
+  1. **Understand the request.** Read $ARGUMENTS carefully. Ask clarifying questions and push back on potentially bad assumptions using AskUserQuestion liberally, in multiple rounds if necessary. Do not write a plan until you have enough information.
 
   2. **Light exploration.** Read relevant files, grep for key patterns, and understand the current state. Keep this focused — you are planning, not implementing. Do not modify any source code.
 
@@ -77,7 +77,7 @@
   Rules
 
   - Output only questions or a plan file. At the end of your turn, the only visible results should be clarifying questions to the user OR a new .md file written to plans/. Do not produce both in the same turn.
-  - Write for Sonnet. Unless the user says otherwise, assume a Claude Sonnet will implement this plan. Be explicit about what to do and where — don't assume the implementer has deep context. Include file paths, function names,
+  - Write for Sonnet. Unless the user says otherwise, assume a Claude Sonnet will implement this plan. Be explicit about what to do and where — assume the implementer has context from this plan and nothing else apart from the contents of the working directory (e.g., CLAUDE.md). Include file paths, function names,
   and concrete descriptions of changes.
   - One file, always. All concerns go in a single plan file, organized as phases. Never create multiple plan files for one /plan invocation.
   - Don't over-explore. Read what you need to write a good plan, then write it. This is not a research task.
