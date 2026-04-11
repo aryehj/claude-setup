@@ -1,3 +1,25 @@
 .DS_Store
 .claude
 .venv
+
+# Shell dotfiles (sandbox artifacts)
+.bash_profile
+.bashrc
+.gitconfig
+.profile
+.zprofile
+.zshrc
+.ripgreprc
+
+# IDE / tool configs
+.idea
+.vscode
+.mcp.json
+.gitmodules
+
+# Git internals (sandbox artifacts)
+HEAD
+config
+hooks
+objects
+refs
