@@ -306,7 +306,7 @@ path = sys.argv[1]
 with open(path) as f:
     data = json.load(f)
 changed = False
-if not data.get('showThinkingSummaries'):
+if data.get('showThinkingSummaries') is not True:
     data['showThinkingSummaries'] = True
     changed = True
     print(f"==> Enabled showThinkingSummaries in {path}")
