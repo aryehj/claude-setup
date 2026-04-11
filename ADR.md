@@ -24,7 +24,7 @@ often still failing when it forgot the prefix.
 
 Set `UV_CACHE_DIR=/tmp/uv-cache` at multiple levels:
 
-1. **`TERM_ARGS` (`-e UV_CACHE_DIR=/tmp/uv-cache`)** — passed to both
+1. **`CONTAINER_ENV` (`-e UV_CACHE_DIR=/tmp/uv-cache`)** — passed to both
    `container run` and `container exec`. This is the critical path: Claude Code
    inherits the container's environment, and all `bash -c` subprocesses it spawns
    inherit it in turn.
@@ -91,7 +91,7 @@ Add `/tmp/uv-cache` to `sandbox.filesystem.allowWrite` in each project's
 ### Context
 
 ADR-001 hardcoded `UV_CACHE_DIR=/tmp/uv-cache` and passed it as a static env var
-via `TERM_ARGS`. ADR-002 added `/tmp/uv-cache` to the sandbox `allowWrite` list.
+via `CONTAINER_ENV`. ADR-002 added `/tmp/uv-cache` to the sandbox `allowWrite` list.
 In practice, Claude Code's bubblewrap sandbox mounts `/tmp` read-only at the
 filesystem level before the allowlist is evaluated, so writes to `/tmp/uv-cache`
 still failed. Users reported that `uv run --with` (which creates temporary
@@ -102,7 +102,7 @@ this instead of hardcoding `/tmp` resolves both issues.
 
 ### Decision
 
-1. **Remove `UV_CACHE_DIR` from `TERM_ARGS`.** No longer pass it as a static
+1. **Remove `UV_CACHE_DIR` from `CONTAINER_ENV`.** No longer pass it as a static
    container env var.
 2. **Set `UV_CACHE_DIR="${TMPDIR:-/tmp}/uv-cache"` in `.bashrc` and
    `/etc/profile.d/uv-cache.sh`.** The variable resolves at shell startup to the
@@ -263,3 +263,93 @@ inside it would expose it at the wrong path (`/root/.claude/claude.json`).
 - To reset auth state: delete `~/.claude-containers/claude.json` and
   `~/.claude-containers/shared/.credentials.json`, then re-run
   `claude login`.
+
+## ADR-007: Redirect UV project venv via `UV_PROJECT_ENVIRONMENT`
+
+**Date:** 2026-04-07
+**Status:** Accepted
+
+### Context
+
+Projects mounted into containers often have a `.venv` directory created on the
+host (macOS/ARM). The Claude Code agent inside the Linux container sees this
+`.venv`, attempts to use it, and fails — the binaries are wrong platform, paths
+are wrong, and the sandbox may block writes. The agent then wastes cycles trying
+workarounds (manual `--python` flags, prefixing env vars on individual commands,
+or trying to `rm -rf` and recreate the venv in place).
+
+This is a well-known problem in any "mount host project into dev container"
+workflow. UV provides `UV_PROJECT_ENVIRONMENT` for exactly this use case: it
+overrides where `uv sync`, `uv run`, etc. create the project virtual
+environment (default: `.venv` in the project root).
+
+### Decision
+
+1. **Set `UV_PROJECT_ENVIRONMENT="${TMPDIR:-/tmp}/.venv"` in `.bashrc` and
+   `/etc/profile.d/uv-cache.sh`.** Same dynamic `$TMPDIR` resolution pattern
+   as `UV_CACHE_DIR` (ADR-004). The variable resolves at shell startup to the
+   sandbox-provided writable temp directory.
+2. **`mkdir -p` on every shell startup** to ensure the directory exists (same
+   pattern as `UV_CACHE_DIR`).
+3. **Add `/tmp/.venv` and `$TMPDIR/.venv` to `sandbox.filesystem.allowWrite`**
+   in each project's `.claude/settings.local.json`, alongside the existing UV
+   cache entries. Both the default settings block and the migration block are
+   updated.
+
+UV intentionally keeps `UV_PROJECT_ENVIRONMENT` as a user-level environment
+variable rather than a `pyproject.toml` / `uv.toml` setting — a project should
+not be able to direct installs to arbitrary paths on the user's machine. This
+makes the env-var approach the canonical solution.
+
+### Consequences
+
+- `uv sync`, `uv run`, `uv add`, etc. create and use a Linux venv in `$TMPDIR/.venv`
+  instead of the project's `.venv`. The host `.venv` is completely ignored, not
+  deleted.
+- The venv is ephemeral per sandbox session (each may use a different `$TMPDIR`),
+  so `uv sync` must run once per session. This is acceptable — UV installs from
+  cache quickly, and the cache itself persists across commands within a session.
+- Requires `--rebuild` to bake the new profile scripts into the image.
+- Existing project `settings.local.json` files pick up the new `allowWrite`
+  entries automatically on next `start-claude.sh` run (no rebuild needed for
+  the sandbox permissions, only for the env var).
+
+## ADR-009: Set git identity via environment variables, not just gitconfig
+
+**Date:** 2026-04-08
+**Status:** Accepted
+
+### Context
+
+`git config --global` writes to `/root/.gitconfig` during image build. This
+works for direct shell usage but fails inside Claude Code's bubblewrap sandbox,
+which may not expose `/root/.gitconfig` in its mount namespace. When the sandbox
+runs `git commit`, git cannot auto-detect the author identity and the commit
+fails with "Author identity unknown".
+
+### Decision
+
+Set git identity in three layers (matching the existing pattern for other env
+vars):
+
+1. **`git config --global`** — baked into the image for non-sandboxed git.
+2. **`.bashrc` and `/etc/profile.d/git-identity.sh`** — exports
+   `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`, `GIT_COMMITTER_NAME`,
+   `GIT_COMMITTER_EMAIL` so interactive shells have them.
+3. **`CONTAINER_ENV`** — passes the same four variables as container-level env
+   vars so they are inherited from process birth, before shell init.
+
+Git's `GIT_AUTHOR_*` / `GIT_COMMITTER_*` environment variables take precedence
+over all config files, so they work regardless of whether the sandbox mounts
+`/root/.gitconfig`.
+
+### Consequences
+
+- Git commits work inside the bubblewrap sandbox without needing sandbox config
+  changes.
+- The env vars override any repo-level `.gitconfig`. This is acceptable because
+  the container is single-user and all projects should use the same identity.
+- Defaults are `Dev` / `dev@localhost`, overridable at script invocation via
+  `--git-name`/`--git-email` CLI flags or `$GIT_USER_NAME`/`$GIT_USER_EMAIL`
+  env vars.
+- Requires `--rebuild` to bake the new profile scripts into the image.

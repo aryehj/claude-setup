@@ -2,22 +2,32 @@
 # start-claude.sh — spin up a Claude Code dev container for a project
 #
 # Usage:
-#   start-claude.sh [--rebuild] [project-dir] [container-name]
+#   start-claude.sh [--rebuild] [--git-name=NAME] [--git-email=EMAIL]
+#                   [project-dir] [container-name]
 #
 # Defaults:
 #   project-dir    = current directory
 #   container-name = basename of project-dir
+#   git-name       = $GIT_USER_NAME or "Dev"
+#   git-email      = $GIT_USER_EMAIL or "dev@localhost"
 
 set -euo pipefail
 
 # ── args ──────────────────────────────────────────────────────────────────────
 REBUILD=false
+CLI_GIT_NAME=""
+CLI_GIT_EMAIL=""
 POSITIONAL=()
-for arg in "$@"; do
-  case "$arg" in
+while [[ $# -gt 0 ]]; do
+  case "$1" in
     --rebuild) REBUILD=true ;;
-    *) POSITIONAL+=("$arg") ;;
+    --git-name=*) CLI_GIT_NAME="${1#--git-name=}" ;;
+    --git-email=*) CLI_GIT_EMAIL="${1#--git-email=}" ;;
+    --git-name) CLI_GIT_NAME="${2:?--git-name requires a value}"; shift ;;
+    --git-email) CLI_GIT_EMAIL="${2:?--git-email requires a value}"; shift ;;
+    *) POSITIONAL+=("$1") ;;
   esac
+  shift
 done
 
 PROJECT_DIR="${POSITIONAL[0]:-$(pwd)}"
@@ -29,7 +39,17 @@ CONTAINER_CPUS="${CLAUDE_CONTAINER_CPUS:-4}"
 IMAGE_STAMP="$HOME/.claude-dev-image-built"
 CLAUDE_CONFIG_DIR="$HOME/.claude-containers/shared"
 CLAUDE_JSON_FILE="$HOME/.claude-containers/claude.json"
-TERM_ARGS=(-e "TERM=$TERM" -e "COLORTERM=${COLORTERM:-}" -e "TERM_PROGRAM=${TERM_PROGRAM:-}")
+GIT_USER_NAME="${CLI_GIT_NAME:-${GIT_USER_NAME:-Dev}}"
+GIT_USER_EMAIL="${CLI_GIT_EMAIL:-${GIT_USER_EMAIL:-dev@localhost}}"
+CONTAINER_ENV=(
+  -e "TERM=$TERM" -e "COLORTERM=${COLORTERM:-}" -e "TERM_PROGRAM=${TERM_PROGRAM:-}"
+  -e "CLAUDE_CODE_DISABLE_1M_CONTEXT=1"
+  -e "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=1"
+  -e "GIT_AUTHOR_NAME=$GIT_USER_NAME"
+  -e "GIT_AUTHOR_EMAIL=$GIT_USER_EMAIL"
+  -e "GIT_COMMITTER_NAME=$GIT_USER_NAME"
+  -e "GIT_COMMITTER_EMAIL=$GIT_USER_EMAIL"
+)
 
 # ── pre-flight ─────────────────────────────────────────────────────────────────
 if ! command -v container &>/dev/null; then
@@ -64,7 +84,7 @@ fi
 # settings.local.json is gitignored by Claude Code and project-specific.
 PROJECT_SETTINGS_FILE="$PROJECT_DIR/.claude/settings.local.json"
 if [[ -f "$PROJECT_SETTINGS_FILE" ]]; then
-  # Migrate sandbox settings: bool→object form, ensure filesystem.allowWrite
+  # Migrate sandbox settings: bool→object form, ensure filesystem.allowWrite, strict mode
   python3 - "$PROJECT_SETTINGS_FILE" << 'PYEOF'
 import json, sys
 path = sys.argv[1]
@@ -82,11 +102,19 @@ if isinstance(data.get('sandbox'), bool):
 sb = data.setdefault('sandbox', {})
 fs = sb.setdefault('filesystem', {})
 aw = fs.setdefault('allowWrite', [])
-for p in ['/tmp/uv-cache', '$TMPDIR/uv-cache']:
+for p in ['/tmp/uv-cache', '$TMPDIR/uv-cache', '/tmp/.venv', '$TMPDIR/.venv']:
     if p not in aw:
         aw.append(p)
         changed = True
         print(f"==> Added {p} to sandbox.filesystem.allowWrite in {path}")
+if sb.get('failIfUnavailable') is not True:
+    sb['failIfUnavailable'] = True
+    changed = True
+    print(f"==> Set sandbox.failIfUnavailable=true in {path}")
+if sb.get('allowUnsandboxedCommands') is not False:
+    sb['allowUnsandboxedCommands'] = False
+    changed = True
+    print(f"==> Set sandbox.allowUnsandboxedCommands=false in {path}")
 if changed:
     with open(path, 'w') as f:
         json.dump(data, f, indent=2)
@@ -94,7 +122,20 @@ if changed:
 PYEOF
 else
   mkdir -p "$PROJECT_DIR/.claude"
-  printf '{\n  "theme": "light",\n  "sandbox": {\n    "enabled": true,\n    "autoAllowBashIfSandboxed": true,\n    "filesystem": {\n      "allowWrite": ["/tmp/uv-cache", "$TMPDIR/uv-cache"]\n    }\n  }\n}\n' > "$PROJECT_SETTINGS_FILE"
+  cat > "$PROJECT_SETTINGS_FILE" << 'JSONEOF'
+{
+  "theme": "light",
+  "sandbox": {
+    "enabled": true,
+    "autoAllowBashIfSandboxed": true,
+    "failIfUnavailable": true,
+    "allowUnsandboxedCommands": false,
+    "filesystem": {
+      "allowWrite": ["/tmp/uv-cache", "$TMPDIR/uv-cache", "/tmp/.venv", "$TMPDIR/.venv"]
+    }
+  }
+}
+JSONEOF
   echo "==> Created $PROJECT_SETTINGS_FILE"
 fi
 
@@ -102,7 +143,7 @@ fi
 if [[ "$(container inspect "$CONTAINER_NAME" 2>/dev/null)" != "[]" ]]; then
   echo "Container '$CONTAINER_NAME' already exists — attaching."
   container start "$CONTAINER_NAME" 2>/dev/null || true
-  container exec -it -w "$PROJECT_DIR" "${TERM_ARGS[@]}" "$CONTAINER_NAME" /bin/bash
+  container exec -it -w "$PROJECT_DIR" "${CONTAINER_ENV[@]}" "$CONTAINER_NAME" /bin/bash
   exit 0
 fi
 
@@ -160,7 +201,7 @@ BASHRC
     apt-get install -y nodejs
     rm -rf /var/lib/apt/lists/*
 
-    npm install -g npm@latest @anthropic-ai/sandbox-runtime@0.0.46
+    npm install -g npm@latest @anthropic-ai/sandbox-runtime
 
     # ── uv ───────────────────────────────────────────────────────────────────
     # UV_INSTALL_DIR puts the binaries directly into /usr/local/bin, so no
@@ -184,11 +225,40 @@ BASHRC
     cat >> /root/.bashrc << '"'"'UVEOF'"'"'
 export UV_CACHE_DIR="${TMPDIR:-/tmp}/uv-cache"
 mkdir -p "$UV_CACHE_DIR" 2>/dev/null || true
+export UV_PROJECT_ENVIRONMENT="${TMPDIR:-/tmp}/.venv"
+mkdir -p "$UV_PROJECT_ENVIRONMENT" 2>/dev/null || true
 UVEOF
     cat > /etc/profile.d/uv-cache.sh << '"'"'UVEOF'"'"'
 export UV_CACHE_DIR="${TMPDIR:-/tmp}/uv-cache"
 mkdir -p "$UV_CACHE_DIR" 2>/dev/null || true
+export UV_PROJECT_ENVIRONMENT="${TMPDIR:-/tmp}/.venv"
+mkdir -p "$UV_PROJECT_ENVIRONMENT" 2>/dev/null || true
 UVEOF
+
+    # Disable 1M extended context — use standard 200K window.
+    echo 'export CLAUDE_CODE_DISABLE_1M_CONTEXT=1' >> /root/.bashrc
+    echo 'export CLAUDE_CODE_DISABLE_1M_CONTEXT=1' > /etc/profile.d/disable-1m-context.sh
+
+    # Disable adaptive thinking (extended thinking preamble).
+    echo 'export CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=1' >> /root/.bashrc
+    echo 'export CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=1' > /etc/profile.d/disable-adaptive-thinking.sh
+
+    # ── git identity ─────────────────────────────────────────────────────────
+    # Global gitconfig for normal (non-sandboxed) git operations.
+    git config --global user.name "'"$GIT_USER_NAME"'"
+    git config --global user.email "'"$GIT_USER_EMAIL"'"
+    # Environment variables for sandboxed git operations — the bubblewrap
+    # sandbox may not see /root/.gitconfig, but it inherits env vars.
+    echo "export GIT_AUTHOR_NAME=\"'"$GIT_USER_NAME"'\"" >> /root/.bashrc
+    echo "export GIT_AUTHOR_EMAIL=\"'"$GIT_USER_EMAIL"'\"" >> /root/.bashrc
+    echo "export GIT_COMMITTER_NAME=\"'"$GIT_USER_NAME"'\"" >> /root/.bashrc
+    echo "export GIT_COMMITTER_EMAIL=\"'"$GIT_USER_EMAIL"'\"" >> /root/.bashrc
+    cat > /etc/profile.d/git-identity.sh << GITEOF
+export GIT_AUTHOR_NAME="'"$GIT_USER_NAME"'"
+export GIT_AUTHOR_EMAIL="'"$GIT_USER_EMAIL"'"
+export GIT_COMMITTER_NAME="'"$GIT_USER_NAME"'"
+export GIT_COMMITTER_EMAIL="'"$GIT_USER_EMAIL"'"
+GITEOF
   '
 
   echo "==> Exporting $IMAGE_TAG"
@@ -226,6 +296,37 @@ mkdir -p "$CLAUDE_CONFIG_DIR"
 # oauthAccount and other auth state that Claude Code writes outside ~/.claude,
 # so it needs to survive --rebuild alongside ~/.claude/.credentials.json.
 [[ -f "$CLAUDE_JSON_FILE" ]] || echo '{}' > "$CLAUDE_JSON_FILE"
+
+# Ensure global user settings are configured.
+GLOBAL_SETTINGS_FILE="$CLAUDE_CONFIG_DIR/settings.json"
+if [[ -f "$GLOBAL_SETTINGS_FILE" ]]; then
+  python3 - "$GLOBAL_SETTINGS_FILE" << 'PYEOF'
+import json, sys
+path = sys.argv[1]
+with open(path) as f:
+    data = json.load(f)
+changed = False
+if not data.get('showThinkingSummaries'):
+    data['showThinkingSummaries'] = True
+    changed = True
+    print(f"==> Enabled showThinkingSummaries in {path}")
+if data.get('coauthorTag') != 'none':
+    data['coauthorTag'] = 'none'
+    changed = True
+    print(f"==> Disabled coauthorTag in {path}")
+if data.get('effortLevel') != 'medium':
+    data['effortLevel'] = 'medium'
+    changed = True
+    print(f"==> Set effortLevel to medium in {path}")
+if changed:
+    with open(path, 'w') as f:
+        json.dump(data, f, indent=2)
+        f.write('\n')
+PYEOF
+else
+  echo '{"showThinkingSummaries": true, "coauthorTag": "none", "effortLevel": "medium"}' > "$GLOBAL_SETTINGS_FILE"
+  echo "==> Created $GLOBAL_SETTINGS_FILE with showThinkingSummaries, coauthorTag disabled, effortLevel medium"
+fi
 
 # ── sync skills from upstream repo ────────────────────────────────────────────
 # Pulls skills/ from the upstream repo and drops each skill directory into the
@@ -265,6 +366,6 @@ container run \
   -v "$CLAUDE_CONFIG_DIR:/root/.claude" \
   -v "$CLAUDE_JSON_FILE:/root/.claude.json" \
   -w "$PROJECT_DIR" \
-  "${TERM_ARGS[@]}" \
+  "${CONTAINER_ENV[@]}" \
   "$IMAGE_TAG" \
   bash

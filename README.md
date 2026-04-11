@@ -32,6 +32,12 @@ start-claude.sh ~/projects/my-app
 
 # Explicit project dir + container name
 start-claude.sh ~/projects/my-app my-app
+
+# Custom git identity for commits
+start-claude.sh --git-name "Jane" --git-email "jane@example.com"
+
+# Equals form also works
+start-claude.sh --git-name=Jane --git-email=jane@example.com ~/projects/my-app
 ```
 
 The script starts the container service automatically if it isn't already
@@ -110,4 +116,6 @@ Invoke a synced skill inside any Claude Code session with its slash name, e.g.
 |----------|---------|-------------|
 | `CLAUDE_CONTAINER_IMAGE` | `debian:bookworm-slim` | Override the base image |
 | `CLAUDE_SKILLS_ARCHIVE_URL` | upstream `main` tarball | Override the source archive for skills sync |
+| `GIT_USER_NAME` | `Dev` | Git author/committer name (overridden by `--git-name` flag) |
+| `GIT_USER_EMAIL` | `dev@localhost` | Git author/committer email (overridden by `--git-email` flag) |
 | `UV_CACHE_DIR` | `${TMPDIR:-/tmp}/uv-cache` | UV cache location (resolved dynamically at shell startup; both `/tmp/uv-cache` and `$TMPDIR/uv-cache` are in the sandbox's `filesystem.allowWrite`) |

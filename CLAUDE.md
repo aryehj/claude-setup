@@ -64,7 +64,17 @@ automatically). Both `/tmp/uv-cache` and `$TMPDIR/uv-cache` are in the sandbox
 `uv run --with` which creates temporary virtual environments in `$TMPDIR`.
 See ADR-001 in `ADR.md`.
 
-**`TERM`, `COLORTERM`, and `TERM_PROGRAM` are forwarded into the container.** Without these, Claude Code falls back to a lower color mode (16 or 256 colors) and renders very differently from the host. Both `container run` (new container) and `container exec` (re-attach) pass them via `TERM_ARGS`.
+**`UV_PROJECT_ENVIRONMENT` redirects venvs to `${TMPDIR:-/tmp}/.venv`.**
+Projects mounted from the host often have a `.venv` with macOS binaries that
+are unusable inside the Linux container. `UV_PROJECT_ENVIRONMENT` tells UV
+where to create the project virtual environment instead of the default `.venv`
+in the project root. Set in `.bashrc` and `/etc/profile.d/` using the same
+dynamic `$TMPDIR` pattern as `UV_CACHE_DIR`. The host `.venv` is ignored, not
+deleted. Both `/tmp/.venv` and `$TMPDIR/.venv` are in the sandbox
+`filesystem.allowWrite` list. The venv is ephemeral per sandbox session, so
+`uv sync` runs once per session. See ADR-007 in `ADR.md`.
+
+**`TERM`, `COLORTERM`, and `TERM_PROGRAM` are forwarded into the container.** Without these, Claude Code falls back to a lower color mode (16 or 256 colors) and renders very differently from the host. Both `container run` (new container) and `container exec` (re-attach) pass them via `CONTAINER_ENV`.
 
 **`~/.claude` is shared across all containers via a host volume mount.**
 `~/.claude-containers/shared/` on the host is mounted to `/root/.claude` inside
@@ -91,11 +101,57 @@ clobber is per-skill-directory, not a wholesale wipe. Fetch failures warn but
 do not abort container creation. This path only runs when a new container is
 being created; re-attach to an existing container skips the sync. See ADR-005.
 
+**1M extended context is disabled; Claude Code uses the standard 200K window.**
+The `CLAUDE_CODE_DISABLE_1M_CONTEXT=1` environment variable is set in `.bashrc`,
+`/etc/profile.d/`, and passed as a container-level env var via `CONTAINER_ENV` to
+prevent Claude Code from using the 1M context option. The `CONTAINER_ENV` path
+ensures the variable is present from process birth, before shell init runs.
+This keeps the model on its well-tested 200K context window, avoiding potential
+quality degradation observed with the larger window.
+
+**Git identity is set via both `~/.gitconfig` and environment variables.**
+`git config --global` is run during image build so `/root/.gitconfig` exists in
+the image. However, Claude Code's bubblewrap sandbox may not expose
+`/root/.gitconfig`, so the identity is also set via `GIT_AUTHOR_NAME`,
+`GIT_AUTHOR_EMAIL`, `GIT_COMMITTER_NAME`, and `GIT_COMMITTER_EMAIL` environment
+variables — in `.bashrc`, `/etc/profile.d/git-identity.sh`, and `CONTAINER_ENV`.
+The env vars override gitconfig and work regardless of sandbox mount topology.
+Defaults are `Dev` / `dev@localhost`. Priority order (highest first):
+`--git-name`/`--git-email` CLI flags, `$GIT_USER_NAME`/`$GIT_USER_EMAIL` env
+vars, hardcoded defaults.
+
+**`showThinkingSummaries` is enabled in global user settings.** The script
+ensures `showThinkingSummaries: true` is set in `~/.claude/settings.json`
+(which lives on the host at `~/.claude-containers/shared/settings.json` and is
+shared across all containers via the volume mount). If the file exists, the
+setting is merged in; if not, a new file is created. This makes Claude Code's
+thinking process visible in the transcript.
+
+**`effortLevel` defaults to medium in global user settings.** The script sets
+`effortLevel: "medium"` in `~/.claude/settings.json` alongside the other global
+settings. This is set at the global level (not via environment variable) so that
+individual projects can override it by setting `"effortLevel"` in their
+`.claude/settings.local.json` — project settings take precedence over global
+settings. The env var `CLAUDE_CODE_EFFORT_LEVEL` is intentionally not used
+because it takes highest priority and would prevent per-project overrides.
+
+**Sandbox is configured in strict mode.** The project-level
+`settings.local.json` sets `sandbox.failIfUnavailable: true` (hard-fail if
+the sandbox cannot start, instead of silently degrading) and
+`sandbox.allowUnsandboxedCommands: false` (block any bash command that cannot
+be sandboxed — no escape hatch). `autoAllowBashIfSandboxed` remains `true` so
+sandboxed commands run without a permission prompt. The migration block adds
+these settings to existing files that lack them.
+
 **Theme is set at the project level, not globally.** The light theme is
 configured in each project's `.claude/settings.local.json` rather than in the
 global `~/.claude.json`. This avoids needing to persist or merge `.claude.json`
 across container lifecycles. The migration block in the settings injection
 section adds `"theme": "light"` to existing settings files that lack it.
+
+## Commit style
+
+Do NOT include `Co-Authored-By` lines in commit messages.
 
 ## Making changes
 
