@@ -3,6 +3,8 @@
   description: Explore the codebase and write implementation plans to /plans as markdown files
   disable-model-invocation: true
   argument-hint: "<what to plan>"
+  model: claude-opus-4-5
+  effort: high
   allowed-tools:
     - Read
     - Glob
@@ -21,7 +23,9 @@
 
   2. **Light exploration.** Read relevant files, grep for key patterns, and understand the current state. Keep this focused — you are planning, not implementing. Do not modify any source code.
 
-  3. **Write the plan.** Create a single markdown file in the `plans/` directory at the project root (create the directory if it doesn't exist). Name the file with a short kebab-case slug describing the work (e.g.,
+  3. **Light research, if warranted.** Find and understand key research on underlying concepts that might be useful for plan construction. Do just enough research – you are trying to build something effectively, not get a PhD. 
+
+  4. **Write the plan.** Create a single markdown file in the `plans/` directory at the project root (create the directory if it doesn't exist). Name the file with a short kebab-case slug describing the work (e.g.,
   `add-caching.md`, `fix-auth-race-condition.md`). If $ARGUMENTS describes multiple independent concerns, organize them as separate phases within this one file — do not create multiple files.
 
   ## Plan format
@@ -77,7 +81,7 @@
   Rules
 
   - Output only questions or a plan file. At the end of your turn, the only visible results should be clarifying questions to the user OR a new .md file written to plans/. Do not produce both in the same turn.
-  - Write for Sonnet. Unless the user says otherwise, assume a Claude Sonnet will implement this plan. Be explicit about what to do and where — assume the implementer has context from this plan and nothing else apart from the contents of the working directory (e.g., CLAUDE.md). Include file paths, function names,
+  - Write for Sonnet. Assume a Claude Sonnet will implement this plan. Be explicit about what to do and where — assume the implementer has context from this plan and nothing else apart from the contents of the working directory (e.g., CLAUDE.md). Include file paths, function names,
   and concrete descriptions of changes.
   - One file, always. All concerns go in a single plan file, organized as phases. Never create multiple plan files for one /plan invocation.
   - Don't over-explore. Read what you need to write a good plan, then write it. This is not a research task.
