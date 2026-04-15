@@ -332,23 +332,24 @@ start_colima_vm() {
 # Run a command inside the Colima VM.
 #
 # SSH passes the remote command as a single string (the server re-tokenizes
-# it), so naively forwarding argv breaks any argument that contains spaces
-# or shell metacharacters — in particular Go templates like
-# '{{(index .IPAM.Config 0).Gateway}}'. Shell-quote each arg with printf %q
-# before joining so the remote shell reconstructs the intended argv.
+# it), and additionally re-quotes whatever single string we hand it, so any
+# attempt to pre-join with printf %q ends up double-quoted into a single
+# literal word on the remote side. Bypass colima's argv handling entirely by
+# piping the command line in via stdin — colima ssh hands stdin straight to
+# the remote shell with no extra quoting.
 vm_ssh() {
   local cmd="" a
   for a in "$@"; do
     cmd+=" $(printf '%q' "$a")"
   done
-  colima ssh -p "$COLIMA_PROFILE" -- "$cmd"
+  vm_sh "$cmd"
 }
 
 # Variant that takes a complete shell command line as a single argument and
-# runs it through `sh -c` in the VM. Use when you want shell pipelines,
-# redirections, or heredocs evaluated remotely.
+# runs it in the VM. Use when you want shell pipelines, redirections, or
+# heredocs evaluated remotely.
 vm_sh() {
-  colima ssh -p "$COLIMA_PROFILE" -- "sh -c $(printf '%q' "$1")"
+  printf '%s\n' "$1" | colima ssh -p "$COLIMA_PROFILE" -- bash
 }
 
 # ── --rebuild: optionally destroy the Colima VM before starting it ───────────
@@ -466,10 +467,20 @@ CONF
 
 generate_filter_file "$TMP_WORK/filter"
 
-# Ship both files into the VM in one pass. `colima ssh` is a bit awkward with
-# stdin piping; tar + base64 is the reliable portable trick.
-(cd "$TMP_WORK" && tar -cf - tinyproxy.conf filter) | base64 | \
-  vm_ssh sudo sh -c 'base64 -d | tar -xf - -C /tmp && install -m 644 /tmp/tinyproxy.conf /etc/tinyproxy/tinyproxy.conf && install -m 644 /tmp/filter /etc/tinyproxy/filter && rm -f /tmp/tinyproxy.conf /tmp/filter'
+# Ship both files into the VM. Embed the tarball as a base64 heredoc inside
+# the remote script so we don't need to pipe stdin alongside the command.
+TINYPROXY_PAYLOAD=$( (cd "$TMP_WORK" && tar -cf - tinyproxy.conf filter) | base64 )
+vm_sh "$(cat <<VMSH
+set -e
+base64 -d > /tmp/tinyproxy-stage.tar <<'__B64__'
+$TINYPROXY_PAYLOAD
+__B64__
+sudo tar -xf /tmp/tinyproxy-stage.tar -C /tmp
+sudo install -m 644 /tmp/tinyproxy.conf /etc/tinyproxy/tinyproxy.conf
+sudo install -m 644 /tmp/filter /etc/tinyproxy/filter
+rm -f /tmp/tinyproxy.conf /tmp/filter /tmp/tinyproxy-stage.tar
+VMSH
+)"
 
 # Enable and (re)start/reload tinyproxy. On first run, enable+start; otherwise
 # reload to pick up filter changes without interrupting in-flight connections.
@@ -540,8 +551,16 @@ FWEOF
 chmod +x "$TMP_WORK/firewall-apply.sh"
 
 echo "==> Applying firewall rules in VM"
-base64 < "$TMP_WORK/firewall-apply.sh" | \
-  vm_ssh sh -c 'base64 -d > /tmp/firewall-apply.sh && sh /tmp/firewall-apply.sh && rm -f /tmp/firewall-apply.sh'
+FIREWALL_PAYLOAD=$(base64 < "$TMP_WORK/firewall-apply.sh")
+vm_sh "$(cat <<VMSH
+set -e
+base64 -d > /tmp/firewall-apply.sh <<'__B64__'
+$FIREWALL_PAYLOAD
+__B64__
+sh /tmp/firewall-apply.sh
+rm -f /tmp/firewall-apply.sh
+VMSH
+)"
 
 # ── --reload-allowlist: fast-path exit ───────────────────────────────────────
 if $RELOAD_ALLOWLIST; then
