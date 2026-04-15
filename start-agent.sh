@@ -81,7 +81,8 @@ PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)"
 # Accept "8", "8G", "8GB" (any case); normalize to an integer GiB that
 # `colima start --memory` expects.
 normalize_gib() {
-  local raw="${1,,}"
+  local raw
+  raw="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
   raw="${raw// /}"
   raw="${raw%gib}"
   raw="${raw%gb}"
