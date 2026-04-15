@@ -6,13 +6,15 @@ using Apple Containers. One script, one container per project.
 ## Layout
 
 ```
-start-claude.sh  — main script; sets up image, creates and attaches container
-skills/          — reusable Claude Code skills (back up of ~/.claude/skills/)
-plans/           — implementation plans written by /plan skill
-ROADMAP.md       — planned work
-README.md        — usage reference
-ADR.md           — architecture decision records
-CLAUDE.md        — this file
+start-claude.sh              — Apple Containers path; per-project microVM with Claude Code
+start-agent.sh               — Colima path; shared VM + container with Claude Code + OpenCode + VM-level egress allowlist
+dockerfiles/                 — Dockerfiles built by start-agent.sh (claude-agent.Dockerfile)
+skills/                      — reusable Claude Code skills (back up of ~/.claude/skills/)
+plans/                       — implementation plans written by /plan skill
+ROADMAP.md                   — planned work
+README.md                    — usage reference
+ADR.md                       — architecture decision records
+CLAUDE.md                    — this file
 ```
 
 ## What the script does
@@ -149,6 +151,76 @@ global `~/.claude.json`. This avoids needing to persist or merge `.claude.json`
 across container lifecycles. The migration block in the settings injection
 section adds `"theme": "light"` to existing settings files that lack it.
 
+## start-agent.sh key decisions
+
+`start-agent.sh` is a sibling to `start-claude.sh`, not a replacement. It runs
+both Claude Code and OpenCode on top of a single shared Colima VM and a
+single shared docker container, with a VM-level egress allowlist the
+in-container LLM cannot modify, and routes local inference to Ollama on
+the macOS host.
+
+**Colima, one shared VM + one shared container.** The `claude-agent` Colima
+profile hosts a single `claude-agent` docker container. `$(pwd)` is bind-
+mounted at the same path on both sides at launch; different project dirs
+recreate the container rather than coexisting. Default sizing 8 GiB /
+6 CPUs, overridable via `CLAUDE_AGENT_MEMORY` / `CLAUDE_AGENT_CPUS` env vars
+and `--memory=` / `--cpus=` CLI flags.
+
+**Dockerfile, not an inline heredoc.** Unlike `start-claude.sh`, the agent
+image is built from `dockerfiles/claude-agent.Dockerfile` via
+`docker build`. More readable, cacheable per-layer, and easier to iterate
+on. The Dockerfile mirrors the existing setup plus a global
+`npm install -g opencode-ai@latest`.
+
+**Egress allowlist enforced by in-VM tinyproxy + DOCKER-USER iptables.**
+tinyproxy runs as a systemd service inside the Colima VM (not inside the
+container), bound to the docker bridge gateway, with
+`FilterDefaultDeny Yes` and a regex filter file generated from the host-
+side allowlist. iptables rules in the `DOCKER-USER` chain allow only:
+established/related return traffic, container → in-VM tinyproxy, container
+→ macOS host Ollama port (11434), and container → bridge DNS. Everything
+else from the bridge CIDR is REJECTed. Rules are tagged
+`-m comment --comment claude-agent` and re-applied on every script run
+(no state drift, no `iptables-persistent`, no systemd unit). See ADR-010.
+
+**Allowlist file on the host, not in the repo.**
+`~/.claude-agent/allowlist.txt` is seeded on first run with a permissive
+dev/research list. The user edits it on the macOS host; applying changes
+is a ~2s `start-agent.sh --reload-allowlist` fast path that regenerates
+the tinyproxy filter and sends SIGHUP without touching the container. The
+LLM inside the container has no write path to the allowlist.
+
+**Ollama via host networking.** `HOST_IP` is discovered at launch from the
+VM's default route (under `colima start --network-address`, that's the
+macOS host). The container is pointed at `http://$HOST_IP:11434` via the
+`OLLAMA_HOST` env var, and the iptables allowlist has a dedicated RETURN
+rule for that destination. On first-time setup the user runs
+`launchctl setenv OLLAMA_HOST 0.0.0.0:11434` once on the host. Ollama
+preflight failures warn but do not block startup.
+
+**OpenCode Ollama provider via `opencode.json` injection.** OpenCode's
+config lives at `~/.config/opencode/opencode.json`; the script writes/
+migrates an `ollama` provider entry there using
+`@ai-sdk/openai-compatible` with
+`baseURL: http://$HOST_IP:11434/v1`. Config and data dirs
+(`~/.claude-agent/opencode-config`, `~/.claude-agent/opencode-data`)
+are bind-mounted into the container to persist credentials and state.
+
+**Shared `~/.claude` state with `start-claude.sh`.** The same
+`~/.claude-containers/shared/` directory and `~/.claude-containers/claude.json`
+file are mounted so auth state, global settings, and synced skills are
+reused across both scripts. Run only one at a time to avoid stomping.
+
+**`--rebuild` semantics.** Removes the image and container non-
+interactively. Deleting the Colima VM itself requires an additional `y`
+confirmation prompt, because VM deletion wipes every image in the VM's
+docker runtime and is not reversible — a meaningful divergence from
+`start-claude.sh`, where `container rm` only affects one microVM.
+
+**`host.docker.internal:host-gateway` is set belt-and-suspenders** on
+`docker run` so tools that hard-code the name resolve to the host even on
+Colima, where the mapping is not automatic.
+
 ## Commit style
 
 Do NOT include `Co-Authored-By` lines in commit messages.
@@ -165,3 +237,17 @@ start-claude.sh --rebuild
 
 This removes the existing project container (if any) and the `claude-dev:latest`
 image, then rebuilds from scratch.
+
+For `start-agent.sh`, the image is built from
+`dockerfiles/claude-agent.Dockerfile`. Edit the Dockerfile for image-level
+changes; edit `start-agent.sh` for host-side orchestration, firewall, or
+allowlist-handling changes. After either, run:
+
+```bash
+start-agent.sh --rebuild
+```
+
+which removes `claude-agent:latest` and the container, then rebuilds. An
+additional confirmation prompt offers to delete the Colima VM too — only
+say yes if you want to start over from a clean VM (loses everything else
+inside the VM's docker runtime).

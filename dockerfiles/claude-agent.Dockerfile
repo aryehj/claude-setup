@@ -1,0 +1,96 @@
+# syntax=docker/dockerfile:1.6
+#
+# claude-agent base image — Debian bookworm with Claude Code + OpenCode CLIs,
+# Node LTS, uv, git, ripgrep, fd, jq, and Claude Code sandbox dependencies.
+# Built by start-agent.sh into Colima's docker runtime as claude-agent:latest.
+#
+# Mirrors the setup embedded in start-claude.sh so both scripts produce a
+# functionally equivalent Claude Code environment; the only additions here are
+# the OpenCode CLI and the proxy-aware env knobs for the VM-level allowlist.
+
+FROM debian:bookworm-slim
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PATH="/root/.local/bin:/usr/local/bin:/usr/bin:/bin"
+
+# ── system packages ──────────────────────────────────────────────────────────
+RUN apt-get update -qq \
+ && apt-get install -y --no-install-recommends \
+      bash curl wget git ca-certificates gnupg \
+      build-essential python3 python3-pip \
+      jq ripgrep fd-find unzip \
+      bubblewrap socat libseccomp2 libseccomp-dev \
+ && apt-get upgrade -y \
+ && rm -rf /var/lib/apt/lists/* \
+ && touch /var/lib/apt/last-upgrade
+
+# ── apt staleness warning (fires on every shell attach) ──────────────────────
+RUN cat >> /etc/bash.bashrc <<'BASHRC'
+if [[ -f /var/lib/apt/last-upgrade ]]; then
+  _apt_age=$(( ($(date +%s) - $(date -r /var/lib/apt/last-upgrade +%s)) / 86400 ))
+  if (( _apt_age >= 7 )); then
+    echo "Warning: apt packages are ${_apt_age} days old — run: apt-get update && apt-get upgrade"
+  fi
+  unset _apt_age
+fi
+BASHRC
+
+# ── Node.js (LTS) + global npm packages ──────────────────────────────────────
+RUN curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - \
+ && apt-get install -y nodejs \
+ && rm -rf /var/lib/apt/lists/* \
+ && npm install -g npm@latest @anthropic-ai/sandbox-runtime
+
+# ── uv ───────────────────────────────────────────────────────────────────────
+# UV_INSTALL_DIR puts binaries directly in /usr/local/bin, so no PATH fixup and
+# no "add to PATH" warning.
+RUN curl -LsSf https://astral.sh/uv/install.sh | UV_INSTALL_DIR=/usr/local/bin sh
+
+# ── Claude Code CLI ──────────────────────────────────────────────────────────
+# The official installer drops the binary in ~/.local/bin; symlink into
+# /usr/local/bin so it's reachable regardless of login-shell mode. Also append
+# ~/.local/bin to PATH in .bashrc so the binary itself does not warn at startup.
+RUN curl -fsSL https://claude.ai/install.sh | bash \
+ && ln -sf /root/.local/bin/claude /usr/local/bin/claude \
+ && echo 'export PATH="$HOME/.local/bin:$PATH"' >> /root/.bashrc
+
+# ── OpenCode CLI ─────────────────────────────────────────────────────────────
+# Installed via the official npm package (opencode-ai). Keeps the install in
+# lockstep with the npm version the user would get on the host and avoids a
+# separate curl-pipe installer. The binary is named `opencode`.
+RUN npm install -g opencode-ai@latest
+
+# ── UV cache + project venv redirects (dynamic $TMPDIR) ──────────────────────
+# Claude Code's bubblewrap sandbox mounts /root/.cache read-only and /tmp
+# read-only at the mount layer, but exports a writable $TMPDIR. Resolve both
+# UV_CACHE_DIR and UV_PROJECT_ENVIRONMENT at shell startup rather than bake in
+# a static path. See ADR-001 and ADR-007 in ADR.md.
+RUN cat > /etc/profile.d/uv-cache.sh <<'UVEOF'
+export UV_CACHE_DIR="${TMPDIR:-/tmp}/uv-cache"
+mkdir -p "$UV_CACHE_DIR" 2>/dev/null || true
+export UV_PROJECT_ENVIRONMENT="${TMPDIR:-/tmp}/.venv"
+mkdir -p "$UV_PROJECT_ENVIRONMENT" 2>/dev/null || true
+UVEOF
+
+RUN cat >> /root/.bashrc <<'UVEOF'
+export UV_CACHE_DIR="${TMPDIR:-/tmp}/uv-cache"
+mkdir -p "$UV_CACHE_DIR" 2>/dev/null || true
+export UV_PROJECT_ENVIRONMENT="${TMPDIR:-/tmp}/.venv"
+mkdir -p "$UV_PROJECT_ENVIRONMENT" 2>/dev/null || true
+UVEOF
+
+# ── Claude Code env knobs ────────────────────────────────────────────────────
+RUN echo 'export CLAUDE_CODE_DISABLE_1M_CONTEXT=1'       >  /etc/profile.d/disable-1m-context.sh \
+ && echo 'export CLAUDE_CODE_DISABLE_1M_CONTEXT=1'       >> /root/.bashrc \
+ && echo 'export CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=1' >  /etc/profile.d/disable-adaptive-thinking.sh \
+ && echo 'export CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=1' >> /root/.bashrc
+
+# ── git identity placeholders ────────────────────────────────────────────────
+# Real values are injected at `docker run` time via GIT_AUTHOR_* / GIT_COMMITTER_*
+# env vars (see start-agent.sh). The gitconfig lines below exist so direct git
+# usage works outside any sandbox that might not expose the env vars.
+RUN git config --global user.name  "Dev" \
+ && git config --global user.email "dev@localhost"
+
+WORKDIR /root
+CMD ["/bin/bash"]

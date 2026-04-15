@@ -314,6 +314,75 @@ makes the env-var approach the canonical solution.
   entries automatically on next `start-claude.sh` run (no rebuild needed for
   the sandbox permissions, only for the env var).
 
+## ADR-010: start-agent: in-VM tinyproxy + DOCKER-USER iptables for egress allowlist
+
+**Date:** 2026-04-15
+**Status:** Accepted
+
+### Context
+
+`start-agent.sh` (sibling to `start-claude.sh`) runs both Claude Code and
+OpenCode in a shared Colima-hosted docker container, and needs a network
+egress allowlist that the in-container LLM cannot modify. Several placements
+were possible:
+
+1. **Host-side pf + host-side proxy.** Strongest isolation — the rules live
+   two VM boundaries away from the container. But pfctl anchors, launchd
+   plists for the proxy, vmnet CIDR discovery, and `sudo` for every reload
+   all bleed setup pain into the user's macOS install.
+2. **In-container iptables + in-container proxy.** Trivially simple, but
+   trivially bypassable: the LLM is `root` inside the container by default,
+   and a single `iptables -F` (or editing the proxy config) undoes it.
+3. **In-VM iptables (DOCKER-USER) + in-VM tinyproxy.** Rules live outside
+   the container's network namespace, inside a Lima VM the container cannot
+   reach without a container escape plus VM root — two jumps outside any
+   realistic behavioral threat model, with none of the host-side setup
+   overhead of option 1.
+
+### Decision
+
+Option 3.
+
+- **tinyproxy** runs as a systemd service inside the Colima VM, bound to the
+  docker bridge gateway IP (discovered at script time via
+  `docker network inspect bridge`). Config: `FilterDefaultDeny Yes`,
+  `FilterExtended Yes`, `FilterURLs No`, and a `Filter` file of anchored
+  regexes (`(^|\.)domain\.tld$`) generated on the host from
+  `~/.claude-agent/allowlist.txt`. The filter applies to the hostname
+  portion of HTTPS `CONNECT` requests as well as plain HTTP.
+- **iptables** rules are inserted into docker's `DOCKER-USER` chain, which
+  the docker daemon explicitly leaves alone on restart. Four RETURN rules
+  (established/related, proxy port, host Ollama port, bridge DNS) followed
+  by a catch-all REJECT for traffic from the bridge CIDR. Every rule is
+  tagged with `-m comment --comment claude-agent` so the reload path can
+  remove only its own rules without disturbing any other user rules.
+- **Re-apply on every run** instead of persisting. The firewall script is
+  regenerated on the host and shipped into the VM via `colima ssh` base64
+  on every invocation. No state drift between "rules the host script thinks
+  are active" and "rules actually active after a VM reboot." The cost is a
+  ~1s colima-ssh round trip at the start of every launch.
+- **Allowlist lives at `~/.claude-agent/allowlist.txt`** on the macOS host,
+  plain text, one domain per line, suffix matching. `--reload-allowlist`
+  regenerates the filter and reloads tinyproxy (SIGHUP) without touching
+  the running container — a ~2s fast path.
+
+### Consequences
+
+- The LLM inside the container has no write path to the iptables rules or
+  the allowlist. Modifying either requires a container escape plus VM root.
+- All outbound traffic except the established-return path, the proxy port,
+  the Ollama port, and DNS to the bridge gateway is REJECTed at the VM
+  level. Applications inside the container that don't honor `HTTPS_PROXY` /
+  `HTTP_PROXY` will simply fail to reach anything — an acceptable price,
+  and arguably a feature (no silent bypass).
+- Every invocation pays a small latency tax (applying firewall rules), in
+  exchange for zero configuration drift.
+- The seed allowlist is intentionally permissive for development and
+  research workflows; users are expected to prune it.
+- Per-rule granularity is coarse (hostname match only). If the allowlist
+  grows past ~200 entries or needs per-path / per-method semantics, squid
+  with `acl ... dstdomain` is the conventional upgrade.
+
 ## ADR-009: Set git identity via environment variables, not just gitconfig
 
 **Date:** 2026-04-08
