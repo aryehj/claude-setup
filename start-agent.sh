@@ -5,10 +5,11 @@
 # claude-agent), one shared docker container (claude-agent), with both the
 # Claude Code and OpenCode CLIs installed. Enforces a VM-level egress
 # allowlist via tinyproxy + iptables DOCKER-USER rules, and routes local
-# inference to an Ollama instance running on the macOS host.
+# inference to Ollama or omlx running on the macOS host.
 #
 # Usage:
 #   start-agent.sh [--rebuild] [--reload-allowlist]
+#                  [--backend=ollama|omlx]
 #                  [--memory=VALUE] [--cpus=N]
 #                  [--git-name=NAME] [--git-email=EMAIL]
 #                  [project-dir]
@@ -22,6 +23,7 @@ CLI_MEMORY=""
 CLI_CPUS=""
 CLI_GIT_NAME=""
 CLI_GIT_EMAIL=""
+CLI_BACKEND=""
 POSITIONAL=()
 
 usage() {
@@ -39,6 +41,7 @@ OPTIONS:
                          Fast path; does not restart the container.
   --memory=VALUE         VM memory (e.g. 8, 8G, 8GB). Default: 8 GiB.
   --cpus=N               VM CPU count. Default: 6.
+  --backend=BACKEND      Local inference backend: ollama (default) or omlx.
   --git-name=NAME        Git author/committer name inside the container.
   --git-email=EMAIL      Git author/committer email inside the container.
   -h, --help             Show this help.
@@ -52,8 +55,11 @@ ALLOWLIST:
 ENVIRONMENT:
   CLAUDE_AGENT_MEMORY    Default VM memory (overridden by --memory).
   CLAUDE_AGENT_CPUS      Default VM CPU count (overridden by --cpus).
+  CLAUDE_AGENT_BACKEND   Default backend (overridden by --backend).
   GIT_USER_NAME          Default git name (overridden by --git-name).
   GIT_USER_EMAIL         Default git email (overridden by --git-email).
+  OMLX_API_KEY           API key for omlx (passed into the container when
+                         --backend=omlx).
 USAGE
 }
 
@@ -69,6 +75,8 @@ while [[ $# -gt 0 ]]; do
     --git-name)          CLI_GIT_NAME="${2:?--git-name requires a value}"; shift ;;
     --git-email=*)       CLI_GIT_EMAIL="${1#--git-email=}" ;;
     --git-email)         CLI_GIT_EMAIL="${2:?--git-email requires a value}"; shift ;;
+    --backend=*)         CLI_BACKEND="${1#--backend=}" ;;
+    --backend)           CLI_BACKEND="${2:?--backend requires a value}"; shift ;;
     -h|--help)           usage; exit 0 ;;
     *)                   POSITIONAL+=("$1") ;;
   esac
@@ -105,6 +113,29 @@ fi
 GIT_USER_NAME="${CLI_GIT_NAME:-${GIT_USER_NAME:-Dev}}"
 GIT_USER_EMAIL="${CLI_GIT_EMAIL:-${GIT_USER_EMAIL:-dev@localhost}}"
 
+BACKEND="${CLI_BACKEND:-${CLAUDE_AGENT_BACKEND:-ollama}}"
+case "$BACKEND" in
+  ollama)
+    INFERENCE_PORT=11434
+    INFERENCE_LABEL="Ollama"
+    ;;
+  omlx)
+    INFERENCE_PORT=8000
+    INFERENCE_LABEL="omlx"
+    ;;
+  *)
+    echo "error: unknown --backend value '$BACKEND'. Must be 'ollama' or 'omlx'." >&2
+    exit 1
+    ;;
+esac
+
+if [[ "$BACKEND" == "omlx" ]]; then
+  OMLX_API_KEY="${OMLX_API_KEY:-}"
+  if [[ -z "$OMLX_API_KEY" ]]; then
+    echo "warning: OMLX_API_KEY not set. omlx requests from the container will fail if the server requires auth." >&2
+  fi
+fi
+
 # ── constants ────────────────────────────────────────────────────────────────
 COLIMA_PROFILE="claude-agent"
 CONTAINER_NAME="claude-agent"
@@ -119,7 +150,6 @@ OPENCODE_DATA_DIR="$HOME/.claude-agent/opencode-data"
 ALLOWLIST_DIR="$HOME/.claude-agent"
 ALLOWLIST_FILE="$ALLOWLIST_DIR/allowlist.txt"
 TINYPROXY_PORT=8888
-OLLAMA_PORT=11434
 
 # ── preflight ────────────────────────────────────────────────────────────────
 if ! command -v colima &>/dev/null; then
@@ -429,7 +459,7 @@ if [[ -z "$HOST_IP" ]]; then
   done
 fi
 if [[ -z "$HOST_IP" ]]; then
-  echo "warning: could not determine the macOS host IP from inside the VM; Ollama connectivity will not work." >&2
+  echo "warning: could not determine the macOS host IP from inside the VM; local inference ($INFERENCE_LABEL) will not work." >&2
   HOST_IP="127.0.0.1"
 fi
 
@@ -499,7 +529,7 @@ BRIDGE_IP="$BRIDGE_IP"
 BRIDGE_CIDR="$BRIDGE_CIDR"
 HOST_IP="$HOST_IP"
 TINYPROXY_PORT="$TINYPROXY_PORT"
-OLLAMA_PORT="$OLLAMA_PORT"
+INFERENCE_PORT="$INFERENCE_PORT"
 
 # Ensure DOCKER-USER exists (docker creates it on fresh daemons, but be safe).
 sudo iptables -N DOCKER-USER 2>/dev/null || true
@@ -528,9 +558,9 @@ sudo iptables -I DOCKER-USER 2 -s "\$BRIDGE_CIDR" -d "\$BRIDGE_IP" \
   -p tcp --dport "\$TINYPROXY_PORT" \
   -m comment --comment claude-agent -j RETURN
 
-# Container -> macOS host Ollama.
+# Container -> macOS host inference server (Ollama / omlx).
 sudo iptables -I DOCKER-USER 3 -s "\$BRIDGE_CIDR" -d "\$HOST_IP" \
-  -p tcp --dport "\$OLLAMA_PORT" \
+  -p tcp --dport "\$INFERENCE_PORT" \
   -m comment --comment claude-agent -j RETURN
 
 # Container -> in-VM DNS (dockerd's embedded resolver lives on 127.0.0.11,
@@ -571,22 +601,49 @@ if $RELOAD_ALLOWLIST; then
   exit 0
 fi
 
-# ── Ollama preflight (non-fatal) ─────────────────────────────────────────────
-echo "==> Probing Ollama at http://$HOST_IP:$OLLAMA_PORT from inside VM"
-if ! vm_ssh curl -sf --max-time 3 "http://$HOST_IP:$OLLAMA_PORT/api/tags" >/dev/null 2>&1; then
-  cat >&2 <<WARN
-warning: Ollama not reachable at http://$HOST_IP:$OLLAMA_PORT from inside the
+# ── inference backend preflight (non-fatal) ──────────────────────────────────
+echo "==> Probing $INFERENCE_LABEL at http://$HOST_IP:$INFERENCE_PORT from inside VM"
+case "$BACKEND" in
+  ollama)
+    if ! vm_ssh curl -sf --max-time 3 "http://$HOST_IP:$INFERENCE_PORT/api/tags" >/dev/null 2>&1; then
+      cat >&2 <<WARN
+warning: Ollama not reachable at http://$HOST_IP:$INFERENCE_PORT from inside the
 Colima VM. Ensure Ollama is running on the macOS host and bound to 0.0.0.0.
 On the host, run once:
-    launchctl setenv OLLAMA_HOST 0.0.0.0:$OLLAMA_PORT
+    launchctl setenv OLLAMA_HOST 0.0.0.0:$INFERENCE_PORT
 and restart the Ollama app. Continuing without local inference.
 WARN
-fi
+    fi
+    ;;
+  omlx)
+    OMLX_CURL_ARGS=(-sf --max-time 3)
+    if [[ -n "${OMLX_API_KEY:-}" ]]; then
+      OMLX_CURL_ARGS+=(-H "Authorization: Bearer $OMLX_API_KEY")
+    fi
+    if ! vm_ssh curl "${OMLX_CURL_ARGS[@]}" "http://$HOST_IP:$INFERENCE_PORT/v1/models" >/dev/null 2>&1; then
+      cat >&2 <<WARN
+warning: omlx not reachable at http://$HOST_IP:$INFERENCE_PORT from inside the
+Colima VM. Ensure omlx is running on the host with:
+    omlx serve --model-dir ~/models
+or via: brew services start omlx
+Continuing without local inference.
+WARN
+    fi
+    ;;
+esac
 
 # ── build the image if missing ───────────────────────────────────────────────
 if ! docker image inspect "$IMAGE_TAG" &>/dev/null; then
   echo "==> Building $IMAGE_TAG from $DOCKERFILE_PATH"
-  docker build -t "$IMAGE_TAG" -f "$DOCKERFILE_PATH" "$DOCKERFILE_DIR"
+  # Build uses --network=host so RUN steps share the VM's network namespace
+  # and bypass the DOCKER-USER bridge firewall. Without this, apt/curl/npm
+  # would hit "no route to host" because the default-deny rule rejects
+  # everything from the bridge CIDR except the tinyproxy allowlist path, and
+  # legacy-builder build ARGs don't reliably forward HTTP_PROXY to every tool
+  # (apt, for one, only consults lowercase http_proxy). Runtime containers
+  # still attach to the bridge and are firewalled normally.
+  docker build --network=host \
+    -t "$IMAGE_TAG" -f "$DOCKERFILE_PATH" "$DOCKERFILE_DIR"
   date +%s > "$IMAGE_STAMP"
 elif [[ -f "$IMAGE_STAMP" ]]; then
   BUILD_TIME=$(cat "$IMAGE_STAMP")
@@ -681,11 +738,12 @@ else
   echo '{"showThinkingSummaries": true, "coauthorTag": "none", "effortLevel": "medium"}' > "$GLOBAL_SETTINGS_FILE"
 fi
 
-# ── inject OpenCode config (Ollama provider) ─────────────────────────────────
+# ── inject OpenCode config (inference provider) ─────────────────────────────
 OPENCODE_CONFIG_FILE="$OPENCODE_CONFIG_DIR/opencode.json"
-python3 - "$OPENCODE_CONFIG_FILE" "http://$HOST_IP:$OLLAMA_PORT/v1" << 'PYEOF'
+python3 - "$OPENCODE_CONFIG_FILE" "$BACKEND" "http://$HOST_IP:$INFERENCE_PORT/v1" "${OMLX_API_KEY:-}" << 'PYEOF'
 import json, os, sys
-path, base_url = sys.argv[1], sys.argv[2]
+path, backend, base_url = sys.argv[1], sys.argv[2], sys.argv[3]
+api_key = sys.argv[4] if len(sys.argv) > 4 else ""
 if os.path.exists(path):
     with open(path) as f:
         try:
@@ -696,13 +754,25 @@ else:
     data = {}
 data.setdefault('$schema', 'https://opencode.ai/config.json')
 providers = data.setdefault('provider', {})
-ollama = providers.setdefault('ollama', {
-    "npm": "@ai-sdk/openai-compatible",
-    "name": "Ollama (host)",
-    "options": {},
-    "models": {},
-})
-ollama.setdefault('options', {})['baseURL'] = base_url
+if backend == "ollama":
+    entry = providers.setdefault('ollama', {
+        "npm": "@ai-sdk/openai-compatible",
+        "name": "Ollama (host)",
+        "options": {},
+        "models": {},
+    })
+    entry.setdefault('options', {})['baseURL'] = base_url
+elif backend == "omlx":
+    entry = providers.setdefault('omlx', {
+        "npm": "@ai-sdk/openai-compatible",
+        "name": "omlx (host)",
+        "options": {},
+        "models": {},
+    })
+    opts = entry.setdefault('options', {})
+    opts['baseURL'] = base_url
+    if api_key:
+        opts['apiKey'] = api_key
 os.makedirs(os.path.dirname(path), exist_ok=True)
 with open(path, 'w') as f:
     json.dump(data, f, indent=2)
@@ -750,11 +820,21 @@ DOCKER_ENV_ARGS=(
   -e "GIT_AUTHOR_EMAIL=$GIT_USER_EMAIL"
   -e "GIT_COMMITTER_NAME=$GIT_USER_NAME"
   -e "GIT_COMMITTER_EMAIL=$GIT_USER_EMAIL"
-  -e "OLLAMA_HOST=http://$HOST_IP:$OLLAMA_PORT"
   -e "HTTPS_PROXY=http://$BRIDGE_IP:$TINYPROXY_PORT"
   -e "HTTP_PROXY=http://$BRIDGE_IP:$TINYPROXY_PORT"
   -e "NO_PROXY=localhost,127.0.0.1,$BRIDGE_IP,$HOST_IP"
 )
+case "$BACKEND" in
+  ollama)
+    DOCKER_ENV_ARGS+=(-e "OLLAMA_HOST=http://$HOST_IP:$INFERENCE_PORT")
+    ;;
+  omlx)
+    DOCKER_ENV_ARGS+=(-e "OMLX_HOST=http://$HOST_IP:$INFERENCE_PORT")
+    if [[ -n "${OMLX_API_KEY:-}" ]]; then
+      DOCKER_ENV_ARGS+=(-e "OMLX_API_KEY=$OMLX_API_KEY")
+    fi
+    ;;
+esac
 
 attach_existing() {
   echo "==> Attaching to existing container '$CONTAINER_NAME'"
@@ -789,7 +869,7 @@ sync_skills
 echo "==> Creating container '$CONTAINER_NAME'"
 echo "    project : $PROJECT_DIR  →  $PROJECT_DIR"
 echo "    proxy   : http://$BRIDGE_IP:$TINYPROXY_PORT  (allowlist: $ALLOWLIST_FILE)"
-echo "    ollama  : http://$HOST_IP:$OLLAMA_PORT"
+echo "    inference: $INFERENCE_LABEL at http://$HOST_IP:$INFERENCE_PORT"
 
 rm -rf "$TMP_WORK"
 trap - EXIT

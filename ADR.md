@@ -422,3 +422,116 @@ over all config files, so they work regardless of whether the sandbox mounts
   `--git-name`/`--git-email` CLI flags or `$GIT_USER_NAME`/`$GIT_USER_EMAIL`
   env vars.
 - Requires `--rebuild` to bake the new profile scripts into the image.
+
+## ADR-011: start-agent: build the image with `docker build --network=host`
+
+**Date:** 2026-04-15
+**Status:** Accepted
+
+### Context
+
+ADR-010's DOCKER-USER egress allowlist rejects every packet from the docker
+bridge CIDR that isn't destined for tinyproxy, host Ollama, or bridge DNS.
+Runtime containers honor `HTTPS_PROXY` and route their traffic through
+tinyproxy, but `docker build` RUN steps also execute inside short-lived
+containers attached to the bridge — and those build containers have no proxy
+env set. The first install step (`apt-get update && apt-get install ...`) hit
+the REJECT rule immediately:
+
+```
+W: Failed to fetch http://deb.debian.org/debian/dists/bookworm/InRelease
+   Could not connect to deb.debian.org:80 — connect (113: No route to host)
+```
+
+Three options to unstick the build:
+
+1. **Route the build through tinyproxy via `--build-arg HTTP_PROXY=...`.**
+   Docker treats the proxy vars as predefined build ARGs and exposes them as
+   env vars during RUN. In practice this is unreliable on the legacy builder:
+   some tools (notably apt) only consult the lowercase `http_proxy`, and
+   propagating both cases through every RUN step means either touching the
+   Dockerfile or writing an `/etc/apt/apt.conf.d/99proxy` shim.
+2. **Temporarily drop the REJECT rule while building, then re-add.** Simple
+   in theory, but introduces a timing window where every bridge-attached
+   container is unfirewalled, plus a cleanup path that has to survive build
+   failures and SIGINT.
+3. **`docker build --network=host`.** RUN steps share the Colima VM's host
+   network namespace. The VM's netns is not subject to the `FORWARD` chain
+   (DOCKER-USER only fires for packets being routed between interfaces), so
+   the build has full egress. Runtime containers still attach to the docker
+   bridge via `docker run` and remain firewalled normally — the `--network`
+   flag applies only to the build.
+
+### Decision
+
+Option 3. `docker build` is invoked with `--network=host` in `start-agent.sh`.
+
+### Consequences
+
+- Build-time network egress is unrestricted. Acceptable because we trust the
+  Dockerfile — it's checked into the repo, the image is rebuilt only on
+  explicit `--rebuild`, and the LLM running at runtime has no write path to
+  the Dockerfile or the build invocation.
+- Runtime egress enforcement is unchanged. Containers created by `docker run`
+  attach to the bridge and pass through `DOCKER-USER` like before; the six
+  smoke tests in `README.md` (default-deny, allowed-via-proxy,
+  denied-via-proxy, Ollama carve-out, env sanity, hot-reload) all pass with
+  this configuration.
+- No Dockerfile changes needed to handle proxies, and no timing window where
+  the bridge is unfirewalled. The whole interaction is local to the
+  `docker build` line.
+- If we ever migrate to BuildKit (the legacy builder is deprecation-warned on
+  every run), the same flag works there too — BuildKit accepts
+  `--network=host` and honors it identically for RUN steps. No lock-in.
+
+## ADR-012: start-agent: omlx as an alternative local inference backend
+
+**Date:** 2026-04-16
+**Status:** Accepted
+
+### Context
+
+`start-agent.sh` hard-coded Ollama as the local inference backend. Ollama
+binds to `localhost` by default; reaching it from the Colima VM requires
+rebinding to `0.0.0.0`, which exposes the model server to every device on
+the user's LAN. The `plans/ollama-host-firewall.md` plan addresses this with
+a host-side pf firewall, but that adds operational complexity (anchor files,
+LaunchDaemons, interface-scoped rules).
+
+[omlx](https://github.com/jundot/omlx) is an MLX-based inference server for
+Apple Silicon with an OpenAI-compatible API and built-in `--api-key` support.
+When started with an API key, omlx returns 401/403 to unauthenticated
+requests, so it can safely bind to `0.0.0.0` without a host-side firewall —
+LAN peers that probe the port get rejected at the application layer.
+
+### Decision
+
+Add omlx as an alternative backend behind `--backend=omlx` (default remains
+`ollama`). A single `case "$BACKEND"` dispatch block governs all
+backend-specific behavior:
+
+1. **Port.** `INFERENCE_PORT` is 11434 for Ollama, 8000 for omlx. All
+   downstream references (iptables carve-out, preflight probe, OpenCode
+   config, container env) use `$INFERENCE_PORT`.
+2. **API key.** `OMLX_API_KEY` from the host env is passed into the
+   container as an env var and written into the OpenCode provider config's
+   `apiKey` field. Missing key is a warning, not a hard error (the user may
+   run omlx without auth during local testing).
+3. **Container env vars.** `OLLAMA_HOST` is only set for the `ollama`
+   backend; `OMLX_HOST` and `OMLX_API_KEY` are set for `omlx`. Neither
+   backend pollutes the other's namespace.
+4. **OpenCode config.** The `ollama` and `omlx` provider entries use
+   separate keys in `opencode.json` and coexist across backend switches.
+5. **Preflight probe.** Ollama probes `/api/tags`; omlx probes `/v1/models`
+   with a Bearer token if the key is set.
+
+### Consequences
+
+- Users on shared networks can use `--backend=omlx` and skip the host-side
+  pf firewall entirely. The `plans/ollama-host-firewall.md` plan is
+  unnecessary when using omlx.
+- No Dockerfile changes. omlx runs on the macOS host; the container reaches
+  it via the same iptables carve-out used for Ollama (just a different port).
+- Adding future backends (llama.cpp, vLLM, etc.) means adding one more
+  `case` branch in the dispatch, one conditional in the env/preflight/config
+  blocks, and one doc section. The pattern scales linearly.

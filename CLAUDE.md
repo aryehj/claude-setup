@@ -156,8 +156,8 @@ section adds `"theme": "light"` to existing settings files that lack it.
 `start-agent.sh` is a sibling to `start-claude.sh`, not a replacement. It runs
 both Claude Code and OpenCode on top of a single shared Colima VM and a
 single shared docker container, with a VM-level egress allowlist the
-in-container LLM cannot modify, and routes local inference to Ollama on
-the macOS host.
+in-container LLM cannot modify, and routes local inference to Ollama or
+omlx on the macOS host.
 
 **Colima, one shared VM + one shared container.** The `claude-agent` Colima
 profile hosts a single `claude-agent` docker container. `$(pwd)` is bind-
@@ -178,7 +178,8 @@ container), bound to the docker bridge gateway, with
 `FilterDefaultDeny Yes` and a regex filter file generated from the host-
 side allowlist. iptables rules in the `DOCKER-USER` chain allow only:
 established/related return traffic, container → in-VM tinyproxy, container
-→ macOS host Ollama port (11434), and container → bridge DNS. Everything
+→ macOS host inference port (11434 for Ollama, 8000 for omlx), and
+container → bridge DNS. Everything
 else from the bridge CIDR is REJECTed. Rules are tagged
 `-m comment --comment claude-agent` and re-applied on every script run
 (no state drift, no `iptables-persistent`, no systemd unit). See ADR-010.
@@ -198,13 +199,27 @@ rule for that destination. On first-time setup the user runs
 `launchctl setenv OLLAMA_HOST 0.0.0.0:11434` once on the host. Ollama
 preflight failures warn but do not block startup.
 
-**OpenCode Ollama provider via `opencode.json` injection.** OpenCode's
+**OpenCode inference provider via `opencode.json` injection.** OpenCode's
 config lives at `~/.config/opencode/opencode.json`; the script writes/
-migrates an `ollama` provider entry there using
-`@ai-sdk/openai-compatible` with
-`baseURL: http://$HOST_IP:11434/v1`. Config and data dirs
-(`~/.claude-agent/opencode-config`, `~/.claude-agent/opencode-data`)
+migrates a provider entry there using `@ai-sdk/openai-compatible` with a
+`baseURL` pointing at the selected backend. For Ollama the provider key is
+`"ollama"` with `baseURL: http://$HOST_IP:11434/v1`; for omlx the key is
+`"omlx"` with `baseURL: http://$HOST_IP:8000/v1` and an `apiKey` field if
+`$OMLX_API_KEY` is set. Both entries can coexist — switching backends
+between runs does not remove the other provider's config. Config and data
+dirs (`~/.claude-agent/opencode-config`, `~/.claude-agent/opencode-data`)
 are bind-mounted into the container to persist credentials and state.
+
+**`--backend=omlx` selects omlx as the local inference server.** Default
+is `ollama`. omlx is an MLX-based inference server for Apple Silicon with
+an OpenAI-compatible API on port 8000 and `--api-key` support. Its API-key
+authentication means no host-side pf firewall is needed (unlike Ollama,
+which requires either `localhost`-only binding or a pf firewall when bound
+to `0.0.0.0`). `OMLX_API_KEY` from the host env is passed into the
+container as both `OMLX_API_KEY` and in the OpenCode config's `apiKey`
+field. `OMLX_HOST` replaces `OLLAMA_HOST` in the container env when using
+this backend. The `CLAUDE_AGENT_BACKEND` env var sets the default; the
+`--backend=` CLI flag overrides it. See ADR-012.
 
 **Shared `~/.claude` state with `start-claude.sh`.** The same
 `~/.claude-containers/shared/` directory and `~/.claude-containers/claude.json`
@@ -220,6 +235,22 @@ docker runtime and is not reversible — a meaningful divergence from
 **`host.docker.internal:host-gateway` is set belt-and-suspenders** on
 `docker run` so tools that hard-code the name resolve to the host even on
 Colima, where the mapping is not automatic.
+
+**`docker build` runs with `--network=host`.** Build-step RUN containers
+attach to the docker bridge by default and inherit the DOCKER-USER REJECT
+rule from ADR-010, so `apt-get update` on Dockerfile step 3 fails with
+"no route to host". `--network=host` puts the build in the VM's host netns,
+which bypasses the `FORWARD` chain entirely. Runtime containers still attach
+to the bridge via `docker run` and are firewalled normally. Passing
+`HTTP_PROXY`/`HTTPS_PROXY` as build-args is the conventional alternative but
+is unreliable on the legacy builder (apt only reads lowercase `http_proxy`).
+See ADR-011 in `ADR.md`.
+
+**Firewall smoke tests live in README.md.** Six copy-paste commands verify
+default-deny, allowed-via-proxy, denied-via-proxy, Ollama carve-out, env
+wiring, and allowlist hot-reload. Re-run them after any change to the
+`DOCKER-USER` rule insertion, the tinyproxy config generator, or the
+allowlist-reload fast path.
 
 ## Commit style
 
