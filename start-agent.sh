@@ -686,7 +686,7 @@ elif backend == "omlx":
     opts['baseURL'] = base_url
     if api_key:
         opts['apiKey'] = api_key
-data['autoCompact'] = False
+data.setdefault('compaction', {})['auto'] = False
 os.makedirs(os.path.dirname(path), exist_ok=True)
 with open(path, 'w') as f:
     json.dump(data, f, indent=2)
