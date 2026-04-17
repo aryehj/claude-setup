@@ -172,17 +172,18 @@ image is built from `dockerfiles/claude-agent.Dockerfile` via
 on. The Dockerfile mirrors the existing setup plus a global
 `npm install -g opencode-ai@latest`.
 
-**Egress allowlist enforced by in-VM tinyproxy + DOCKER-USER iptables.**
-tinyproxy runs as a systemd service inside the Colima VM (not inside the
-container), bound to the docker bridge gateway, with
+**Egress allowlist enforced by in-VM tinyproxy + a CLAUDE_AGENT iptables
+child chain.** tinyproxy runs as a systemd service inside the Colima VM
+(not inside the container), bound to the docker bridge gateway, with
 `FilterDefaultDeny Yes` and a regex filter file generated from the host-
-side allowlist. iptables rules in the `DOCKER-USER` chain allow only:
-established/related return traffic, container → in-VM tinyproxy, container
-→ macOS host inference port (11434 for Ollama, 8000 for omlx), and
-container → bridge DNS. Everything
-else from the bridge CIDR is REJECTed. Rules are tagged
-`-m comment --comment claude-agent` and re-applied on every script run
-(no state drift, no `iptables-persistent`, no systemd unit). See ADR-010.
+side allowlist. A dedicated `CLAUDE_AGENT` iptables chain owns the
+bridge-egress policy; `DOCKER-USER` jumps to it for any traffic sourced
+from the bridge CIDR. The chain allows: established/related return
+traffic, container → in-VM tinyproxy, container → macOS host inference
+port (11434 for Ollama, 8000 for omlx), and container → bridge DNS.
+Everything else is REJECTed. Re-applying is atomic — `iptables -F
+CLAUDE_AGENT` wipes prior rules, then `-A` repopulates in order — so no
+comment-tag matching or rule-number walking is needed. See ADR-010.
 
 **Allowlist file on the host, not in the repo.**
 `~/.claude-agent/allowlist.txt` is seeded on first run with a permissive
@@ -231,6 +232,15 @@ interactively. Deleting the Colima VM itself requires an additional `y`
 confirmation prompt, because VM deletion wipes every image in the VM's
 docker runtime and is not reversible — a meaningful divergence from
 `start-claude.sh`, where `container rm` only affects one microVM.
+
+**`NODE_USE_ENV_PROXY=1` makes Node honor the proxy natively.** Node 24
+ships undici with built-in `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY`
+support, gated behind `NODE_USE_ENV_PROXY=1`. We set that env var in
+`DOCKER_ENV_ARGS` alongside the uppercase proxy URLs and let Node do the
+rest — no `global-agent`, no `--require` shim, no `NODE_PATH`, no extra
+packages to keep in sync. Claude Code's own Bun runtime already honors
+`HTTPS_PROXY` on its own, so this is only load-bearing for OpenCode and for
+any Node helpers Claude Code spawns. See ADR-013.
 
 **`host.docker.internal:host-gateway` is set belt-and-suspenders** on
 `docker run` so tools that hard-code the name resolve to the host even on

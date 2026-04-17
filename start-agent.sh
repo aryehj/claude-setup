@@ -382,6 +382,15 @@ vm_sh() {
   printf '%s\n' "$1" | colima ssh -p "$COLIMA_PROFILE" -- bash
 }
 
+# Copy a host-side file into the VM at $2 with mode $3 (default 644).
+# colima ssh re-quotes argv, but the command itself has no shell
+# metacharacters, and the file payload rides on stdin — so no quoting games.
+vm_put_file() {
+  local src="$1" dest="$2" mode="${3:-644}"
+  colima ssh -p "$COLIMA_PROFILE" -- sudo tee "$dest" >/dev/null < "$src"
+  colima ssh -p "$COLIMA_PROFILE" -- sudo chmod "$mode" "$dest"
+}
+
 # ── --rebuild: optionally destroy the Colima VM before starting it ───────────
 # Container + image removal happens AFTER the VM is up so that `docker`
 # actually has something to talk to; deleting the VM itself must happen BEFORE
@@ -497,20 +506,9 @@ CONF
 
 generate_filter_file "$TMP_WORK/filter"
 
-# Ship both files into the VM. Embed the tarball as a base64 heredoc inside
-# the remote script so we don't need to pipe stdin alongside the command.
-TINYPROXY_PAYLOAD=$( (cd "$TMP_WORK" && tar -cf - tinyproxy.conf filter) | base64 )
-vm_sh "$(cat <<VMSH
-set -e
-base64 -d > /tmp/tinyproxy-stage.tar <<'__B64__'
-$TINYPROXY_PAYLOAD
-__B64__
-sudo tar -xf /tmp/tinyproxy-stage.tar -C /tmp
-sudo install -m 644 /tmp/tinyproxy.conf /etc/tinyproxy/tinyproxy.conf
-sudo install -m 644 /tmp/filter /etc/tinyproxy/filter
-rm -f /tmp/tinyproxy.conf /tmp/filter /tmp/tinyproxy-stage.tar
-VMSH
-)"
+# Ship both files directly into /etc/tinyproxy/ via `sudo tee` over colima ssh.
+vm_put_file "$TMP_WORK/tinyproxy.conf" /etc/tinyproxy/tinyproxy.conf
+vm_put_file "$TMP_WORK/filter"         /etc/tinyproxy/filter
 
 # Enable and (re)start/reload tinyproxy. On first run, enable+start; otherwise
 # reload to pick up filter changes without interrupting in-flight connections.
@@ -521,7 +519,10 @@ else
   vm_ssh sudo systemctl restart tinyproxy
 fi
 
-# ── iptables rules in the VM (DOCKER-USER) ───────────────────────────────────
+# ── iptables rules in the VM (CLAUDE_AGENT child chain of DOCKER-USER) ───────
+# All rules live in a dedicated CLAUDE_AGENT chain, which DOCKER-USER jumps to
+# for bridge-sourced traffic. This gives atomic flush-and-repopulate without
+# walking line numbers or matching rules by comment text.
 cat > "$TMP_WORK/firewall-apply.sh" <<FWEOF
 #!/bin/sh
 set -e
@@ -535,62 +536,26 @@ INFERENCE_PORT="$INFERENCE_PORT"
 sudo iptables -N DOCKER-USER 2>/dev/null || true
 sudo iptables -C FORWARD -j DOCKER-USER 2>/dev/null || sudo iptables -I FORWARD 1 -j DOCKER-USER
 
-# Flush our previous rules (identified by comment). Walk the chain by line
-# number in reverse so deletions don't shift indices underneath us.
-sudo iptables -S DOCKER-USER | awk '/--comment claude-agent/{print NR-1}' | sort -rn | while read -r i; do
-  [ -z "\$i" ] || sudo iptables -D DOCKER-USER "\$i" 2>/dev/null || true
-done
-# Fallback cleanup by explicit rule spec (in case the awk approach misses).
-while sudo iptables -S DOCKER-USER 2>/dev/null | grep -q 'claude-agent'; do
-  rule=\$(sudo iptables -S DOCKER-USER | grep -m1 'claude-agent' | sed 's/^-A/-D/')
-  [ -z "\$rule" ] && break
-  # shellcheck disable=SC2086
-  sudo iptables \$rule || break
-done
+# Our own chain. Create if absent, then flush to start clean.
+sudo iptables -N CLAUDE_AGENT 2>/dev/null || true
+sudo iptables -F CLAUDE_AGENT
 
-# Established/related first.
-sudo iptables -I DOCKER-USER 1 -s "\$BRIDGE_CIDR" \
-  -m conntrack --ctstate ESTABLISHED,RELATED \
-  -m comment --comment claude-agent -j RETURN
+# Jump into our chain from DOCKER-USER for bridge traffic (idempotent).
+sudo iptables -C DOCKER-USER -s "\$BRIDGE_CIDR" -j CLAUDE_AGENT 2>/dev/null \
+  || sudo iptables -I DOCKER-USER 1 -s "\$BRIDGE_CIDR" -j CLAUDE_AGENT
 
-# Container -> in-VM tinyproxy.
-sudo iptables -I DOCKER-USER 2 -s "\$BRIDGE_CIDR" -d "\$BRIDGE_IP" \
-  -p tcp --dport "\$TINYPROXY_PORT" \
-  -m comment --comment claude-agent -j RETURN
-
-# Container -> macOS host inference server (Ollama / omlx).
-sudo iptables -I DOCKER-USER 3 -s "\$BRIDGE_CIDR" -d "\$HOST_IP" \
-  -p tcp --dport "\$INFERENCE_PORT" \
-  -m comment --comment claude-agent -j RETURN
-
-# Container -> in-VM DNS (dockerd's embedded resolver lives on 127.0.0.11,
-# which the container reaches via its own netns, but some name-lookup paths
-# use the bridge gateway as resolver. Allow UDP/TCP 53 to the bridge IP.)
-sudo iptables -I DOCKER-USER 4 -s "\$BRIDGE_CIDR" -d "\$BRIDGE_IP" \
-  -p udp --dport 53 \
-  -m comment --comment claude-agent -j RETURN
-sudo iptables -I DOCKER-USER 5 -s "\$BRIDGE_CIDR" -d "\$BRIDGE_IP" \
-  -p tcp --dport 53 \
-  -m comment --comment claude-agent -j RETURN
-
-# Default-deny everything else from the bridge.
-sudo iptables -A DOCKER-USER -s "\$BRIDGE_CIDR" \
-  -m comment --comment claude-agent \
-  -j REJECT --reject-with icmp-admin-prohibited
+# Populate rules in order. Only bridge traffic reaches here, so the source
+# match is redundant and omitted.
+sudo iptables -A CLAUDE_AGENT -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
+sudo iptables -A CLAUDE_AGENT -d "\$BRIDGE_IP" -p tcp --dport "\$TINYPROXY_PORT" -j RETURN
+sudo iptables -A CLAUDE_AGENT -d "\$HOST_IP"   -p tcp --dport "\$INFERENCE_PORT" -j RETURN
+sudo iptables -A CLAUDE_AGENT -d "\$BRIDGE_IP" -p udp --dport 53 -j RETURN
+sudo iptables -A CLAUDE_AGENT -d "\$BRIDGE_IP" -p tcp --dport 53 -j RETURN
+sudo iptables -A CLAUDE_AGENT -j REJECT --reject-with icmp-admin-prohibited
 FWEOF
-chmod +x "$TMP_WORK/firewall-apply.sh"
 
 echo "==> Applying firewall rules in VM"
-FIREWALL_PAYLOAD=$(base64 < "$TMP_WORK/firewall-apply.sh")
-vm_sh "$(cat <<VMSH
-set -e
-base64 -d > /tmp/firewall-apply.sh <<'__B64__'
-$FIREWALL_PAYLOAD
-__B64__
-sh /tmp/firewall-apply.sh
-rm -f /tmp/firewall-apply.sh
-VMSH
-)"
+colima ssh -p "$COLIMA_PROFILE" -- sudo sh < "$TMP_WORK/firewall-apply.sh"
 
 # ── --reload-allowlist: fast-path exit ───────────────────────────────────────
 if $RELOAD_ALLOWLIST; then
@@ -657,59 +622,6 @@ fi
 # ── host-side persistent state dirs ──────────────────────────────────────────
 mkdir -p "$CLAUDE_CONFIG_DIR" "$OPENCODE_CONFIG_DIR" "$OPENCODE_DATA_DIR"
 [[ -f "$CLAUDE_JSON_FILE" ]] || echo '{}' > "$CLAUDE_JSON_FILE"
-
-# ── inject project .claude/settings.local.json ───────────────────────────────
-PROJECT_SETTINGS_FILE="$PROJECT_DIR/.claude/settings.local.json"
-if [[ -f "$PROJECT_SETTINGS_FILE" ]]; then
-  python3 - "$PROJECT_SETTINGS_FILE" << 'PYEOF'
-import json, sys
-path = sys.argv[1]
-with open(path) as f:
-    data = json.load(f)
-changed = False
-if 'theme' not in data:
-    data['theme'] = 'light'
-    changed = True
-if isinstance(data.get('sandbox'), bool):
-    data['sandbox'] = {"enabled": True, "autoAllowBashIfSandboxed": True}
-    changed = True
-sb = data.setdefault('sandbox', {})
-fs = sb.setdefault('filesystem', {})
-aw = fs.setdefault('allowWrite', [])
-for p in ['/tmp/uv-cache', '$TMPDIR/uv-cache', '/tmp/.venv', '$TMPDIR/.venv']:
-    if p not in aw:
-        aw.append(p)
-        changed = True
-if sb.get('failIfUnavailable') is not True:
-    sb['failIfUnavailable'] = True
-    changed = True
-if sb.get('allowUnsandboxedCommands') is not False:
-    sb['allowUnsandboxedCommands'] = False
-    changed = True
-if changed:
-    with open(path, 'w') as f:
-        json.dump(data, f, indent=2)
-        f.write('\n')
-    print(f"==> Migrated {path}")
-PYEOF
-else
-  mkdir -p "$PROJECT_DIR/.claude"
-  cat > "$PROJECT_SETTINGS_FILE" << 'JSONEOF'
-{
-  "theme": "light",
-  "sandbox": {
-    "enabled": true,
-    "autoAllowBashIfSandboxed": true,
-    "failIfUnavailable": true,
-    "allowUnsandboxedCommands": false,
-    "filesystem": {
-      "allowWrite": ["/tmp/uv-cache", "$TMPDIR/uv-cache", "/tmp/.venv", "$TMPDIR/.venv"]
-    }
-  }
-}
-JSONEOF
-  echo "==> Created $PROJECT_SETTINGS_FILE"
-fi
 
 # ── inject global ~/.claude/settings.json ────────────────────────────────────
 GLOBAL_SETTINGS_FILE="$CLAUDE_CONFIG_DIR/settings.json"
@@ -815,8 +727,6 @@ DOCKER_ENV_ARGS=(
   -e "TERM=${TERM:-xterm-256color}"
   -e "COLORTERM=${COLORTERM:-}"
   -e "TERM_PROGRAM=${TERM_PROGRAM:-}"
-  -e "CLAUDE_CODE_DISABLE_1M_CONTEXT=1"
-  -e "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=1"
   -e "GIT_AUTHOR_NAME=$GIT_USER_NAME"
   -e "GIT_AUTHOR_EMAIL=$GIT_USER_EMAIL"
   -e "GIT_COMMITTER_NAME=$GIT_USER_NAME"
@@ -824,6 +734,7 @@ DOCKER_ENV_ARGS=(
   -e "HTTPS_PROXY=http://$BRIDGE_IP:$TINYPROXY_PORT"
   -e "HTTP_PROXY=http://$BRIDGE_IP:$TINYPROXY_PORT"
   -e "NO_PROXY=localhost,127.0.0.1,$BRIDGE_IP,$HOST_IP"
+  -e "NODE_USE_ENV_PROXY=1"
 )
 case "$BACKEND" in
   ollama)

@@ -11,7 +11,9 @@
 FROM debian:bookworm-slim
 
 ENV DEBIAN_FRONTEND=noninteractive \
-    PATH="/root/.local/bin:/usr/local/bin:/usr/bin:/bin"
+    PATH="/root/.local/bin:/usr/local/bin:/usr/bin:/bin" \
+    CLAUDE_CODE_DISABLE_1M_CONTEXT=1 \
+    CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=1
 
 # ── system packages ──────────────────────────────────────────────────────────
 RUN apt-get update -qq \
@@ -78,12 +80,6 @@ mkdir -p "$UV_CACHE_DIR" 2>/dev/null || true
 export UV_PROJECT_ENVIRONMENT="${TMPDIR:-/tmp}/.venv"
 mkdir -p "$UV_PROJECT_ENVIRONMENT" 2>/dev/null || true
 UVEOF
-
-# ── Claude Code env knobs ────────────────────────────────────────────────────
-RUN echo 'export CLAUDE_CODE_DISABLE_1M_CONTEXT=1'       >  /etc/profile.d/disable-1m-context.sh \
- && echo 'export CLAUDE_CODE_DISABLE_1M_CONTEXT=1'       >> /root/.bashrc \
- && echo 'export CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=1' >  /etc/profile.d/disable-adaptive-thinking.sh \
- && echo 'export CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=1' >> /root/.bashrc
 
 # ── git identity placeholders ────────────────────────────────────────────────
 # Real values are injected at `docker run` time via GIT_AUTHOR_* / GIT_COMMITTER_*

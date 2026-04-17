@@ -350,15 +350,17 @@ Option 3.
   regexes (`(^|\.)domain\.tld$`) generated on the host from
   `~/.claude-agent/allowlist.txt`. The filter applies to the hostname
   portion of HTTPS `CONNECT` requests as well as plain HTTP.
-- **iptables** rules are inserted into docker's `DOCKER-USER` chain, which
-  the docker daemon explicitly leaves alone on restart. Four RETURN rules
-  (established/related, proxy port, host Ollama port, bridge DNS) followed
-  by a catch-all REJECT for traffic from the bridge CIDR. Every rule is
-  tagged with `-m comment --comment claude-agent` so the reload path can
-  remove only its own rules without disturbing any other user rules.
+- **iptables** rules live in a dedicated `CLAUDE_AGENT` chain. `DOCKER-USER`
+  (which the docker daemon explicitly leaves alone on restart) carries a
+  single `-s $BRIDGE_CIDR -j CLAUDE_AGENT` jump. The child chain holds the
+  RETURN rules (established/related, proxy port, host inference port,
+  bridge DNS) and a catch-all REJECT. Re-applying is atomic: `iptables -F
+  CLAUDE_AGENT` wipes prior state, then `-A` repopulates in order. No
+  comment-tag matching, no rule-number arithmetic, no risk of leaving
+  stale rules co-resident with new ones.
 - **Re-apply on every run** instead of persisting. The firewall script is
-  regenerated on the host and shipped into the VM via `colima ssh` base64
-  on every invocation. No state drift between "rules the host script thinks
+  regenerated on the host and streamed into `sudo sh` over `colima ssh` on
+  every invocation. No state drift between "rules the host script thinks
   are active" and "rules actually active after a VM reboot." The cost is a
   ~1s colima-ssh round trip at the start of every launch.
 - **Allowlist lives at `~/.claude-agent/allowlist.txt`** on the macOS host,
@@ -374,7 +376,8 @@ Option 3.
   the Ollama port, and DNS to the bridge gateway is REJECTed at the VM
   level. Applications inside the container that don't honor `HTTPS_PROXY` /
   `HTTP_PROXY` will simply fail to reach anything — an acceptable price,
-  and arguably a feature (no silent bypass).
+  and arguably a feature (no silent bypass). *(Node.js apps — Claude Code
+  and OpenCode — are handled by ADR-013's `global-agent` bootstrap.)*
 - Every invocation pays a small latency tax (applying firewall rules), in
   exchange for zero configuration drift.
 - The seed allowlist is intentionally permissive for development and
@@ -535,3 +538,88 @@ backend-specific behavior:
 - Adding future backends (llama.cpp, vLLM, etc.) means adding one more
   `case` branch in the dispatch, one conditional in the env/preflight/config
   blocks, and one doc section. The pattern scales linearly.
+
+## ADR-013: start-agent: bootstrap `global-agent` so Node.js respects the proxy
+
+**Date:** 2026-04-17
+**Status:** Accepted
+
+### Context
+
+ADR-010's DOCKER-USER iptables rules reject all outbound traffic from the
+container except to tinyproxy, the inference port, and bridge DNS. The
+container sets `HTTP_PROXY` / `HTTPS_PROXY` so that proxy-aware tools (curl,
+apt, wget) route through tinyproxy, and the allowlist controls which domains
+are reachable.
+
+Claude Code and OpenCode are Node.js applications. Node.js's built-in
+`http`/`https` modules and the `fetch` implementation (backed by `undici`)
+do **not** honor `HTTP_PROXY`/`HTTPS_PROXY` environment variables. When
+Claude Code attempted to reach `api.anthropic.com`, the request went direct,
+hit the DOCKER-USER REJECT rule, and failed — the agent could not
+authenticate.
+
+ADR-010's consequences section noted that "applications inside the container
+that don't honor `HTTPS_PROXY` / `HTTP_PROXY` will simply fail to reach
+anything." For CLI tools like curl this was fine; for the primary workload
+(Claude Code) it was a showstopper.
+
+### Decision
+
+1. **Install `global-agent` globally in the Dockerfile** alongside the other
+   npm packages (`npm install -g ... global-agent`). `global-agent` monkey-
+   patches Node.js's `http.globalAgent` and `https.globalAgent` at require
+   time to route requests through the proxy specified in
+   `GLOBAL_AGENT_HTTP_PROXY`.
+2. **Set `NODE_OPTIONS=--require global-agent/bootstrap`** as a container
+   env var in `DOCKER_ENV_ARGS`. This causes every Node.js process (Claude
+   Code, OpenCode, any npm scripts) to load `global-agent` before
+   application code runs.
+3. **Set `GLOBAL_AGENT_HTTP_PROXY`** to the tinyproxy URL
+   (`http://$BRIDGE_IP:$TINYPROXY_PORT`). `global-agent` reads this to
+   determine the proxy endpoint.
+4. **Set lowercase `http_proxy`/`https_proxy`/`no_proxy`** alongside the
+   uppercase variants. Some Node.js libraries (and Python's `urllib`) check
+   lowercase; belt-and-suspenders.
+
+### Consequences
+
+- Claude Code and OpenCode API calls now route through tinyproxy and are
+  subject to the domain allowlist. Authentication to `api.anthropic.com`
+  works because `anthropic.com` is in the default allowlist.
+- Every Node.js process in the container pays the `global-agent` require
+  cost (~5ms). Negligible compared to network round-trips.
+- `NO_PROXY` / `no_proxy` exempt `localhost`, `127.0.0.1`, the bridge IP,
+  and the host IP — so local inference traffic (Ollama/omlx) still goes
+  direct, as intended.
+- `NODE_OPTIONS` is set at container env level (not baked into the image),
+  so it applies to both `docker run` (new container) and `docker exec`
+  (reattach) paths. The image remains usable without the proxy if someone
+  runs it outside the firewalled VM.
+- Requires `--rebuild` to install `global-agent` in the image.
+
+### 2026-04-17 revision: replace `global-agent` with `NODE_USE_ENV_PROXY=1`
+
+The original implementation — `npm install -g global-agent` plus
+`NODE_OPTIONS=--require global-agent/bootstrap` — had compounding failure
+modes:
+
+1. Globally-installed npm packages aren't on Node's default require path
+   (needs `NODE_PATH`).
+2. `global-agent` v4 dropped the `bootstrap` submodule entry, so even with
+   `NODE_PATH` set, `--require global-agent/bootstrap` throws
+   `MODULE_NOT_FOUND`.
+3. Every Node process in the container consequently crashed before any
+   application code ran. Claude Code's Bun-native API client masked the
+   breakage; its Node helpers (including the OAuth code-exchange path used
+   by `/login`) crashed immediately and surfaced as a misleading
+   `OAuth error: Request failed with status code 403`. OpenCode failed to
+   launch outright.
+
+Node 24 ships undici with first-class proxy support behind
+`NODE_USE_ENV_PROXY=1`. Set that env var alongside `HTTP_PROXY`,
+`HTTPS_PROXY`, and `NO_PROXY`; Node's built-in `fetch`, `http`, and
+`https` then honor the proxy without any require-time wiring. Removes the
+npm package, the `--require` preload, the `NODE_PATH` dependency, the
+lowercase proxy-var duplicates, and `GLOBAL_AGENT_HTTP_PROXY` — one
+officially-supported flag replaces the whole stack.
