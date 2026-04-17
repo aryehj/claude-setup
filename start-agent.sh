@@ -181,6 +181,7 @@ if [[ ! -f "$ALLOWLIST_FILE" ]]; then
 # === Anthropic / AI coding agents ===
 anthropic.com
 claude.ai
+claude.com
 opencode.ai
 
 # === Source control & code hosting ===
@@ -494,11 +495,11 @@ Timeout 600
 DefaultErrorFile "/usr/share/tinyproxy/default.html"
 StatFile "/usr/share/tinyproxy/stats.html"
 LogFile "/var/log/tinyproxy/tinyproxy.log"
-LogLevel Warning
+LogLevel Info
 MaxClients 100
 FilterDefaultDeny Yes
 Filter "/etc/tinyproxy/filter"
-FilterExtended Yes
+FilterType 1
 FilterURLs No
 ConnectPort 443
 ConnectPort 80
