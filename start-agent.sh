@@ -68,7 +68,7 @@ ENVIRONMENT:
   GIT_USER_EMAIL         Default git email (overridden by --git-email).
   OMLX_API_KEY           API key for omlx (passed into the container when
                          --backend=omlx).
-  CLAUDE_AGENT_DEFAULT_MODEL  Default OpenCode model (overridden by --default-model).
+  CLAUDE_AGENT_DEFAULT_MODEL  Default OpenCode model (set via env var; no CLI flag).
   CLAUDE_AGENT_PLAN_MODEL     OpenCode plan-agent model (overridden by --plan-model).
   CLAUDE_AGENT_EXEC_MODEL     OpenCode exec/build-agent model (overridden by --exec-model).
   CLAUDE_AGENT_SMALL_MODEL    OpenCode small model (overridden by --small-model).
@@ -768,25 +768,24 @@ if provider_key:
     else:
         print(f"[opencode-config] no {backend} models discovered; preserving existing models dict ({len(entry.get('models', {}))} entries)", file=sys.stderr)
 
+    def qualify(m):
+        return m if '/' in m else f"{provider_key}/{m}"
+
     # Default model: env override wins; otherwise reset to a local model whenever
     # the currently-persisted `model` isn't from our active local provider_key
     # (e.g. a stale cloud selection opencode saved on a prior run).
     if default_model_override:
-        data['model'] = f"{provider_key}/{default_model_override}"
+        data['model'] = qualify(default_model_override)
     elif discovered and (not data.get('model') or data['model'].split('/')[0] != provider_key):
-        data['model'] = f"{provider_key}/{next(iter(discovered))}"
-
-    def qualify(m):
-        return m if '/' in m else f"{provider_key}/{m}"
+        data['model'] = qualify(next(iter(discovered)))
 
     if small_model:
         data['small_model'] = qualify(small_model)
 
-    agents = data.setdefault('agent', {})
     if plan_model:
-        agents.setdefault('plan', {})['model'] = qualify(plan_model)
+        data.setdefault('agent', {}).setdefault('plan', {})['model'] = qualify(plan_model)
     if exec_model:
-        agents.setdefault('build', {})['model'] = qualify(exec_model)
+        data.setdefault('agent', {}).setdefault('build', {})['model'] = qualify(exec_model)
 
 perms = data.setdefault('permission', {})
 perms.setdefault('webfetch', 'allow')
@@ -903,7 +902,7 @@ exec docker run \
   --add-host=host.docker.internal:host-gateway \
   -v "$PROJECT_DIR:$PROJECT_DIR" \
   -v "$CLAUDE_CONFIG_DIR:/root/.claude" \
-  -v "$CLAUDE_JSON_FILE:/root/.claude.json" \
+  -v "$CLAUDE_JSON_FILE:/root/.claude.json:ro" \
   -v "$OPENCODE_CONFIG_DIR:/root/.config/opencode" \
   -v "$OPENCODE_DATA_DIR:/root/.local/share/opencode" \
   -w "$PROJECT_DIR" \
