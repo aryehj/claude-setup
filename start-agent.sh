@@ -887,6 +887,50 @@ fi
 # Fresh container: sync skills first.
 sync_skills
 
+# ── inject project settings ───────────────────────────────────────────────────
+# Disable bubblewrap sandbox — it cannot run inside a Docker/Colima container
+# without elevated privileges. The VM-level tinyproxy + iptables chain is the
+# real security boundary here.
+PROJECT_SETTINGS_FILE="$PROJECT_DIR/.claude/settings.local.json"
+if [[ -f "$PROJECT_SETTINGS_FILE" ]]; then
+  python3 - "$PROJECT_SETTINGS_FILE" << 'PYEOF'
+import json, sys
+path = sys.argv[1]
+with open(path) as f:
+    data = json.load(f)
+changed = False
+if 'theme' not in data:
+    data['theme'] = 'light'
+    changed = True
+    print(f"==> Added theme:light to {path}")
+sb = data.setdefault('sandbox', {})
+if sb.get('enabled') is not False:
+    sb['enabled'] = False
+    changed = True
+    print(f"==> Set sandbox.enabled=false in {path}")
+for key in ('failIfUnavailable', 'allowUnsandboxedCommands'):
+    if key in sb:
+        del sb[key]
+        changed = True
+        print(f"==> Removed sandbox.{key} from {path}")
+if changed:
+    with open(path, 'w') as f:
+        json.dump(data, f, indent=2)
+        f.write('\n')
+PYEOF
+else
+  mkdir -p "$PROJECT_DIR/.claude"
+  cat > "$PROJECT_SETTINGS_FILE" << 'JSONEOF'
+{
+  "theme": "light",
+  "sandbox": {
+    "enabled": false
+  }
+}
+JSONEOF
+  echo "==> Created $PROJECT_SETTINGS_FILE"
+fi
+
 echo "==> Creating container '$CONTAINER_NAME'"
 echo "    project : $PROJECT_DIR  →  $PROJECT_DIR"
 echo "    proxy   : http://$BRIDGE_IP:$TINYPROXY_PORT  (allowlist: $ALLOWLIST_FILE)"
