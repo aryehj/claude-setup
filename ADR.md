@@ -314,6 +314,78 @@ makes the env-var approach the canonical solution.
   entries automatically on next `start-claude.sh` run (no rebuild needed for
   the sandbox permissions, only for the env var).
 
+## ADR-010: start-agent: in-VM tinyproxy + DOCKER-USER iptables for egress allowlist
+
+**Date:** 2026-04-15
+**Status:** Accepted
+
+### Context
+
+`start-agent.sh` (sibling to `start-claude.sh`) runs both Claude Code and
+OpenCode in a shared Colima-hosted docker container, and needs a network
+egress allowlist that the in-container LLM cannot modify. Several placements
+were possible:
+
+1. **Host-side pf + host-side proxy.** Strongest isolation — the rules live
+   two VM boundaries away from the container. But pfctl anchors, launchd
+   plists for the proxy, vmnet CIDR discovery, and `sudo` for every reload
+   all bleed setup pain into the user's macOS install.
+2. **In-container iptables + in-container proxy.** Trivially simple, but
+   trivially bypassable: the LLM is `root` inside the container by default,
+   and a single `iptables -F` (or editing the proxy config) undoes it.
+3. **In-VM iptables (DOCKER-USER) + in-VM tinyproxy.** Rules live outside
+   the container's network namespace, inside a Lima VM the container cannot
+   reach without a container escape plus VM root — two jumps outside any
+   realistic behavioral threat model, with none of the host-side setup
+   overhead of option 1.
+
+### Decision
+
+Option 3.
+
+- **tinyproxy** runs as a systemd service inside the Colima VM, bound to the
+  docker bridge gateway IP (discovered at script time via
+  `docker network inspect bridge`). Config: `FilterDefaultDeny Yes`,
+  `FilterExtended Yes`, `FilterURLs No`, and a `Filter` file of anchored
+  regexes (`(^|\.)domain\.tld$`) generated on the host from
+  `~/.claude-agent/allowlist.txt`. The filter applies to the hostname
+  portion of HTTPS `CONNECT` requests as well as plain HTTP.
+- **iptables** rules live in a dedicated `CLAUDE_AGENT` chain. `DOCKER-USER`
+  (which the docker daemon explicitly leaves alone on restart) carries a
+  single `-s $BRIDGE_CIDR -j CLAUDE_AGENT` jump. The child chain holds the
+  RETURN rules (established/related, proxy port, host inference port,
+  bridge DNS) and a catch-all REJECT. Re-applying is atomic: `iptables -F
+  CLAUDE_AGENT` wipes prior state, then `-A` repopulates in order. No
+  comment-tag matching, no rule-number arithmetic, no risk of leaving
+  stale rules co-resident with new ones.
+- **Re-apply on every run** instead of persisting. The firewall script is
+  regenerated on the host and streamed into `sudo sh` over `colima ssh` on
+  every invocation. No state drift between "rules the host script thinks
+  are active" and "rules actually active after a VM reboot." The cost is a
+  ~1s colima-ssh round trip at the start of every launch.
+- **Allowlist lives at `~/.claude-agent/allowlist.txt`** on the macOS host,
+  plain text, one domain per line, suffix matching. `--reload-allowlist`
+  regenerates the filter and reloads tinyproxy (SIGHUP) without touching
+  the running container — a ~2s fast path.
+
+### Consequences
+
+- The LLM inside the container has no write path to the iptables rules or
+  the allowlist. Modifying either requires a container escape plus VM root.
+- All outbound traffic except the established-return path, the proxy port,
+  the Ollama port, and DNS to the bridge gateway is REJECTed at the VM
+  level. Applications inside the container that don't honor `HTTPS_PROXY` /
+  `HTTP_PROXY` will simply fail to reach anything — an acceptable price,
+  and arguably a feature (no silent bypass). *(Node.js apps — Claude Code
+  and OpenCode — are handled by ADR-013's `global-agent` bootstrap.)*
+- Every invocation pays a small latency tax (applying firewall rules), in
+  exchange for zero configuration drift.
+- The seed allowlist is intentionally permissive for development and
+  research workflows; users are expected to prune it.
+- Per-rule granularity is coarse (hostname match only). If the allowlist
+  grows past ~200 entries or needs per-path / per-method semantics, squid
+  with `acl ... dstdomain` is the conventional upgrade.
+
 ## ADR-009: Set git identity via environment variables, not just gitconfig
 
 **Date:** 2026-04-08
@@ -353,3 +425,201 @@ over all config files, so they work regardless of whether the sandbox mounts
   `--git-name`/`--git-email` CLI flags or `$GIT_USER_NAME`/`$GIT_USER_EMAIL`
   env vars.
 - Requires `--rebuild` to bake the new profile scripts into the image.
+
+## ADR-011: start-agent: build the image with `docker build --network=host`
+
+**Date:** 2026-04-15
+**Status:** Accepted
+
+### Context
+
+ADR-010's DOCKER-USER egress allowlist rejects every packet from the docker
+bridge CIDR that isn't destined for tinyproxy, host Ollama, or bridge DNS.
+Runtime containers honor `HTTPS_PROXY` and route their traffic through
+tinyproxy, but `docker build` RUN steps also execute inside short-lived
+containers attached to the bridge — and those build containers have no proxy
+env set. The first install step (`apt-get update && apt-get install ...`) hit
+the REJECT rule immediately:
+
+```
+W: Failed to fetch http://deb.debian.org/debian/dists/bookworm/InRelease
+   Could not connect to deb.debian.org:80 — connect (113: No route to host)
+```
+
+Three options to unstick the build:
+
+1. **Route the build through tinyproxy via `--build-arg HTTP_PROXY=...`.**
+   Docker treats the proxy vars as predefined build ARGs and exposes them as
+   env vars during RUN. In practice this is unreliable on the legacy builder:
+   some tools (notably apt) only consult the lowercase `http_proxy`, and
+   propagating both cases through every RUN step means either touching the
+   Dockerfile or writing an `/etc/apt/apt.conf.d/99proxy` shim.
+2. **Temporarily drop the REJECT rule while building, then re-add.** Simple
+   in theory, but introduces a timing window where every bridge-attached
+   container is unfirewalled, plus a cleanup path that has to survive build
+   failures and SIGINT.
+3. **`docker build --network=host`.** RUN steps share the Colima VM's host
+   network namespace. The VM's netns is not subject to the `FORWARD` chain
+   (DOCKER-USER only fires for packets being routed between interfaces), so
+   the build has full egress. Runtime containers still attach to the docker
+   bridge via `docker run` and remain firewalled normally — the `--network`
+   flag applies only to the build.
+
+### Decision
+
+Option 3. `docker build` is invoked with `--network=host` in `start-agent.sh`.
+
+### Consequences
+
+- Build-time network egress is unrestricted. Acceptable because we trust the
+  Dockerfile — it's checked into the repo, the image is rebuilt only on
+  explicit `--rebuild`, and the LLM running at runtime has no write path to
+  the Dockerfile or the build invocation.
+- Runtime egress enforcement is unchanged. Containers created by `docker run`
+  attach to the bridge and pass through `DOCKER-USER` like before; the six
+  smoke tests in `README.md` (default-deny, allowed-via-proxy,
+  denied-via-proxy, Ollama carve-out, env sanity, hot-reload) all pass with
+  this configuration.
+- No Dockerfile changes needed to handle proxies, and no timing window where
+  the bridge is unfirewalled. The whole interaction is local to the
+  `docker build` line.
+- If we ever migrate to BuildKit (the legacy builder is deprecation-warned on
+  every run), the same flag works there too — BuildKit accepts
+  `--network=host` and honors it identically for RUN steps. No lock-in.
+
+## ADR-012: start-agent: omlx as an alternative local inference backend
+
+**Date:** 2026-04-16
+**Status:** Accepted
+
+### Context
+
+`start-agent.sh` hard-coded Ollama as the local inference backend. Ollama
+binds to `localhost` by default; reaching it from the Colima VM requires
+rebinding to `0.0.0.0`, which exposes the model server to every device on
+the user's LAN. The `plans/ollama-host-firewall.md` plan addresses this with
+a host-side pf firewall, but that adds operational complexity (anchor files,
+LaunchDaemons, interface-scoped rules).
+
+[omlx](https://github.com/jundot/omlx) is an MLX-based inference server for
+Apple Silicon with an OpenAI-compatible API and built-in `--api-key` support.
+When started with an API key, omlx returns 401/403 to unauthenticated
+requests, so it can safely bind to `0.0.0.0` without a host-side firewall —
+LAN peers that probe the port get rejected at the application layer.
+
+### Decision
+
+Add omlx as an alternative backend behind `--backend=omlx` (default remains
+`ollama`). A single `case "$BACKEND"` dispatch block governs all
+backend-specific behavior:
+
+1. **Port.** `INFERENCE_PORT` is 11434 for Ollama, 8000 for omlx. All
+   downstream references (iptables carve-out, preflight probe, OpenCode
+   config, container env) use `$INFERENCE_PORT`.
+2. **API key.** `OMLX_API_KEY` from the host env is passed into the
+   container as an env var and written into the OpenCode provider config's
+   `apiKey` field. Missing key is a warning, not a hard error (the user may
+   run omlx without auth during local testing).
+3. **Container env vars.** `OLLAMA_HOST` is only set for the `ollama`
+   backend; `OMLX_HOST` and `OMLX_API_KEY` are set for `omlx`. Neither
+   backend pollutes the other's namespace.
+4. **OpenCode config.** The `ollama` and `omlx` provider entries use
+   separate keys in `opencode.json` and coexist across backend switches.
+5. **Preflight probe.** Ollama probes `/api/tags`; omlx probes `/v1/models`
+   with a Bearer token if the key is set.
+
+### Consequences
+
+- Users on shared networks can use `--backend=omlx` and skip the host-side
+  pf firewall entirely. The `plans/ollama-host-firewall.md` plan is
+  unnecessary when using omlx.
+- No Dockerfile changes. omlx runs on the macOS host; the container reaches
+  it via the same iptables carve-out used for Ollama (just a different port).
+- Adding future backends (llama.cpp, vLLM, etc.) means adding one more
+  `case` branch in the dispatch, one conditional in the env/preflight/config
+  blocks, and one doc section. The pattern scales linearly.
+
+## ADR-013: start-agent: bootstrap `global-agent` so Node.js respects the proxy
+
+**Date:** 2026-04-17
+**Status:** Accepted
+
+### Context
+
+ADR-010's DOCKER-USER iptables rules reject all outbound traffic from the
+container except to tinyproxy, the inference port, and bridge DNS. The
+container sets `HTTP_PROXY` / `HTTPS_PROXY` so that proxy-aware tools (curl,
+apt, wget) route through tinyproxy, and the allowlist controls which domains
+are reachable.
+
+Claude Code and OpenCode are Node.js applications. Node.js's built-in
+`http`/`https` modules and the `fetch` implementation (backed by `undici`)
+do **not** honor `HTTP_PROXY`/`HTTPS_PROXY` environment variables. When
+Claude Code attempted to reach `api.anthropic.com`, the request went direct,
+hit the DOCKER-USER REJECT rule, and failed — the agent could not
+authenticate.
+
+ADR-010's consequences section noted that "applications inside the container
+that don't honor `HTTPS_PROXY` / `HTTP_PROXY` will simply fail to reach
+anything." For CLI tools like curl this was fine; for the primary workload
+(Claude Code) it was a showstopper.
+
+### Decision
+
+1. **Install `global-agent` globally in the Dockerfile** alongside the other
+   npm packages (`npm install -g ... global-agent`). `global-agent` monkey-
+   patches Node.js's `http.globalAgent` and `https.globalAgent` at require
+   time to route requests through the proxy specified in
+   `GLOBAL_AGENT_HTTP_PROXY`.
+2. **Set `NODE_OPTIONS=--require global-agent/bootstrap`** as a container
+   env var in `DOCKER_ENV_ARGS`. This causes every Node.js process (Claude
+   Code, OpenCode, any npm scripts) to load `global-agent` before
+   application code runs.
+3. **Set `GLOBAL_AGENT_HTTP_PROXY`** to the tinyproxy URL
+   (`http://$BRIDGE_IP:$TINYPROXY_PORT`). `global-agent` reads this to
+   determine the proxy endpoint.
+4. **Set lowercase `http_proxy`/`https_proxy`/`no_proxy`** alongside the
+   uppercase variants. Some Node.js libraries (and Python's `urllib`) check
+   lowercase; belt-and-suspenders.
+
+### Consequences
+
+- Claude Code and OpenCode API calls now route through tinyproxy and are
+  subject to the domain allowlist. Authentication to `api.anthropic.com`
+  works because `anthropic.com` is in the default allowlist.
+- Every Node.js process in the container pays the `global-agent` require
+  cost (~5ms). Negligible compared to network round-trips.
+- `NO_PROXY` / `no_proxy` exempt `localhost`, `127.0.0.1`, the bridge IP,
+  and the host IP — so local inference traffic (Ollama/omlx) still goes
+  direct, as intended.
+- `NODE_OPTIONS` is set at container env level (not baked into the image),
+  so it applies to both `docker run` (new container) and `docker exec`
+  (reattach) paths. The image remains usable without the proxy if someone
+  runs it outside the firewalled VM.
+- Requires `--rebuild` to install `global-agent` in the image.
+
+### 2026-04-17 revision: replace `global-agent` with `NODE_USE_ENV_PROXY=1`
+
+The original implementation — `npm install -g global-agent` plus
+`NODE_OPTIONS=--require global-agent/bootstrap` — had compounding failure
+modes:
+
+1. Globally-installed npm packages aren't on Node's default require path
+   (needs `NODE_PATH`).
+2. `global-agent` v4 dropped the `bootstrap` submodule entry, so even with
+   `NODE_PATH` set, `--require global-agent/bootstrap` throws
+   `MODULE_NOT_FOUND`.
+3. Every Node process in the container consequently crashed before any
+   application code ran. Claude Code's Bun-native API client masked the
+   breakage; its Node helpers (including the OAuth code-exchange path used
+   by `/login`) crashed immediately and surfaced as a misleading
+   `OAuth error: Request failed with status code 403`. OpenCode failed to
+   launch outright.
+
+Node 24 ships undici with first-class proxy support behind
+`NODE_USE_ENV_PROXY=1`. Set that env var alongside `HTTP_PROXY`,
+`HTTPS_PROXY`, and `NO_PROXY`; Node's built-in `fetch`, `http`, and
+`https` then honor the proxy without any require-time wiring. Removes the
+npm package, the `--require` preload, the `NODE_PATH` dependency, the
+lowercase proxy-var duplicates, and `GLOBAL_AGENT_HTTP_PROXY` — one
+officially-supported flag replaces the whole stack.
