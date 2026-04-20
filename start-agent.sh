@@ -499,7 +499,7 @@ LogLevel Info
 MaxClients 100
 FilterDefaultDeny Yes
 Filter "/etc/tinyproxy/filter"
-FilterType 1
+FilterExtended Yes
 FilterURLs No
 ConnectPort 443
 ConnectPort 80
@@ -653,10 +653,22 @@ fi
 
 # ── inject OpenCode config (inference provider) ─────────────────────────────
 OPENCODE_CONFIG_FILE="$OPENCODE_CONFIG_DIR/opencode.json"
-python3 - "$OPENCODE_CONFIG_FILE" "$BACKEND" "http://$HOST_IP:$INFERENCE_PORT/v1" "${OMLX_API_KEY:-}" << 'PYEOF'
-import json, os, sys
-path, backend, base_url = sys.argv[1], sys.argv[2], sys.argv[3]
-api_key = sys.argv[4] if len(sys.argv) > 4 else ""
+python3 - \
+  "$OPENCODE_CONFIG_FILE" \
+  "$BACKEND" \
+  "http://$HOST_IP:$INFERENCE_PORT/v1" \
+  "http://127.0.0.1:$INFERENCE_PORT/v1,http://$HOST_IP:$INFERENCE_PORT/v1" \
+  "${OMLX_API_KEY:-}" \
+  "${CLAUDE_AGENT_DEFAULT_MODEL:-}" \
+  << 'PYEOF'
+import json, os, sys, urllib.request, urllib.error
+path        = sys.argv[1]
+backend     = sys.argv[2]
+runtime_url = sys.argv[3]   # what the container will hit (HOST_IP)
+probe_urls  = [u for u in sys.argv[4].split(',') if u]
+api_key     = sys.argv[5] if len(sys.argv) > 5 else ""
+default_model_override = sys.argv[6] if len(sys.argv) > 6 else ""
+
 if os.path.exists(path):
     with open(path) as f:
         try:
@@ -665,32 +677,86 @@ if os.path.exists(path):
             data = {}
 else:
     data = {}
+
+def discover_models():
+    """Try each probe URL in order; return (models_dict, working_url) or ({}, None)."""
+    last_err = None
+    for base in probe_urls:
+        try:
+            if backend == "omlx":
+                url = base + "/models"
+                req = urllib.request.Request(url)
+                if api_key:
+                    req.add_header("Authorization", f"Bearer {api_key}")
+            elif backend == "ollama":
+                url = base.replace("/v1", "/api/tags")
+                req = urllib.request.Request(url)
+            else:
+                return {}, None
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                body = json.loads(resp.read())
+                if backend == "omlx":
+                    return ({m["id"]: {"name": m["id"]} for m in body.get("data", [])}, base)
+                if backend == "ollama":
+                    return ({m["name"]: {"name": m["name"]} for m in body.get("models", [])}, base)
+        except Exception as e:
+            last_err = e
+            continue
+    if last_err is not None:
+        print(f"[opencode-config] discovery failed across {probe_urls}: {last_err}", file=sys.stderr)
+    return {}, None
+
 data.setdefault('$schema', 'https://opencode.ai/config.json')
 providers = data.setdefault('provider', {})
+
 if backend == "ollama":
-    entry = providers.setdefault('ollama', {
-        "npm": "@ai-sdk/openai-compatible",
-        "name": "Ollama (host)",
-        "options": {},
-        "models": {},
-    })
-    entry.setdefault('options', {})['baseURL'] = base_url
+    provider_key, provider_name = "ollama", "Ollama (host)"
 elif backend == "omlx":
-    entry = providers.setdefault('omlx', {
+    provider_key, provider_name = "omlx", "omlx (host)"
+else:
+    provider_key = None
+
+if provider_key:
+    entry = providers.setdefault(provider_key, {
         "npm": "@ai-sdk/openai-compatible",
-        "name": "omlx (host)",
+        "name": provider_name,
         "options": {},
         "models": {},
     })
     opts = entry.setdefault('options', {})
-    opts['baseURL'] = base_url
-    if api_key:
+    opts['baseURL'] = runtime_url
+    # @ai-sdk/openai-compatible requires a non-empty apiKey in some versions.
+    # Ollama ignores the value; omlx uses it if the server enforces auth.
+    if backend == "ollama":
+        opts['apiKey'] = "ollama"
+    elif backend == "omlx" and api_key:
         opts['apiKey'] = api_key
+    elif backend == "omlx":
+        opts.setdefault('apiKey', "omlx")
+
+    discovered, working_url = discover_models()
+    if discovered:
+        # Always refresh on success — stale model lists are worse than useless.
+        entry['models'] = discovered
+        print(f"[opencode-config] discovered {len(discovered)} {backend} models via {working_url}", file=sys.stderr)
+    else:
+        print(f"[opencode-config] no {backend} models discovered; preserving existing models dict ({len(entry.get('models', {}))} entries)", file=sys.stderr)
+
+    # Default model: env override wins, else first discovered, else leave whatever's there.
+    if default_model_override:
+        data['model'] = f"{provider_key}:{default_model_override}"
+    elif not data.get('model') and discovered:
+        data['model'] = f"{provider_key}:{next(iter(discovered))}"
+
 data.setdefault('compaction', {})['auto'] = False
 os.makedirs(os.path.dirname(path), exist_ok=True)
 with open(path, 'w') as f:
     json.dump(data, f, indent=2)
     f.write('\n')
+
+# Emit a machine-friendly summary line for the shell wrapper.
+count = len(providers.get(provider_key, {}).get('models', {})) if provider_key else 0
+print(f"MODEL_COUNT={count}", file=sys.stderr)
 PYEOF
 
 # ── skills sync (new-container path only) ────────────────────────────────────
