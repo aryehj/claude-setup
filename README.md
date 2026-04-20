@@ -241,8 +241,22 @@ start-agent.sh --reload-allowlist
 
 Suffix matching applies — `github.com` covers `api.github.com`,
 `codeload.github.com`, etc. The file is seeded on first run with a permissive
-dev/research list (Anthropic, GitHub, package registries, major scholarly
-publishers, etc.). Prune it to match your actual usage.
+dev/research list (Anthropic, package registries, major scholarly publishers,
+etc.). Prune it to match your actual usage.
+
+The seed intentionally **omits write-capable hosts** that can't be split from
+their read surface at the HTTP-proxy layer: `github.com`, `gitlab.com`,
+`bitbucket.org`, `huggingface.co`, container registries (`docker.io`,
+`quay.io`, `ghcr.io`), and dataset-upload hubs (`zenodo`, `figshare`,
+`kaggle`, `osf`, `dataverse`, `datadryad`). Code reads over tarball/raw still
+work via `codeload.github.com` + `githubusercontent.com`. Add the write hosts
+back explicitly if your workflow requires `gh`, HTTPS push, image push, or
+dataset upload from inside the container.
+
+**Existing users:** these defaults only apply to newly-seeded allowlists. If
+`~/.claude-agent/allowlist.txt` already exists, hand-remove the write hosts
+above (or delete the file to re-seed) and run
+`start-agent.sh --reload-allowlist`.
 
 ### Verifying the egress allowlist
 

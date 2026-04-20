@@ -192,6 +192,17 @@ is a ~2s `start-agent.sh --reload-allowlist` fast path that regenerates
 the tinyproxy filter and sends SIGHUP without touching the container. The
 LLM inside the container has no write path to the allowlist.
 
+**The seed omits write-capable hosts.** tinyproxy filters by hostname, not
+URL path or HTTP method, so `github.com` can't be "read-only." The seeded
+list therefore omits `github.com`/`gitlab.com`/`bitbucket.org`,
+`huggingface.co`, container registries, and dataset-upload hubs
+(zenodo/figshare/kaggle/osf/dataverse/datadryad). Code reads still work via
+`codeload.github.com` + `githubusercontent.com`. This makes it safer to
+enable webfetch/websearch in the agent — an injected page can't direct the
+agent to push, open a PR, or publish a dataset via the allowed egress.
+Users who need `gh`/HTTPS-push/image-push from inside the container add
+those hosts back by hand.
+
 **Ollama via host networking.** `HOST_IP` is discovered at launch from the
 VM's default route (under `colima start --network-address`, that's the
 macOS host). The container is pointed at `http://$HOST_IP:11434` via the

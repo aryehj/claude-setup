@@ -185,12 +185,14 @@ claude.com
 opencode.ai
 
 # === Source control & code hosting ===
-github.com
+# Read-only hosts only. github.com / gitlab.com / bitbucket.org are
+# intentionally omitted because the HTTP-proxy allowlist can't distinguish
+# reads from writes (PRs, pushes, issue comments). Tarball/raw fetches go
+# through codeload/githubusercontent. If you need `gh` or HTTPS push from
+# inside the container, add the write host explicitly.
 githubusercontent.com
 githubassets.com
 codeload.github.com
-gitlab.com
-bitbucket.org
 git-scm.com
 
 # === Package registries ===
@@ -208,10 +210,9 @@ proxy.golang.org
 hex.pm
 
 # === Container / image registries ===
-docker.io
-docker.com
-quay.io
-ghcr.io
+# Omitted by default (docker.io / quay.io / ghcr.io) — writes (image push)
+# aren't distinguishable from reads at the proxy. Add back if you pull
+# images from inside the container.
 
 # === OS package repos ===
 debian.org
@@ -220,7 +221,8 @@ deb.nodesource.com
 astral.sh
 
 # === Model & dataset hubs ===
-huggingface.co
+# huggingface.co omitted — supports model/dataset uploads. Add back if
+# you need HF downloads from inside the container.
 ollama.com
 
 # === General web & reference ===
@@ -285,12 +287,8 @@ oup.com
 muse.jhu.edu
 
 # === Data repositories & open science ===
-zenodo.org
-figshare.com
-osf.io
-dataverse.org
-datadryad.org
-kaggle.com
+# Omitted by default — zenodo/figshare/osf/dataverse/datadryad/kaggle all
+# support authenticated uploads. Add back per-host if you need reads.
 
 # === Government / statistical / standards ===
 nasa.gov
