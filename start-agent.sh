@@ -742,11 +742,13 @@ if provider_key:
     else:
         print(f"[opencode-config] no {backend} models discovered; preserving existing models dict ({len(entry.get('models', {}))} entries)", file=sys.stderr)
 
-    # Default model: env override wins, else first discovered, else leave whatever's there.
+    # Default model: env override wins; otherwise reset to a local model whenever
+    # the currently-persisted `model` isn't from our active local provider_key
+    # (e.g. a stale cloud selection opencode saved on a prior run).
     if default_model_override:
-        data['model'] = f"{provider_key}:{default_model_override}"
-    elif not data.get('model') and discovered:
-        data['model'] = f"{provider_key}:{next(iter(discovered))}"
+        data['model'] = f"{provider_key}/{default_model_override}"
+    elif discovered and (not data.get('model') or data['model'].split('/')[0] != provider_key):
+        data['model'] = f"{provider_key}/{next(iter(discovered))}"
 
 data.setdefault('compaction', {})['auto'] = False
 os.makedirs(os.path.dirname(path), exist_ok=True)
