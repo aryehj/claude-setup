@@ -222,6 +222,14 @@ between runs does not remove the other provider's config. Config and data
 dirs (`~/.claude-agent/opencode-config`, `~/.claude-agent/opencode-data`)
 are bind-mounted into the container to persist credentials and state.
 
+**Per-mode OpenCode models are set via `--plan-model`, `--exec-model`, and `--small-model`.**
+These flags (or their env var equivalents `CLAUDE_AGENT_PLAN_MODEL`, `CLAUDE_AGENT_EXEC_MODEL`,
+`CLAUDE_AGENT_SMALL_MODEL`) inject `agent.plan.model`, `agent.build.model`, and `small_model`
+into `opencode.json` respectively. Bare model IDs (e.g. `gemma3:27b`) are prefixed with the
+active provider key; full `provider/model` strings are used as-is, enabling cross-provider
+mixing. Model discovery runs unchanged — these fields are written after discovery and do not
+affect the models list. Omitting a flag leaves any existing per-mode entry in place.
+
 **`--backend=omlx` selects omlx as the local inference server.** Default
 is `ollama`. omlx is an MLX-based inference server for Apple Silicon with
 an OpenAI-compatible API on port 8000 and `--api-key` support. Its API-key
@@ -252,6 +260,14 @@ rest — no `global-agent`, no `--require` shim, no `NODE_PATH`, no extra
 packages to keep in sync. Claude Code's own Bun runtime already honors
 `HTTPS_PROXY` on its own, so this is only load-bearing for OpenCode and for
 any Node helpers Claude Code spawns. See ADR-013.
+
+**Web tools: webfetch allowed, websearch denied.** `opencode.json` is
+generated with `permission.webfetch: "allow"` and `permission.websearch:
+"deny"`. webfetch egress is constrained by the existing tinyproxy allowlist
+— an injected page can't redirect fetches to hosts that aren't already
+trusted. websearch is off because its default backend (Exa MCP) would route
+queries through a third-party gateway; a self-hosted replacement is tracked
+as a phase-2 item.
 
 **`host.docker.internal:host-gateway` is set belt-and-suspenders** on
 `docker run` so tools that hard-code the name resolve to the host even on

@@ -12,6 +12,7 @@
 #                  [--backend=ollama|omlx]
 #                  [--memory=VALUE] [--cpus=N]
 #                  [--git-name=NAME] [--git-email=EMAIL]
+#                  [--plan-model=MODEL] [--exec-model=MODEL] [--small-model=MODEL]
 #                  [project-dir]
 
 set -euo pipefail
@@ -24,6 +25,9 @@ CLI_CPUS=""
 CLI_GIT_NAME=""
 CLI_GIT_EMAIL=""
 CLI_BACKEND=""
+CLI_PLAN_MODEL=""
+CLI_EXEC_MODEL=""
+CLI_SMALL_MODEL=""
 POSITIONAL=()
 
 usage() {
@@ -44,6 +48,10 @@ OPTIONS:
   --backend=BACKEND      Local inference backend: ollama (default) or omlx.
   --git-name=NAME        Git author/committer name inside the container.
   --git-email=EMAIL      Git author/committer email inside the container.
+  --plan-model=MODEL     OpenCode model for plan-mode agent (agent.plan).
+                         Bare model ID (e.g. gemma3:27b) or provider/model.
+  --exec-model=MODEL     OpenCode model for execution/build agent (agent.build).
+  --small-model=MODEL    OpenCode small model for lightweight tasks (small_model).
   -h, --help             Show this help.
 
 ALLOWLIST:
@@ -60,6 +68,10 @@ ENVIRONMENT:
   GIT_USER_EMAIL         Default git email (overridden by --git-email).
   OMLX_API_KEY           API key for omlx (passed into the container when
                          --backend=omlx).
+  CLAUDE_AGENT_DEFAULT_MODEL  Default OpenCode model (overridden by --default-model).
+  CLAUDE_AGENT_PLAN_MODEL     OpenCode plan-agent model (overridden by --plan-model).
+  CLAUDE_AGENT_EXEC_MODEL     OpenCode exec/build-agent model (overridden by --exec-model).
+  CLAUDE_AGENT_SMALL_MODEL    OpenCode small model (overridden by --small-model).
 USAGE
 }
 
@@ -77,6 +89,12 @@ while [[ $# -gt 0 ]]; do
     --git-email)         CLI_GIT_EMAIL="${2:?--git-email requires a value}"; shift ;;
     --backend=*)         CLI_BACKEND="${1#--backend=}" ;;
     --backend)           CLI_BACKEND="${2:?--backend requires a value}"; shift ;;
+    --plan-model=*)      CLI_PLAN_MODEL="${1#--plan-model=}" ;;
+    --plan-model)        CLI_PLAN_MODEL="${2:?--plan-model requires a value}"; shift ;;
+    --exec-model=*)      CLI_EXEC_MODEL="${1#--exec-model=}" ;;
+    --exec-model)        CLI_EXEC_MODEL="${2:?--exec-model requires a value}"; shift ;;
+    --small-model=*)     CLI_SMALL_MODEL="${1#--small-model=}" ;;
+    --small-model)       CLI_SMALL_MODEL="${2:?--small-model requires a value}"; shift ;;
     -h|--help)           usage; exit 0 ;;
     *)                   POSITIONAL+=("$1") ;;
   esac
@@ -135,6 +153,10 @@ if [[ "$BACKEND" == "omlx" ]]; then
     echo "warning: OMLX_API_KEY not set. omlx requests from the container will fail if the server requires auth." >&2
   fi
 fi
+
+PLAN_MODEL="${CLI_PLAN_MODEL:-${CLAUDE_AGENT_PLAN_MODEL:-}}"
+EXEC_MODEL="${CLI_EXEC_MODEL:-${CLAUDE_AGENT_EXEC_MODEL:-}}"
+SMALL_MODEL="${CLI_SMALL_MODEL:-${CLAUDE_AGENT_SMALL_MODEL:-}}"
 
 # ── constants ────────────────────────────────────────────────────────────────
 COLIMA_PROFILE="claude-agent"
@@ -658,6 +680,9 @@ python3 - \
   "http://127.0.0.1:$INFERENCE_PORT/v1,http://$HOST_IP:$INFERENCE_PORT/v1" \
   "${OMLX_API_KEY:-}" \
   "${CLAUDE_AGENT_DEFAULT_MODEL:-}" \
+  "${PLAN_MODEL:-}" \
+  "${EXEC_MODEL:-}" \
+  "${SMALL_MODEL:-}" \
   << 'PYEOF'
 import json, os, sys, urllib.request, urllib.error
 path        = sys.argv[1]
@@ -666,6 +691,9 @@ runtime_url = sys.argv[3]   # what the container will hit (HOST_IP)
 probe_urls  = [u for u in sys.argv[4].split(',') if u]
 api_key     = sys.argv[5] if len(sys.argv) > 5 else ""
 default_model_override = sys.argv[6] if len(sys.argv) > 6 else ""
+plan_model  = sys.argv[7] if len(sys.argv) > 7 else ""
+exec_model  = sys.argv[8] if len(sys.argv) > 8 else ""
+small_model = sys.argv[9] if len(sys.argv) > 9 else ""
 
 if os.path.exists(path):
     with open(path) as f:
@@ -748,6 +776,21 @@ if provider_key:
     elif discovered and (not data.get('model') or data['model'].split('/')[0] != provider_key):
         data['model'] = f"{provider_key}/{next(iter(discovered))}"
 
+    def qualify(m):
+        return m if '/' in m else f"{provider_key}/{m}"
+
+    if small_model:
+        data['small_model'] = qualify(small_model)
+
+    agents = data.setdefault('agent', {})
+    if plan_model:
+        agents.setdefault('plan', {})['model'] = qualify(plan_model)
+    if exec_model:
+        agents.setdefault('build', {})['model'] = qualify(exec_model)
+
+perms = data.setdefault('permission', {})
+perms.setdefault('webfetch', 'allow')
+perms.setdefault('websearch', 'deny')
 data.setdefault('compaction', {})['auto'] = False
 os.makedirs(os.path.dirname(path), exist_ok=True)
 with open(path, 'w') as f:
