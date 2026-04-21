@@ -62,6 +62,16 @@ RUN curl -fsSL https://claude.ai/install.sh | bash \
 # separate curl-pipe installer. The binary is named `opencode`.
 RUN npm install -g opencode-ai@latest
 
+# ── SearXNG MCP shim ─────────────────────────────────────────────────────────
+# ~40-line FastMCP wrapper that exposes a single `websearch` tool backed by a
+# local SearXNG instance. Installed to /opt/searxng-mcp/server.py so opencode
+# can spawn it as a stdio MCP server when --enable-local-search is active.
+# Custom shim used instead of ihor-sokoliuk/mcp-searxng (npm) because the npm
+# package bundles a `web_url_read` tool that bypasses opencode's webfetch
+# permission model. See ADR-014.
+COPY searxng-mcp/server.py /opt/searxng-mcp/server.py
+RUN uv pip install --system mcp[cli] httpx
+
 # ── UV cache + project venv redirects (dynamic $TMPDIR) ──────────────────────
 # Claude Code's bubblewrap sandbox mounts /root/.cache read-only and /tmp
 # read-only at the mount layer, but exports a writable $TMPDIR. Resolve both

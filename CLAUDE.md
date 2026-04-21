@@ -261,13 +261,24 @@ packages to keep in sync. Claude Code's own Bun runtime already honors
 `HTTPS_PROXY` on its own, so this is only load-bearing for OpenCode and for
 any Node helpers Claude Code spawns. See ADR-013.
 
-**Web tools: webfetch allowed, websearch denied.** `opencode.json` is
-generated with `permission.webfetch: "allow"` and `permission.websearch:
+**Web tools: webfetch allowed, websearch denied by default.** `opencode.json`
+is generated with `permission.webfetch: "allow"` and `permission.websearch:
 "deny"`. webfetch egress is constrained by the existing tinyproxy allowlist
 — an injected page can't redirect fetches to hosts that aren't already
-trusted. websearch is off because its default backend (Exa MCP) would route
-queries through a third-party gateway; a self-hosted replacement is tracked
-as a phase-2 item.
+trusted. websearch is off by default because its default backend (Exa MCP)
+would route queries through a third-party gateway.
+
+**SearXNG-backed websearch via `--enable-local-search`.** When the flag is
+set (env: `CLAUDE_AGENT_ENABLE_LOCAL_SEARCH=1`), a `searxng` docker container
+is started on the bridge alongside `claude-agent`, and opencode's
+`permission.websearch` is flipped to `"allow"` with a custom Python FastMCP
+shim (`/opt/searxng-mcp/server.py`) wired in as `mcp.searxng`. SearXNG
+fans out to upstream engines through tinyproxy via `outgoing.proxies` in
+`~/.claude-agent/searxng/settings.yml` — not via `HTTPS_PROXY` env vars,
+which SearXNG silently ignores due to an explicit `transport=` in its httpx
+client (see ADR-014). The allowlist therefore governs all SearXNG egress,
+same as the rest of the stack. `NO_PROXY=searxng` is added to `claude-agent`
+so the MCP shim's direct container-to-container HTTP call bypasses tinyproxy.
 
 **`host.docker.internal:host-gateway` is set belt-and-suspenders** on
 `docker run` so tools that hard-code the name resolve to the host even on

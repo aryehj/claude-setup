@@ -10,6 +10,7 @@
 # Usage:
 #   start-agent.sh [--rebuild] [--reload-allowlist]
 #                  [--backend=ollama|omlx]
+#                  [--enable-local-search]
 #                  [--memory=VALUE] [--cpus=N]
 #                  [--git-name=NAME] [--git-email=EMAIL]
 #                  [--plan-model=MODEL] [--exec-model=MODEL] [--small-model=MODEL]
@@ -25,6 +26,7 @@ CLI_CPUS=""
 CLI_GIT_NAME=""
 CLI_GIT_EMAIL=""
 CLI_BACKEND=""
+CLI_LOCAL_SEARCH=""
 CLI_PLAN_MODEL=""
 CLI_EXEC_MODEL=""
 CLI_SMALL_MODEL=""
@@ -48,6 +50,9 @@ OPTIONS:
   --backend=BACKEND      Local inference backend: ollama (default) or omlx.
   --git-name=NAME        Git author/committer name inside the container.
   --git-email=EMAIL      Git author/committer email inside the container.
+  --enable-local-search  Start a SearXNG container on the bridge and wire it
+                         into opencode as a local websearch MCP server.
+                         Env: CLAUDE_AGENT_ENABLE_LOCAL_SEARCH=1
   --plan-model=MODEL     OpenCode model for plan-mode agent (agent.plan).
                          Bare model ID (e.g. gemma3:27b) or provider/model.
   --exec-model=MODEL     OpenCode model for execution/build agent (agent.build).
@@ -68,10 +73,11 @@ ENVIRONMENT:
   GIT_USER_EMAIL         Default git email (overridden by --git-email).
   OMLX_API_KEY           API key for omlx (passed into the container when
                          --backend=omlx).
-  CLAUDE_AGENT_DEFAULT_MODEL  Default OpenCode model (set via env var; no CLI flag).
-  CLAUDE_AGENT_PLAN_MODEL     OpenCode plan-agent model (overridden by --plan-model).
-  CLAUDE_AGENT_EXEC_MODEL     OpenCode exec/build-agent model (overridden by --exec-model).
-  CLAUDE_AGENT_SMALL_MODEL    OpenCode small model (overridden by --small-model).
+  CLAUDE_AGENT_DEFAULT_MODEL      Default OpenCode model (set via env var; no CLI flag).
+  CLAUDE_AGENT_PLAN_MODEL         OpenCode plan-agent model (overridden by --plan-model).
+  CLAUDE_AGENT_EXEC_MODEL         OpenCode exec/build-agent model (overridden by --exec-model).
+  CLAUDE_AGENT_SMALL_MODEL        OpenCode small model (overridden by --small-model).
+  CLAUDE_AGENT_ENABLE_LOCAL_SEARCH=1  Enable SearXNG-backed websearch (overridden by --enable-local-search).
 USAGE
 }
 
@@ -89,6 +95,7 @@ while [[ $# -gt 0 ]]; do
     --git-email)         CLI_GIT_EMAIL="${2:?--git-email requires a value}"; shift ;;
     --backend=*)         CLI_BACKEND="${1#--backend=}" ;;
     --backend)           CLI_BACKEND="${2:?--backend requires a value}"; shift ;;
+    --enable-local-search) CLI_LOCAL_SEARCH="true" ;;
     --plan-model=*)      CLI_PLAN_MODEL="${1#--plan-model=}" ;;
     --plan-model)        CLI_PLAN_MODEL="${2:?--plan-model requires a value}"; shift ;;
     --exec-model=*)      CLI_EXEC_MODEL="${1#--exec-model=}" ;;
@@ -158,6 +165,15 @@ PLAN_MODEL="${CLI_PLAN_MODEL:-${CLAUDE_AGENT_PLAN_MODEL:-}}"
 EXEC_MODEL="${CLI_EXEC_MODEL:-${CLAUDE_AGENT_EXEC_MODEL:-}}"
 SMALL_MODEL="${CLI_SMALL_MODEL:-${CLAUDE_AGENT_SMALL_MODEL:-}}"
 
+_ls_env="${CLAUDE_AGENT_ENABLE_LOCAL_SEARCH:-}"
+if [[ "$_ls_env" == "1" || "$_ls_env" == "true" || "$_ls_env" == "yes" ]]; then
+  LOCAL_SEARCH_ENABLED=true
+else
+  LOCAL_SEARCH_ENABLED=false
+fi
+[[ "${CLI_LOCAL_SEARCH:-}" == "true" ]] && LOCAL_SEARCH_ENABLED=true
+unset _ls_env
+
 # ── constants ────────────────────────────────────────────────────────────────
 COLIMA_PROFILE="claude-agent"
 CONTAINER_NAME="claude-agent"
@@ -172,6 +188,10 @@ OPENCODE_DATA_DIR="$HOME/.claude-agent/opencode-data"
 ALLOWLIST_DIR="$HOME/.claude-agent"
 ALLOWLIST_FILE="$ALLOWLIST_DIR/allowlist.txt"
 TINYPROXY_PORT=8888
+SEARXNG_CONTAINER="searxng"
+SEARXNG_DIR="$HOME/.claude-agent/searxng"
+SEARXNG_SETTINGS_FILE="$SEARXNG_DIR/settings.yml"
+AGENT_NET_NAME="claude-agent-net"
 
 # ── preflight ────────────────────────────────────────────────────────────────
 if ! command -v colima &>/dev/null; then
@@ -260,6 +280,11 @@ archive.org
 google.com
 duckduckgo.com
 bing.com
+search.brave.com
+api.qwant.com
+# api.github.com — targeted entry for SearXNG's GitHub code-search engine.
+# Does NOT enable github.com web writes (push, PR, issue comments).
+api.github.com
 
 # === Biomedical / life sciences ===
 ncbi.nlm.nih.gov
@@ -457,6 +482,10 @@ if $REBUILD && ! $RELOAD_ALLOWLIST; then
     echo "==> --rebuild: removing container '$CONTAINER_NAME'"
     docker rm -f "$CONTAINER_NAME" >/dev/null
   fi
+  if $LOCAL_SEARCH_ENABLED && docker container inspect "$SEARXNG_CONTAINER" &>/dev/null; then
+    echo "==> --rebuild: removing container '$SEARXNG_CONTAINER'"
+    docker rm -f "$SEARXNG_CONTAINER" >/dev/null
+  fi
   if docker image inspect "$IMAGE_TAG" &>/dev/null; then
     echo "==> --rebuild: removing image '$IMAGE_TAG'"
     docker image rm "$IMAGE_TAG" >/dev/null
@@ -494,6 +523,64 @@ if [[ -z "$HOST_IP" ]]; then
 fi
 
 echo "==> VM network: bridge=$BRIDGE_IP cidr=$BRIDGE_CIDR host=$HOST_IP"
+
+# ── user-defined network for inter-container DNS (agent + searxng) ────────────
+# Docker embedded DNS resolves container names only on user-defined networks,
+# not on the default bridge. claude-agent-net provides this without changing
+# tinyproxy's Listen address — VM routing lets containers on this network reach
+# $BRIDGE_IP:$TINYPROXY_PORT through the default bridge interface.
+AGENT_NET_CIDR=""
+if $LOCAL_SEARCH_ENABLED; then
+  vm_ssh docker network inspect "$AGENT_NET_NAME" >/dev/null 2>&1 \
+    || vm_ssh docker network create "$AGENT_NET_NAME" >/dev/null
+  AGENT_NET_CIDR=$(vm_ssh docker network inspect "$AGENT_NET_NAME" -f '{{(index .IPAM.Config 0).Subnet}}' 2>/dev/null | tr -d '\r' || true)
+  if [[ -z "$AGENT_NET_CIDR" ]]; then
+    AGENT_NET_CIDR="172.20.0.0/24"
+    echo "warning: could not discover $AGENT_NET_NAME CIDR; falling back to $AGENT_NET_CIDR" >&2
+  fi
+  echo "==> Agent network: $AGENT_NET_NAME cidr=$AGENT_NET_CIDR"
+fi
+
+# ── SearXNG settings.yml seed (first run only, local-search path) ────────────
+if $LOCAL_SEARCH_ENABLED; then
+  mkdir -p "$SEARXNG_DIR"
+  if [[ ! -f "$SEARXNG_SETTINGS_FILE" ]]; then
+    SECRET_KEY="$(openssl rand -hex 32)"
+    cat > "$SEARXNG_SETTINGS_FILE" <<SXNG
+# Engine names must match the canonical 'name:' field in SearXNG's upstream
+# settings.yml defaults. Verify with:
+#   docker exec searxng grep -A1 '^- name:' /usr/local/searxng/searx/settings.yml
+use_default_settings:
+  engines:
+    keep_only:
+      - google
+      - bing
+      - duckduckgo
+      - brave
+      - qwant
+      - wikipedia
+      - arxiv
+      - github
+      - stack overflow
+
+server:
+  secret_key: "$SECRET_KEY"
+  base_url: "http://searxng:8080/"
+  limiter: false
+
+search:
+  formats:
+    - html
+    - json
+
+outgoing:
+  proxies:
+    all://: "http://$BRIDGE_IP:$TINYPROXY_PORT"
+SXNG
+    echo "==> Seeded $SEARXNG_SETTINGS_FILE (secret_key generated, proxy=$BRIDGE_IP:$TINYPROXY_PORT)"
+    unset SECRET_KEY
+  fi
+fi
 
 # ── tinyproxy install in VM (idempotent) ─────────────────────────────────────
 if ! vm_ssh sh -c 'command -v tinyproxy' >/dev/null 2>&1; then
@@ -549,9 +636,11 @@ cat > "$TMP_WORK/firewall-apply.sh" <<FWEOF
 set -e
 BRIDGE_IP="$BRIDGE_IP"
 BRIDGE_CIDR="$BRIDGE_CIDR"
+AGENT_NET_CIDR="$AGENT_NET_CIDR"
 HOST_IP="$HOST_IP"
 TINYPROXY_PORT="$TINYPROXY_PORT"
 INFERENCE_PORT="$INFERENCE_PORT"
+LOCAL_SEARCH_ENABLED="$LOCAL_SEARCH_ENABLED"
 
 # Ensure DOCKER-USER exists (docker creates it on fresh daemons, but be safe).
 sudo iptables -N DOCKER-USER 2>/dev/null || true
@@ -561,17 +650,32 @@ sudo iptables -C FORWARD -j DOCKER-USER 2>/dev/null || sudo iptables -I FORWARD 
 sudo iptables -N CLAUDE_AGENT 2>/dev/null || true
 sudo iptables -F CLAUDE_AGENT
 
-# Jump into our chain from DOCKER-USER for bridge traffic (idempotent).
+# Jump into our chain from DOCKER-USER for default bridge traffic (idempotent).
 sudo iptables -C DOCKER-USER -s "\$BRIDGE_CIDR" -j CLAUDE_AGENT 2>/dev/null \
   || sudo iptables -I DOCKER-USER 1 -s "\$BRIDGE_CIDR" -j CLAUDE_AGENT
 
-# Populate rules in order. Only bridge traffic reaches here, so the source
-# match is redundant and omitted.
+# Also jump for user-defined agent network traffic. Note: claude-agent-net →
+# tinyproxy ($BRIDGE_IP:$TINYPROXY_PORT) does NOT go through FORWARD — $BRIDGE_IP
+# is a local address on the VM's docker0 interface, so that traffic hits the INPUT
+# chain instead and is not controlled here. This jump is load-bearing for the
+# claude-agent → searxng:8080 intra-network path, which DOES traverse FORWARD.
+if [ -n "\$AGENT_NET_CIDR" ]; then
+  sudo iptables -C DOCKER-USER -s "\$AGENT_NET_CIDR" -j CLAUDE_AGENT 2>/dev/null \
+    || sudo iptables -I DOCKER-USER 2 -s "\$AGENT_NET_CIDR" -j CLAUDE_AGENT
+fi
+
+# Populate rules in order.
 sudo iptables -A CLAUDE_AGENT -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
 sudo iptables -A CLAUDE_AGENT -d "\$BRIDGE_IP" -p tcp --dport "\$TINYPROXY_PORT" -j RETURN
 sudo iptables -A CLAUDE_AGENT -d "\$HOST_IP"   -p tcp --dport "\$INFERENCE_PORT" -j RETURN
 sudo iptables -A CLAUDE_AGENT -d "\$BRIDGE_IP" -p udp --dport 53 -j RETURN
 sudo iptables -A CLAUDE_AGENT -d "\$BRIDGE_IP" -p tcp --dport 53 -j RETURN
+# Allow inter-container traffic on port 8080 for claude-agent → searxng MCP.
+# Both containers are on AGENT_NET_CIDR (claude-agent-net user-defined network).
+# SearXNG → tinyproxy at BRIDGE_IP:8888 is already covered by the rule above.
+if [ "\$LOCAL_SEARCH_ENABLED" = "true" ] && [ -n "\$AGENT_NET_CIDR" ]; then
+  sudo iptables -A CLAUDE_AGENT -s "\$AGENT_NET_CIDR" -d "\$AGENT_NET_CIDR" -p tcp --dport 8080 -j RETURN
+fi
 sudo iptables -A CLAUDE_AGENT -j REJECT --reject-with icmp-admin-prohibited
 FWEOF
 
@@ -640,6 +744,27 @@ elif [[ -f "$IMAGE_STAMP" ]]; then
   fi
 fi
 
+# ── SearXNG container lifecycle ──────────────────────────────────────────────
+if $LOCAL_SEARCH_ENABLED; then
+  echo "==> Starting SearXNG container"
+  if ! docker container inspect "$SEARXNG_CONTAINER" &>/dev/null; then
+    docker run -d \
+      --name "$SEARXNG_CONTAINER" \
+      --network "$AGENT_NET_NAME" \
+      -v "$SEARXNG_SETTINGS_FILE:/etc/searxng/settings.yml:ro" \
+      docker.io/searxng/searxng >/dev/null
+    echo "    searxng: created"
+  else
+    docker start "$SEARXNG_CONTAINER" >/dev/null 2>&1 || true
+    echo "    searxng: started (existing container)"
+  fi
+else
+  if docker container inspect "$SEARXNG_CONTAINER" &>/dev/null; then
+    echo "==> Removing SearXNG container (--enable-local-search not set)"
+    docker rm -f "$SEARXNG_CONTAINER" >/dev/null
+  fi
+fi
+
 # ── host-side persistent state dirs ──────────────────────────────────────────
 mkdir -p "$CLAUDE_CONFIG_DIR" "$OPENCODE_CONFIG_DIR" "$OPENCODE_DATA_DIR"
 [[ -f "$CLAUDE_JSON_FILE" ]] || echo '{}' > "$CLAUDE_JSON_FILE"
@@ -683,6 +808,7 @@ python3 - \
   "${PLAN_MODEL:-}" \
   "${EXEC_MODEL:-}" \
   "${SMALL_MODEL:-}" \
+  "$LOCAL_SEARCH_ENABLED" \
   << 'PYEOF'
 import json, os, sys, urllib.request, urllib.error
 path        = sys.argv[1]
@@ -694,6 +820,7 @@ default_model_override = sys.argv[6] if len(sys.argv) > 6 else ""
 plan_model  = sys.argv[7] if len(sys.argv) > 7 else ""
 exec_model  = sys.argv[8] if len(sys.argv) > 8 else ""
 small_model = sys.argv[9] if len(sys.argv) > 9 else ""
+local_search_enabled = sys.argv[10].lower() in ("true", "1", "yes") if len(sys.argv) > 10 else False
 
 if os.path.exists(path):
     with open(path) as f:
@@ -789,7 +916,18 @@ if provider_key:
 
 perms = data.setdefault('permission', {})
 perms.setdefault('webfetch', 'allow')
-perms.setdefault('websearch', 'deny')
+if local_search_enabled:
+    mcps = data.setdefault('mcp', {})
+    mcps.setdefault('searxng', {
+        'type': 'local',
+        'command': ['python3', '/opt/searxng-mcp/server.py'],
+        'environment': {'SEARXNG_URL': 'http://searxng:8080'},
+    })
+    perms['websearch'] = 'allow'
+else:
+    perms.setdefault('websearch', 'deny')
+    # Remove stale searxng MCP block if local search was previously enabled.
+    data.get('mcp', {}).pop('searxng', None)
 data.setdefault('compaction', {})['auto'] = False
 os.makedirs(os.path.dirname(path), exist_ok=True)
 with open(path, 'w') as f:
@@ -842,7 +980,7 @@ DOCKER_ENV_ARGS=(
   -e "GIT_COMMITTER_EMAIL=$GIT_USER_EMAIL"
   -e "HTTPS_PROXY=http://$BRIDGE_IP:$TINYPROXY_PORT"
   -e "HTTP_PROXY=http://$BRIDGE_IP:$TINYPROXY_PORT"
-  -e "NO_PROXY=localhost,127.0.0.1,$BRIDGE_IP,$HOST_IP"
+  -e "NO_PROXY=localhost,127.0.0.1,$BRIDGE_IP,$HOST_IP,searxng"
   -e "NODE_USE_ENV_PROXY=1"
 )
 case "$BACKEND" in
@@ -931,10 +1069,16 @@ JSONEOF
   echo "==> Created $PROJECT_SETTINGS_FILE"
 fi
 
+NETWORK_ARGS=()
+if $LOCAL_SEARCH_ENABLED; then
+  NETWORK_ARGS=(--network "$AGENT_NET_NAME")
+fi
+
 echo "==> Creating container '$CONTAINER_NAME'"
 echo "    project : $PROJECT_DIR  →  $PROJECT_DIR"
 echo "    proxy   : http://$BRIDGE_IP:$TINYPROXY_PORT  (allowlist: $ALLOWLIST_FILE)"
 echo "    inference: $INFERENCE_LABEL at http://$HOST_IP:$INFERENCE_PORT"
+$LOCAL_SEARCH_ENABLED && echo "    search  : SearXNG on $AGENT_NET_NAME"
 
 rm -rf "$TMP_WORK"
 trap - EXIT
@@ -944,6 +1088,7 @@ exec docker run \
   --memory "${CLAUDE_AGENT_MEMORY_GB}g" \
   --cpus "$CLAUDE_AGENT_CPUS" \
   --add-host=host.docker.internal:host-gateway \
+  "${NETWORK_ARGS[@]}" \
   -v "$PROJECT_DIR:$PROJECT_DIR" \
   -v "$CLAUDE_CONFIG_DIR:/root/.claude" \
   -v "$CLAUDE_JSON_FILE:/root/.claude.json:ro" \

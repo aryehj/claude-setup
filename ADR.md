@@ -623,3 +623,129 @@ Node 24 ships undici with first-class proxy support behind
 npm package, the `--require` preload, the `NODE_PATH` dependency, the
 lowercase proxy-var duplicates, and `GLOBAL_AGENT_HTTP_PROXY` — one
 officially-supported flag replaces the whole stack.
+
+## ADR-014: start-agent: SearXNG-backed local websearch
+
+**Date:** 2026-04-21
+**Status:** Accepted
+
+### Context
+
+`permission.websearch` in `opencode.json` was hard-set to `"deny"` (ADR-010
+era) because the only available backend was the Exa MCP, which routes all
+queries through a third-party gateway — defeating the tinyproxy allowlist as
+the single egress-control mechanism and leaking query content to Exa. The
+plan was to replace it with a local gateway when one became practical.
+
+SearXNG is a privacy-respecting, self-hosted meta-search engine with an
+official docker image and a stable JSON API (`/search?format=json`). It is
+also the documented search backend for Perplexica, so one SearXNG instance
+can serve both the agent's MCP websearch tool and a future Perplexica
+deployment on the same bridge.
+
+### Decision
+
+**Why a local search gateway at all.** The allowlist (tinyproxy filter) is
+the single source of egress truth for the stack. A third-party search
+gateway (Exa, Serper, Brave Search API, etc.) is an unconstrained egress
+hole: any query can be routed through it, and the gateway operator sees every
+search term. A local meta-search engine that fans out through tinyproxy keeps
+all query routing under the allowlist's control.
+
+**Why SearXNG specifically.** It is Perplexica's documented search backend
+(pre-requisite for a future Perplexica deployment), ships an official docker
+image (`docker.io/searxng/searxng`), exposes a stable JSON API, and supports
+`outgoing.proxies` for routing its own fan-out through a proxy. No other
+shortlisted option (direct-DDG-scraping MCP servers, Brave Search API shim)
+cleanly satisfies both the Perplexica reuse requirement and the
+allowlist-as-single-control requirement.
+
+**Why SearXNG on the docker bridge, not host netns.** Running SearXNG's
+container with `--network host` would put its fan-out traffic in the VM's
+host network namespace, bypassing the `FORWARD` chain and therefore the
+`CLAUDE_AGENT` iptables rules entirely. SearXNG would be able to reach any
+upstream engine regardless of the allowlist — breaking the single-control
+property. Running it as a bridge-attached container means its egress hits the
+`DOCKER-USER → CLAUDE_AGENT` chain, and the tinyproxy `RETURN` rule
+(`-d $BRIDGE_IP -p tcp --dport 8888`) covers SearXNG's outbound CONNECTs
+the same way it covers the agent container's. Two additional iptables rules
+are added: one RETURN for bridge→bridge:8080 (claude-agent MCP shim →
+SearXNG JSON API) and one implicit coverage via the existing tinyproxy rule
+(SearXNG → tinyproxy for fan-out, already allowed source-agnostically).
+
+**Why `outgoing.proxies` in `settings.yml` and NOT `HTTPS_PROXY` env vars.**
+Primary-source finding in SearXNG's `searx/network/client.py`: the httpx
+client is built with an explicit `transport=SxngAsyncHTTPTransport(...)`.
+Per httpx's documented behavior, passing `transport=` overrides the default
+transport, which is also what handles env-var proxy pickup
+(`AsyncHTTPTransport` reads `HTTPS_PROXY` automatically; a custom transport
+does not). Result: `HTTPS_PROXY` set on the SearXNG container has no effect
+on its outbound engine requests — they bypass tinyproxy silently. The working
+knob is `outgoing.proxies.all//: http://<bridge-ip>:8888` in `settings.yml`,
+which SearXNG passes as a `proxy=` argument to its custom transport. A future
+contributor who sees the bridge env has `HTTPS_PROXY` set and assumes the
+proxy is already wired would be wrong; this ADR names the failure mode so
+that assumption isn't made silently.
+
+**Why a custom ~40-line Python FastMCP shim over `ihor-sokoliuk/mcp-searxng`
+(npm).** The community npm package is actively maintained and is in the
+official `modelcontextprotocol/servers` list, but it bundles a second tool,
+`web_url_read`, that fetches and Markdowns arbitrary URLs. That duplicates
+opencode's native `webfetch` capability and — critically — sits outside
+opencode's `permission.webfetch` control. The MCP-provided `web_url_read`
+would bypass opencode's permission model entirely; opencode does not support
+per-tool disabling within a given MCP server. The custom shim exposes exactly
+one tool (`websearch`) with no URL-fetch side channel. Rejecting the more
+popular package on security-posture grounds is the kind of decision that gets
+silently reversed during a "let's use the standard package" cleanup; the
+decision is documented here so it isn't.
+
+**Why a narrow curated engine set with a matching allowlist (two-lock pair).**
+The default SearXNG image enables 50+ engines spanning torrent trackers, art
+sites, and social networks — each requiring its own allowlist entry and adding
+attack surface for prompt-injection via engine-provided results. The seeded
+`settings.yml` uses `use_default_settings.engines.keep_only` to whitelist
+nine engines (Google, Bing, DuckDuckGo, Brave, Qwant, Wikipedia, arXiv,
+GitHub code search, Stack Exchange) and disables everything else. Enabling a
+new engine requires editing both `~/.claude-agent/searxng/settings.yml` AND
+`~/.claude-agent/allowlist.txt` — two separate files, intentional friction so
+"turn on a new engine" cannot happen via a single-file change.
+
+**`--enable-local-search` is a single flag that gates three components.**
+The flag controls (a) SearXNG container lifecycle, (b) the inter-container
+iptables RETURN rule, and (c) the `mcp.searxng` block and
+`permission.websearch: "allow"` in `opencode.json`. All three are applied or
+removed together so the system never enters a state where the MCP config
+references a missing container or the firewall blocks a live one.
+
+**User-defined network `claude-agent-net` for inter-container DNS.** Docker's
+embedded DNS (container-name resolution) only functions on user-defined
+networks, not the default bridge. Both `claude-agent` and `searxng` are
+attached to `claude-agent-net` (created idempotently) so `http://searxng:8080`
+resolves correctly from inside `claude-agent`. Tinyproxy remains bound to
+`$BRIDGE_IP` (default bridge gateway); containers on `claude-agent-net` reach
+it via VM-internal routing between bridge interfaces, with a corresponding
+`DOCKER-USER -s $AGENT_NET_CIDR -j CLAUDE_AGENT` jump rule ensuring the
+tinyproxy RETURN rule fires. Containers not in the `claude-agent-net` network
+(the default bridge path when `--enable-local-search` is off) are unaffected.
+
+### Consequences
+
+- `--enable-local-search` enables privacy-preserving websearch with all
+  traffic governed by the existing tinyproxy allowlist. No new egress control
+  mechanism is introduced.
+- SearXNG's `~/.claude-agent/searxng/` directory survives `--rebuild`. The
+  generated `secret_key` is stable; regenerating requires manually removing
+  that directory.
+- The SearXNG instance is also the pre-requisite for a future Perplexica
+  deployment: point Perplexica's config at `http://searxng:8080` on the same
+  bridge, add a CLAUDE_AGENT RETURN rule for perplexica→searxng:8080, done.
+- `NO_PROXY=searxng` is added to `claude-agent`'s env so the Python MCP
+  shim's direct HTTP call to `http://searxng:8080` bypasses tinyproxy (which
+  would reject it — `searxng` is not on the domain allowlist, nor should it
+  be, since it is a container name not a public host).
+- Any engine that bypasses `outgoing.proxies` (e.g. one that opens a raw
+  socket instead of going through the configured httpx transport) also bypasses
+  the allowlist. The seeded engine list was chosen from engines that use the
+  standard httpx transport; the verification step (`grep -rn 'httpx\.(get|post'`
+  across engine source) should be re-run if the engine list is expanded.
