@@ -915,7 +915,7 @@ if local_search_enabled:
     mcps = data.setdefault('mcp', {})
     mcps.setdefault('searxng', {
         'type': 'local',
-        'command': ['python3', '/opt/searxng-mcp/server.py'],
+        'command': ['/opt/searxng-mcp/venv/bin/python', '/opt/searxng-mcp/server.py'],
         'environment': {'SEARXNG_URL': 'http://searxng:8080'},
     })
     perms['websearch'] = 'allow'

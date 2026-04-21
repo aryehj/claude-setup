@@ -70,7 +70,11 @@ RUN npm install -g opencode-ai@latest
 # package bundles a `web_url_read` tool that bypasses opencode's webfetch
 # permission model. See ADR-014.
 COPY searxng-mcp/server.py /opt/searxng-mcp/server.py
-RUN uv pip install --system mcp[cli] httpx
+# Dedicated venv — Debian bookworm's system Python is PEP 668 externally
+# managed, so `uv pip install --system` hard-fails. The venv is baked into the
+# image and invoked directly (see start-agent.sh command wiring).
+RUN uv venv /opt/searxng-mcp/venv \
+ && uv pip install --python /opt/searxng-mcp/venv/bin/python 'mcp[cli]' httpx
 
 # ── UV cache + project venv redirects (dynamic $TMPDIR) ──────────────────────
 # Claude Code's bubblewrap sandbox mounts /root/.cache read-only and /tmp
