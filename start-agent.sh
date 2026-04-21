@@ -165,14 +165,11 @@ PLAN_MODEL="${CLI_PLAN_MODEL:-${CLAUDE_AGENT_PLAN_MODEL:-}}"
 EXEC_MODEL="${CLI_EXEC_MODEL:-${CLAUDE_AGENT_EXEC_MODEL:-}}"
 SMALL_MODEL="${CLI_SMALL_MODEL:-${CLAUDE_AGENT_SMALL_MODEL:-}}"
 
-_ls_env="${CLAUDE_AGENT_ENABLE_LOCAL_SEARCH:-}"
-if [[ "$_ls_env" == "1" || "$_ls_env" == "true" || "$_ls_env" == "yes" ]]; then
+if [[ "${CLI_LOCAL_SEARCH:-}" == "true" || "${CLAUDE_AGENT_ENABLE_LOCAL_SEARCH:-}" =~ ^(1|true|yes)$ ]]; then
   LOCAL_SEARCH_ENABLED=true
 else
   LOCAL_SEARCH_ENABLED=false
 fi
-[[ "${CLI_LOCAL_SEARCH:-}" == "true" ]] && LOCAL_SEARCH_ENABLED=true
-unset _ls_env
 
 # ── constants ────────────────────────────────────────────────────────────────
 COLIMA_PROFILE="claude-agent"
@@ -531,9 +528,11 @@ echo "==> VM network: bridge=$BRIDGE_IP cidr=$BRIDGE_CIDR host=$HOST_IP"
 # $BRIDGE_IP:$TINYPROXY_PORT through the default bridge interface.
 AGENT_NET_CIDR=""
 if $LOCAL_SEARCH_ENABLED; then
-  vm_ssh docker network inspect "$AGENT_NET_NAME" >/dev/null 2>&1 \
-    || vm_ssh docker network create "$AGENT_NET_NAME" >/dev/null
   AGENT_NET_CIDR=$(vm_ssh docker network inspect "$AGENT_NET_NAME" -f '{{(index .IPAM.Config 0).Subnet}}' 2>/dev/null | tr -d '\r' || true)
+  if [[ -z "$AGENT_NET_CIDR" ]]; then
+    vm_ssh docker network create "$AGENT_NET_NAME" >/dev/null
+    AGENT_NET_CIDR=$(vm_ssh docker network inspect "$AGENT_NET_NAME" -f '{{(index .IPAM.Config 0).Subnet}}' 2>/dev/null | tr -d '\r' || true)
+  fi
   if [[ -z "$AGENT_NET_CIDR" ]]; then
     AGENT_NET_CIDR="172.20.0.0/24"
     echo "warning: could not discover $AGENT_NET_NAME CIDR; falling back to $AGENT_NET_CIDR" >&2
@@ -547,9 +546,6 @@ if $LOCAL_SEARCH_ENABLED; then
   if [[ ! -f "$SEARXNG_SETTINGS_FILE" ]]; then
     SECRET_KEY="$(openssl rand -hex 32)"
     cat > "$SEARXNG_SETTINGS_FILE" <<SXNG
-# Engine names must match the canonical 'name:' field in SearXNG's upstream
-# settings.yml defaults. Verify with:
-#   docker exec searxng grep -A1 '^- name:' /usr/local/searxng/searx/settings.yml
 use_default_settings:
   engines:
     keep_only:
@@ -578,7 +574,6 @@ outgoing:
     all://: "http://$BRIDGE_IP:$TINYPROXY_PORT"
 SXNG
     echo "==> Seeded $SEARXNG_SETTINGS_FILE (secret_key generated, proxy=$BRIDGE_IP:$TINYPROXY_PORT)"
-    unset SECRET_KEY
   fi
 fi
 
