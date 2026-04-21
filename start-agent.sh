@@ -1086,7 +1086,7 @@ exec docker run \
   "${NETWORK_ARGS[@]}" \
   -v "$PROJECT_DIR:$PROJECT_DIR" \
   -v "$CLAUDE_CONFIG_DIR:/root/.claude" \
-  -v "$CLAUDE_JSON_FILE:/root/.claude.json:ro" \
+  -v "$CLAUDE_JSON_FILE:/root/.claude.json" \
   -v "$OPENCODE_CONFIG_DIR:/root/.config/opencode" \
   -v "$OPENCODE_DATA_DIR:/root/.local/share/opencode" \
   -w "$PROJECT_DIR" \
