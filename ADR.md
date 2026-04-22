@@ -799,3 +799,54 @@ static content, one source of truth, consequences below.
   bubblewrap / `$TMPDIR` constraints that only apply inside `start-claude.sh`,
   and OpenCode never runs there. `--reseed-global-claudemd` reseeds both the
   Claude Code and OpenCode copies.
+
+## ADR-016: start-agent: Vane as default-on AI research UI; SearXNG + Vane default-on
+
+**Date:** 2026-04-22
+**Status:** Accepted
+
+### Context
+
+ADR-014 introduced SearXNG as an opt-in feature (`--enable-local-search`). In
+practice, the search stack is lightweight (one extra container on the bridge)
+and broadly useful — there is no good reason to skip it. Additionally, Vane
+(formerly Perplexica, `itzcrazykns1337/vane:slim-latest`) was identified as a
+human-facing AI research UI that complements the agent's MCP websearch tool:
+SearXNG serves both. The prior opt-in flag created friction and left the
+feature undiscovered by default.
+
+### Decision
+
+**Flip search from opt-in to default-on.** SearXNG and Vane now start
+alongside `claude-agent` on every run. `--disable-search` (env:
+`CLAUDE_AGENT_DISABLE_SEARCH=1`) suppresses both. `--enable-local-search` is
+kept as a no-op deprecated alias with a warning to ease the transition.
+
+**Vane container wired to SearXNG.** Vane runs as `docker.io/itzcrazykns1337/
+vane:slim-latest` on the same `claude-agent-net` user-defined network, with
+`SEARXNG_API_URL=http://searxng:8080` pre-configured. Port 3000 is bound to
+the macOS host (`-p 3000:3000`). Vane's data directory
+(`~/.claude-agent/vane-data/`) is bind-mounted so LLM configuration and
+search history survive `--rebuild` (which removes the container but not the
+volume directory).
+
+**LLM pre-configuration is not possible via env var.** The Vane image does not
+expose an env var for the Ollama/omlx endpoint. Users configure it once via
+the web UI at `http://localhost:3000` on first access; the setting persists in
+the data volume. A startup note directs new users there.
+
+**No new firewall rules needed.** Vane → SearXNG traffic uses the existing
+intra-`AGENT_NET_CIDR` port-8080 RETURN rule. Vane → Ollama/omlx uses the
+existing `HOST_IP:INFERENCE_PORT` RETURN rule, which has no source-CIDR
+restriction — it covers all containers routed through the CLAUDE_AGENT chain.
+
+### Consequences
+
+- All new `claude-agent` runs get a local search stack and a browser-accessible
+  AI research UI without any flags.
+- Port 3000 on the macOS host is occupied by default. Users with a local dev
+  server on 3000 must pass `--disable-search` or stop Vane manually.
+- `--rebuild` removes both the SearXNG and Vane containers; data persists in
+  `~/.claude-agent/searxng/` and `~/.claude-agent/vane-data/`.
+- First-time Vane use requires a one-time manual LLM endpoint configuration
+  in the web UI; subsequent runs restore the persisted config automatically.
