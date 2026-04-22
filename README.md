@@ -194,6 +194,12 @@ start-agent.sh --rebuild
 # Apply edits to the allowlist without touching the running container
 start-agent.sh --reload-allowlist
 
+# Enable local SearXNG-backed websearch (starts a searxng container alongside claude-agent)
+start-agent.sh --enable-local-search
+
+# Set OpenCode models per mode
+start-agent.sh --plan-model=gemma3:27b --exec-model=qwen2.5-coder:32b --small-model=qwen2.5-coder:7b
+
 # Overwrite ~/.claude-containers/shared/CLAUDE.md with the repo template
 start-agent.sh --reseed-global-claudemd
 ```
@@ -402,6 +408,24 @@ entries the same way:
 }
 ```
 
+## Local websearch (SearXNG)
+
+Pass `--enable-local-search` (or set `CLAUDE_AGENT_ENABLE_LOCAL_SEARCH=1`) to
+start a [SearXNG](https://docs.searxng.org) container alongside `claude-agent`
+and wire it into OpenCode as a local `websearch` MCP tool. SearXNG fans out to
+search engines through the same tinyproxy allowlist, so all engine traffic is
+governed by `~/.claude-agent/allowlist.txt` — no third-party search gateway.
+
+The SearXNG config (including a generated `secret_key`) is seeded on first run
+at `~/.claude-agent/searxng/settings.yml` and survives `--rebuild`. To reset
+it, delete that directory and re-run.
+
+Enabled engines by default: Google, Bing, DuckDuckGo, Brave, Qwant, Wikipedia,
+arXiv, GitHub code search, Stack Exchange. Add an engine by editing
+`settings.yml` **and** `allowlist.txt` — both files must change, by design.
+
+See `ADR.md` §ADR-014 for the threat model and design rationale.
+
 ## Environment variable reference (start-agent-specific)
 
 | Variable | Default | Description |
@@ -410,5 +434,9 @@ entries the same way:
 | `CLAUDE_AGENT_MEMORY` | `8` | VM memory in GiB (overridden by `--memory`) |
 | `CLAUDE_AGENT_CPUS` | `6` | VM CPU count (overridden by `--cpus`) |
 | `OMLX_API_KEY` | *(unset)* | API key for omlx; passed into the container when `--backend=omlx` |
+| `CLAUDE_AGENT_ENABLE_LOCAL_SEARCH` | *(unset)* | Set to `1` to enable SearXNG-backed websearch (overridden by `--enable-local-search`) |
+| `CLAUDE_AGENT_PLAN_MODEL` | *(unset)* | OpenCode model for plan-mode agent (overridden by `--plan-model`) |
+| `CLAUDE_AGENT_EXEC_MODEL` | *(unset)* | OpenCode model for execution agent (overridden by `--exec-model`) |
+| `CLAUDE_AGENT_SMALL_MODEL` | *(unset)* | OpenCode small model (overridden by `--small-model`) |
 | `GIT_USER_NAME` / `GIT_USER_EMAIL` | `Dev` / `dev@localhost` | Git identity (overridden by `--git-name` / `--git-email`) |
 | `CLAUDE_SKILLS_ARCHIVE_URL` | upstream `main` tarball | Override skills source archive |
