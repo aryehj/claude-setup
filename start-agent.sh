@@ -947,12 +947,15 @@ else:
     perms.setdefault('websearch', 'deny')
     # Remove stale searxng MCP block if local search was previously enabled.
     data.get('mcp', {}).pop('searxng', None)
-data['instructions'] = (
-    "Network note: github.com and api.github.com are blocked by the egress firewall. "
-    "Do not attempt git clone over HTTPS, git push, or gh CLI calls to GitHub. "
-    "Raw file content is available via raw.githubusercontent.com; "
-    "repo archive downloads via codeload.github.com."
-)
+instructions_host_path = os.path.join(os.path.dirname(path), 'AGENTS.md')
+with open(instructions_host_path, 'w') as f:
+    f.write(
+        "Network note: github.com and api.github.com are blocked by the egress firewall. "
+        "Do not attempt git clone over HTTPS, git push, or gh CLI calls to GitHub. "
+        "Raw file content is available via raw.githubusercontent.com; "
+        "repo archive downloads via codeload.github.com.\n"
+    )
+data['instructions'] = ['/root/.config/opencode/AGENTS.md']
 data.setdefault('compaction', {})['auto'] = False
 os.makedirs(os.path.dirname(path), exist_ok=True)
 with open(path, 'w') as f:
