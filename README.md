@@ -38,6 +38,9 @@ start-claude.sh --git-name "Jane" --git-email "jane@example.com"
 
 # Equals form also works
 start-claude.sh --git-name=Jane --git-email=jane@example.com ~/projects/my-app
+
+# Overwrite ~/.claude-containers/shared/CLAUDE.md with the current template
+start-claude.sh --reseed-global-claudemd
 ```
 
 The script starts the container service automatically if it isn't already
