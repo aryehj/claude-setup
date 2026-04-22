@@ -788,6 +788,27 @@ else
   echo "==> Warning: $GLOBAL_CLAUDEMD_TEMPLATE not found; skipping global CLAUDE.md seed" >&2
 fi
 
+# ── seed OpenCode AGENTS.md from the same template ───────────────────────────
+# OpenCode loads its system instructions via the `instructions` field in
+# opencode.json (written below). The claude-dev exceptions at the end of the
+# template don't apply inside claude-agent, so strip them when seeding here.
+GLOBAL_AGENTSMD_FILE="$OPENCODE_CONFIG_DIR/AGENTS.md"
+seed_agentsmd() {
+  awk '/^## Differences in claude-dev/{exit} {print}' \
+    "$GLOBAL_CLAUDEMD_TEMPLATE" > "$GLOBAL_AGENTSMD_FILE"
+}
+if [[ -f "$GLOBAL_CLAUDEMD_TEMPLATE" ]]; then
+  if $RESEED_GLOBAL_CLAUDEMD; then
+    seed_agentsmd
+    echo "==> Reseeded OpenCode AGENTS.md from template"
+  elif [[ ! -f "$GLOBAL_AGENTSMD_FILE" ]]; then
+    seed_agentsmd
+    echo "==> Seeded OpenCode AGENTS.md"
+  else
+    echo "==> OpenCode AGENTS.md already present, skipping"
+  fi
+fi
+
 # ── inject global ~/.claude/settings.json ────────────────────────────────────
 GLOBAL_SETTINGS_FILE="$CLAUDE_CONFIG_DIR/settings.json"
 if [[ -f "$GLOBAL_SETTINGS_FILE" ]]; then
@@ -947,14 +968,6 @@ else:
     perms.setdefault('websearch', 'deny')
     # Remove stale searxng MCP block if local search was previously enabled.
     data.get('mcp', {}).pop('searxng', None)
-instructions_host_path = os.path.join(os.path.dirname(path), 'AGENTS.md')
-with open(instructions_host_path, 'w') as f:
-    f.write(
-        "Network note: github.com and api.github.com are blocked by the egress firewall. "
-        "Do not attempt git clone over HTTPS, git push, or gh CLI calls to GitHub. "
-        "Raw file content is available via raw.githubusercontent.com; "
-        "repo archive downloads via codeload.github.com.\n"
-    )
 data['instructions'] = ['/root/.config/opencode/AGENTS.md']
 data.setdefault('compaction', {})['auto'] = False
 os.makedirs(os.path.dirname(path), exist_ok=True)

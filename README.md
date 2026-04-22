@@ -238,6 +238,13 @@ with `start-claude.sh` via the same mount, so editing it once applies to both.
 Your edits are preserved across subsequent runs. Pass `--reseed-global-claudemd`
 to overwrite with the current template.
 
+The same template is seeded into `~/.claude-agent/opencode-config/AGENTS.md`
+(mounted at `/root/.config/opencode/AGENTS.md`) and wired into OpenCode via
+the `instructions` field in `opencode.json`, so OpenCode picks up the same
+environment context. The `claude-dev` exceptions block at the end of the
+template is stripped on the OpenCode copy since it doesn't apply inside
+`claude-agent`. `--reseed-global-claudemd` reseeds this file too.
+
 ## Egress allowlist
 
 Everything outbound from the container is denied by default. Three egress

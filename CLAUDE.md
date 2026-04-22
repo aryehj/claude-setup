@@ -111,6 +111,13 @@ every session's system prompt, so this gives models shared environment context
 project cwd. User edits are preserved; `--reseed-global-claudemd` overwrites
 unconditionally to pick up template updates. See ADR-015.
 
+In `start-agent.sh` the same template is also seeded into
+`~/.claude-agent/opencode-config/AGENTS.md` and referenced from `opencode.json`'s
+`instructions` field so OpenCode picks up the same context. The trailing
+`## Differences in claude-dev` section is stripped on the OpenCode copy via
+`awk` since those bubblewrap/`$TMPDIR` facts only apply inside
+`start-claude.sh`. `--reseed-global-claudemd` reseeds both copies.
+
 **1M extended context is disabled; Claude Code uses the standard 200K window.**
 The `CLAUDE_CODE_DISABLE_1M_CONTEXT=1` environment variable is set in `.bashrc`,
 `/etc/profile.d/`, and passed as a container-level env var via `CONTAINER_ENV` to

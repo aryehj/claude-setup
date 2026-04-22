@@ -1,8 +1,9 @@
 # Global Container CLAUDE.md
 
-This file is auto-injected into every Claude Code session running inside a
-dev container. It describes the shared container environment. Project-level
-`CLAUDE.md` overrides anything here. You are running inside one of two
+This file is loaded into every coding-agent session (Claude Code via
+`~/.claude/CLAUDE.md`; OpenCode via `opencode.json`'s `instructions`) running
+inside a dev container. It describes the shared container environment.
+Project-level `CLAUDE.md` / `AGENTS.md` overrides anything here. You are running inside one of two
 sibling environments: `claude-agent` (Colima + docker, via `start-agent.sh`)
 or `claude-dev` (Apple Containers microVM, via `start-claude.sh`). Assume
 `claude-agent` unless the start-claude.sh exceptions at the end of this file

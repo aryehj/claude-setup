@@ -792,3 +792,10 @@ static content, one source of truth, consequences below.
   overrides `/root/.claude/` at runtime, so anything written there at image
   build time is hidden. Host-side seeding is the only path that's actually
   read.
+- OpenCode (in `start-agent.sh` only) is seeded from the same template into
+  `~/.claude-agent/opencode-config/AGENTS.md` and referenced from
+  `opencode.json`'s `instructions` field. The trailing `claude-dev` exceptions
+  section is stripped on the OpenCode copy via `awk` — it describes
+  bubblewrap / `$TMPDIR` constraints that only apply inside `start-claude.sh`,
+  and OpenCode never runs there. `--reseed-global-claudemd` reseeds both the
+  Claude Code and OpenCode copies.
