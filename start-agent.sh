@@ -10,7 +10,7 @@
 # Usage:
 #   start-agent.sh [--rebuild] [--reload-allowlist]
 #                  [--backend=ollama|omlx]
-#                  [--enable-local-search]
+#                  [--disable-search]
 #                  [--memory=VALUE] [--cpus=N]
 #                  [--git-name=NAME] [--git-email=EMAIL]
 #                  [--plan-model=MODEL] [--exec-model=MODEL] [--small-model=MODEL]
@@ -27,7 +27,7 @@ CLI_CPUS=""
 CLI_GIT_NAME=""
 CLI_GIT_EMAIL=""
 CLI_BACKEND=""
-CLI_LOCAL_SEARCH=""
+CLI_DISABLE_SEARCH=""
 CLI_PLAN_MODEL=""
 CLI_EXEC_MODEL=""
 CLI_SMALL_MODEL=""
@@ -53,9 +53,8 @@ OPTIONS:
   --backend=BACKEND      Local inference backend: ollama (default) or omlx.
   --git-name=NAME        Git author/committer name inside the container.
   --git-email=EMAIL      Git author/committer email inside the container.
-  --enable-local-search  Start a SearXNG container on the bridge and wire it
-                         into opencode as a local websearch MCP server.
-                         Env: CLAUDE_AGENT_ENABLE_LOCAL_SEARCH=1
+  --disable-search       Skip SearXNG and Vane containers (search is on by
+                         default). Env: CLAUDE_AGENT_DISABLE_SEARCH=1
   --plan-model=MODEL     OpenCode model for plan-mode agent (agent.plan).
                          Bare model ID (e.g. gemma3:27b) or provider/model.
   --exec-model=MODEL     OpenCode model for execution/build agent (agent.build).
@@ -80,7 +79,7 @@ ENVIRONMENT:
   CLAUDE_AGENT_PLAN_MODEL         OpenCode plan-agent model (overridden by --plan-model).
   CLAUDE_AGENT_EXEC_MODEL         OpenCode exec/build-agent model (overridden by --exec-model).
   CLAUDE_AGENT_SMALL_MODEL        OpenCode small model (overridden by --small-model).
-  CLAUDE_AGENT_ENABLE_LOCAL_SEARCH=1  Enable SearXNG-backed websearch (overridden by --enable-local-search).
+  CLAUDE_AGENT_DISABLE_SEARCH=1  Disable SearXNG and Vane (overridden by --disable-search).
 USAGE
 }
 
@@ -99,7 +98,8 @@ while [[ $# -gt 0 ]]; do
     --git-email)         CLI_GIT_EMAIL="${2:?--git-email requires a value}"; shift ;;
     --backend=*)         CLI_BACKEND="${1#--backend=}" ;;
     --backend)           CLI_BACKEND="${2:?--backend requires a value}"; shift ;;
-    --enable-local-search) CLI_LOCAL_SEARCH="true" ;;
+    --enable-local-search) echo "warning: --enable-local-search is deprecated (search is now enabled by default). Use --disable-search to disable." >&2 ;;
+    --disable-search)     CLI_DISABLE_SEARCH="true" ;;
     --plan-model=*)      CLI_PLAN_MODEL="${1#--plan-model=}" ;;
     --plan-model)        CLI_PLAN_MODEL="${2:?--plan-model requires a value}"; shift ;;
     --exec-model=*)      CLI_EXEC_MODEL="${1#--exec-model=}" ;;
@@ -169,10 +169,10 @@ PLAN_MODEL="${CLI_PLAN_MODEL:-${CLAUDE_AGENT_PLAN_MODEL:-}}"
 EXEC_MODEL="${CLI_EXEC_MODEL:-${CLAUDE_AGENT_EXEC_MODEL:-}}"
 SMALL_MODEL="${CLI_SMALL_MODEL:-${CLAUDE_AGENT_SMALL_MODEL:-}}"
 
-if [[ "${CLI_LOCAL_SEARCH:-}" == "true" || "${CLAUDE_AGENT_ENABLE_LOCAL_SEARCH:-}" =~ ^(1|true|yes)$ ]]; then
-  LOCAL_SEARCH_ENABLED=true
-else
+if [[ "${CLI_DISABLE_SEARCH:-}" == "true" || "${CLAUDE_AGENT_DISABLE_SEARCH:-}" =~ ^(1|true|yes)$ ]]; then
   LOCAL_SEARCH_ENABLED=false
+else
+  LOCAL_SEARCH_ENABLED=true
 fi
 
 # ── constants ────────────────────────────────────────────────────────────────
@@ -192,6 +192,9 @@ TINYPROXY_PORT=8888
 SEARXNG_CONTAINER="searxng"
 SEARXNG_DIR="$HOME/.claude-agent/searxng"
 SEARXNG_SETTINGS_FILE="$SEARXNG_DIR/settings.yml"
+VANE_CONTAINER="vane"
+VANE_DATA_DIR="$HOME/.claude-agent/vane-data"
+VANE_PORT=3000
 AGENT_NET_NAME="claude-agent-net"
 
 # ── preflight ────────────────────────────────────────────────────────────────
@@ -487,6 +490,10 @@ if $REBUILD && ! $RELOAD_ALLOWLIST; then
     echo "==> --rebuild: removing container '$SEARXNG_CONTAINER'"
     docker rm -f "$SEARXNG_CONTAINER" >/dev/null
   fi
+  if $LOCAL_SEARCH_ENABLED && docker container inspect "$VANE_CONTAINER" &>/dev/null; then
+    echo "==> --rebuild: removing container '$VANE_CONTAINER'"
+    docker rm -f "$VANE_CONTAINER" >/dev/null
+  fi
   if docker image inspect "$IMAGE_TAG" &>/dev/null; then
     echo "==> --rebuild: removing image '$IMAGE_TAG'"
     docker image rm "$IMAGE_TAG" >/dev/null
@@ -754,13 +761,39 @@ if $LOCAL_SEARCH_ENABLED; then
       docker.io/searxng/searxng >/dev/null
     echo "    searxng: created"
   else
-    docker start "$SEARXNG_CONTAINER" >/dev/null 2>&1 || true
+    docker start "$SEARXNG_CONTAINER" >/dev/null || true
     echo "    searxng: started (existing container)"
   fi
 else
   if docker container inspect "$SEARXNG_CONTAINER" &>/dev/null; then
-    echo "==> Removing SearXNG container (--enable-local-search not set)"
+    echo "==> Removing SearXNG container (--disable-search set)"
     docker rm -f "$SEARXNG_CONTAINER" >/dev/null
+  fi
+fi
+
+# ── Vane container lifecycle ─────────────────────────────────────────────────
+if $LOCAL_SEARCH_ENABLED; then
+  echo "==> Starting Vane container"
+  mkdir -p "$VANE_DATA_DIR"
+  if ! docker container inspect "$VANE_CONTAINER" &>/dev/null; then
+    docker run -d \
+      --name "$VANE_CONTAINER" \
+      --network "$AGENT_NET_NAME" \
+      --add-host=host.docker.internal:host-gateway \
+      -p "$VANE_PORT:3000" \
+      -e "SEARXNG_API_URL=http://searxng:8080" \
+      -v "$VANE_DATA_DIR:/home/vane/data" \
+      docker.io/itzcrazykns1337/vane:slim-latest >/dev/null
+    echo "    vane: created (http://localhost:$VANE_PORT)"
+    echo "    note: configure LLM at http://localhost:$VANE_PORT on first access"
+  else
+    docker start "$VANE_CONTAINER" >/dev/null || true
+    echo "    vane: started (existing container)"
+  fi
+else
+  if docker container inspect "$VANE_CONTAINER" &>/dev/null; then
+    echo "==> Removing Vane container (--disable-search set)"
+    docker rm -f "$VANE_CONTAINER" >/dev/null
   fi
 fi
 
@@ -1121,6 +1154,7 @@ echo "    project : $PROJECT_DIR  →  $PROJECT_DIR"
 echo "    proxy   : http://$BRIDGE_IP:$TINYPROXY_PORT  (allowlist: $ALLOWLIST_FILE)"
 echo "    inference: $INFERENCE_LABEL at http://$HOST_IP:$INFERENCE_PORT"
 $LOCAL_SEARCH_ENABLED && echo "    search  : SearXNG on $AGENT_NET_NAME"
+$LOCAL_SEARCH_ENABLED && echo "    vane    : http://localhost:$VANE_PORT (AI research UI)"
 
 rm -rf "$TMP_WORK"
 trap - EXIT
