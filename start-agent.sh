@@ -1023,6 +1023,7 @@ DOCKER_ENV_ARGS=(
   -e "HTTP_PROXY=http://$BRIDGE_IP:$TINYPROXY_PORT"
   -e "NO_PROXY=localhost,127.0.0.1,$BRIDGE_IP,$HOST_IP,searxng"
   -e "NODE_USE_ENV_PROXY=1"
+  -e "TMPDIR=/tmp"
 )
 case "$BACKEND" in
   ollama)
