@@ -2,9 +2,9 @@
 
 ## Status
 
-- [ ] Phase 1: Refactor flag semantics (`--enable-local-search` → default-on + `--disable-search`)
-- [ ] Phase 2: Add Vane container lifecycle
-- [ ] Phase 3: Update documentation
+- [x] Phase 1: Refactor flag semantics (`--enable-local-search` → default-on + `--disable-search`)
+- [x] Phase 2: Add Vane container lifecycle
+- [x] Phase 3: Update documentation
 
 ## Context
 

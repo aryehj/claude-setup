@@ -196,8 +196,8 @@ start-agent.sh --rebuild
 # Apply edits to the allowlist without touching the running container
 start-agent.sh --reload-allowlist
 
-# Enable local SearXNG-backed websearch (starts a searxng container alongside claude-agent)
-start-agent.sh --enable-local-search
+# Disable SearXNG + Vane (search and Vane run by default; skip them with this flag)
+start-agent.sh --disable-search
 
 # Set OpenCode models per mode (or export CLAUDE_AGENT_PLAN_MODEL /
 # CLAUDE_AGENT_EXEC_MODEL / CLAUDE_AGENT_SMALL_MODEL to persist across runs)
@@ -415,21 +415,27 @@ entries the same way:
 }
 ```
 
-## Local websearch (SearXNG)
+## Local websearch (SearXNG) and Vane
 
-Pass `--enable-local-search` (or set `CLAUDE_AGENT_ENABLE_LOCAL_SEARCH=1`) to
-start a [SearXNG](https://docs.searxng.org) container alongside `claude-agent`
-and wire it into OpenCode as a local `websearch` MCP tool. SearXNG fans out to
-search engines through the same tinyproxy allowlist, so all engine traffic is
-governed by `~/.claude-agent/allowlist.txt` — no third-party search gateway.
+SearXNG and Vane run **by default** alongside `claude-agent`. Pass
+`--disable-search` (or set `CLAUDE_AGENT_DISABLE_SEARCH=1`) to skip both.
 
-The SearXNG config (including a generated `secret_key`) is seeded on first run
-at `~/.claude-agent/searxng/settings.yml` and survives `--rebuild`. To reset
-it, delete that directory and re-run.
+**SearXNG** is wired into OpenCode as a local `websearch` MCP tool. It fans
+out to search engines through the same tinyproxy allowlist, so all engine
+traffic is governed by `~/.claude-agent/allowlist.txt` — no third-party search
+gateway. The SearXNG config (including a generated `secret_key`) is seeded on
+first run at `~/.claude-agent/searxng/settings.yml` and survives `--rebuild`.
+To reset it, delete that directory and re-run.
 
 Enabled engines by default: Google, Bing, DuckDuckGo, Brave, Qwant, Wikipedia,
 arXiv, GitHub code search, Stack Exchange. Add an engine by editing
 `settings.yml` **and** `allowlist.txt` — both files must change, by design.
+
+**Vane** (formerly Perplexica) is an AI-powered research UI at
+`http://localhost:3000`. It uses SearXNG as its search backend. On first
+access, configure the LLM endpoint (Ollama at `http://<HOST_IP>:11434` or omlx
+at `http://<HOST_IP>:8000`) via the web UI settings screen. This config
+persists in `~/.claude-agent/vane-data/` and survives `--rebuild`.
 
 See `ADR.md` §ADR-014 for the threat model and design rationale.
 
@@ -441,7 +447,7 @@ See `ADR.md` §ADR-014 for the threat model and design rationale.
 | `CLAUDE_AGENT_MEMORY` | `8` | VM memory in GiB (overridden by `--memory`) |
 | `CLAUDE_AGENT_CPUS` | `6` | VM CPU count (overridden by `--cpus`) |
 | `OMLX_API_KEY` | *(unset)* | API key for omlx; passed into the container when `--backend=omlx` |
-| `CLAUDE_AGENT_ENABLE_LOCAL_SEARCH` | *(unset)* | Set to `1` to enable SearXNG-backed websearch (overridden by `--enable-local-search`) |
+| `CLAUDE_AGENT_DISABLE_SEARCH` | *(unset)* | Set to `1` to disable SearXNG and Vane (overridden by `--disable-search`) |
 | `CLAUDE_AGENT_DEFAULT_MODEL` | *(unset)* | Default OpenCode model written to `opencode.json` (env var only — no CLI flag). Use `provider/model` or a bare ID that matches the active provider |
 | `CLAUDE_AGENT_PLAN_MODEL` | *(unset)* | OpenCode model for plan-mode agent (overridden by `--plan-model`) |
 | `CLAUDE_AGENT_EXEC_MODEL` | *(unset)* | OpenCode model for execution/build agent (overridden by `--exec-model`) |
