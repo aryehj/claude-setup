@@ -128,6 +128,8 @@ Invoke a synced skill inside any Claude Code session with its slash name, e.g.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `CLAUDE_CONTAINER_IMAGE` | `debian:bookworm-slim` | Override the base image |
+| `CLAUDE_CONTAINER_MEMORY` | `4G` | Per-container memory limit passed to `container run --memory` |
+| `CLAUDE_CONTAINER_CPUS` | `4` | Per-container CPU count passed to `container run --cpus` |
 | `CLAUDE_SKILLS_ARCHIVE_URL` | upstream `main` tarball | Override the source archive for skills sync |
 | `GIT_USER_NAME` | `Dev` | Git author/committer name (overridden by `--git-name` flag) |
 | `GIT_USER_EMAIL` | `dev@localhost` | Git author/committer email (overridden by `--git-email` flag) |
@@ -197,10 +199,15 @@ start-agent.sh --reload-allowlist
 # Enable local SearXNG-backed websearch (starts a searxng container alongside claude-agent)
 start-agent.sh --enable-local-search
 
-# Set OpenCode models per mode
+# Set OpenCode models per mode (or export CLAUDE_AGENT_PLAN_MODEL /
+# CLAUDE_AGENT_EXEC_MODEL / CLAUDE_AGENT_SMALL_MODEL to persist across runs)
 start-agent.sh --plan-model=gemma3:27b --exec-model=qwen2.5-coder:32b --small-model=qwen2.5-coder:7b
 
-# Overwrite ~/.claude-containers/shared/CLAUDE.md with the repo template
+# Set the OpenCode default model (no CLI flag; env var only)
+CLAUDE_AGENT_DEFAULT_MODEL=ollama/qwen2.5-coder:32b start-agent.sh
+
+# Overwrite ~/.claude-containers/shared/CLAUDE.md AND
+# ~/.claude-agent/opencode-config/AGENTS.md with the repo template
 start-agent.sh --reseed-global-claudemd
 ```
 
@@ -435,8 +442,9 @@ See `ADR.md` §ADR-014 for the threat model and design rationale.
 | `CLAUDE_AGENT_CPUS` | `6` | VM CPU count (overridden by `--cpus`) |
 | `OMLX_API_KEY` | *(unset)* | API key for omlx; passed into the container when `--backend=omlx` |
 | `CLAUDE_AGENT_ENABLE_LOCAL_SEARCH` | *(unset)* | Set to `1` to enable SearXNG-backed websearch (overridden by `--enable-local-search`) |
+| `CLAUDE_AGENT_DEFAULT_MODEL` | *(unset)* | Default OpenCode model written to `opencode.json` (env var only — no CLI flag). Use `provider/model` or a bare ID that matches the active provider |
 | `CLAUDE_AGENT_PLAN_MODEL` | *(unset)* | OpenCode model for plan-mode agent (overridden by `--plan-model`) |
-| `CLAUDE_AGENT_EXEC_MODEL` | *(unset)* | OpenCode model for execution agent (overridden by `--exec-model`) |
+| `CLAUDE_AGENT_EXEC_MODEL` | *(unset)* | OpenCode model for execution/build agent (overridden by `--exec-model`) |
 | `CLAUDE_AGENT_SMALL_MODEL` | *(unset)* | OpenCode small model (overridden by `--small-model`) |
 | `GIT_USER_NAME` / `GIT_USER_EMAIL` | `Dev` / `dev@localhost` | Git identity (overridden by `--git-name` / `--git-email`) |
 | `CLAUDE_SKILLS_ARCHIVE_URL` | upstream `main` tarball | Override skills source archive |
