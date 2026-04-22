@@ -761,7 +761,7 @@ if $LOCAL_SEARCH_ENABLED; then
       docker.io/searxng/searxng >/dev/null
     echo "    searxng: created"
   else
-    docker start "$SEARXNG_CONTAINER" >/dev/null 2>&1 || true
+    docker start "$SEARXNG_CONTAINER" >/dev/null || true
     echo "    searxng: started (existing container)"
   fi
 else
@@ -786,7 +786,7 @@ if $LOCAL_SEARCH_ENABLED; then
     echo "    vane: created (http://localhost:$VANE_PORT)"
     echo "    note: configure LLM at http://localhost:$VANE_PORT on first access"
   else
-    docker start "$VANE_CONTAINER" >/dev/null 2>&1 || true
+    docker start "$VANE_CONTAINER" >/dev/null || true
     echo "    vane: started (existing container)"
   fi
 else
