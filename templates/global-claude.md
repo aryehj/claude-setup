@@ -17,6 +17,11 @@ bind mount from the macOS host — it is not a Mac filesystem. There is no
 `/root/.claude/` is itself a bind mount from `~/.claude-containers/shared/`
 on the host, shared across all containers.
 
+**File-reading / file-editing tools do not expand `~`.** Shells expand it;
+tool arguments are passed literally. Use `/root/...` (not `~/...`) when
+calling `read`, `edit`, `write`, or similar. `~` still works inside `bash`
+tool commands because a shell interprets them.
+
 ## Python & uv
 
 `uv` is at `/usr/local/bin/uv`. Use `uv run` and `uv pip`.
@@ -24,6 +29,15 @@ on the host, shared across all containers.
 project root is **ignored** — it almost certainly contains macOS binaries
 that won't run on Linux. Run `uv sync` once per fresh session to build a
 usable venv; this is expected and normal.
+
+**No bare `python` on PATH, and `python3-venv` / `ensurepip` / `pip` are
+not installed.** Don't try to `apt-get install` them — on `claude-agent`
+the proxy blocks `deb.debian.org` anyway, and on either environment the
+right fix is to use `uv`. For scratch Python work:
+
+```bash
+cd /tmp && uv init myproj && cd myproj && uv add <pkg> && uv run python -c '...'
+```
 
 ## Network Egress (claude-agent)
 
@@ -33,10 +47,14 @@ are pre-set; Node honors them via `NODE_USE_ENV_PROXY=1`.
 
 **`github.com` is not on the default allowlist.** The proxy filters by
 hostname only (not method), so it cannot be made read-only. For code reads,
-use `codeload.github.com` or `raw.githubusercontent.com`, which are allowed.
+rewrite the URL — do not retry `github.com` on failure:
 
-A `403` or connection-refused on a hostname means the allowlist is rejecting
-it. Do not retry blindly — tell the user to add the hostname to
+- `github.com/OWNER/REPO/blob/BRANCH/PATH` → `raw.githubusercontent.com/OWNER/REPO/BRANCH/PATH`
+- `github.com/OWNER/REPO` (README) → `raw.githubusercontent.com/OWNER/REPO/HEAD/README.md`
+- Repo tarballs → `codeload.github.com/OWNER/REPO/tar.gz/BRANCH`
+
+A `403` or connection-refused on any other hostname means the allowlist is
+rejecting it. Do not retry blindly — tell the user to add the hostname to
 `~/.claude-agent/allowlist.txt` and run `start-agent.sh --reload-allowlist`.
 
 ## Local Inference (claude-agent)
