@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/usr/bin/env bash
 # start-agent.sh — spin up a Colima-backed agent container for a project.
 #
 # Sibling to start-claude.sh. Uses one shared Colima VM (profile:

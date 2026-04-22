@@ -142,6 +142,28 @@ JSONEOF
   echo "==> Created $PROJECT_SETTINGS_FILE"
 fi
 
+# Seed the global container CLAUDE.md from the repo template. Claude Code
+# auto-injects ~/.claude/CLAUDE.md into every session; the shared mount puts
+# this file in scope for all containers. Seed-if-missing; --reseed-global-claudemd
+# forces overwrite to pick up template updates. Runs before the existing-
+# container check so re-attach invocations also seed/reseed.
+mkdir -p "$CLAUDE_CONFIG_DIR"
+GLOBAL_CLAUDEMD_FILE="$CLAUDE_CONFIG_DIR/CLAUDE.md"
+GLOBAL_CLAUDEMD_TEMPLATE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/templates/global-claude.md"
+if [[ -f "$GLOBAL_CLAUDEMD_TEMPLATE" ]]; then
+  if $RESEED_GLOBAL_CLAUDEMD; then
+    cp "$GLOBAL_CLAUDEMD_TEMPLATE" "$GLOBAL_CLAUDEMD_FILE"
+    echo "==> Reseeded global CLAUDE.md from template"
+  elif [[ ! -f "$GLOBAL_CLAUDEMD_FILE" ]]; then
+    cp "$GLOBAL_CLAUDEMD_TEMPLATE" "$GLOBAL_CLAUDEMD_FILE"
+    echo "==> Seeded global CLAUDE.md"
+  else
+    echo "==> Global CLAUDE.md already present, skipping"
+  fi
+else
+  echo "==> Warning: $GLOBAL_CLAUDEMD_TEMPLATE not found; skipping global CLAUDE.md seed" >&2
+fi
+
 # ── check for existing container ──────────────────────────────────────────────
 if [[ "$(container inspect "$CONTAINER_NAME" 2>/dev/null)" != "[]" ]]; then
   echo "Container '$CONTAINER_NAME' already exists — attaching."
@@ -299,26 +321,6 @@ mkdir -p "$CLAUDE_CONFIG_DIR"
 # oauthAccount and other auth state that Claude Code writes outside ~/.claude,
 # so it needs to survive --rebuild alongside ~/.claude/.credentials.json.
 [[ -f "$CLAUDE_JSON_FILE" ]] || echo '{}' > "$CLAUDE_JSON_FILE"
-
-# Seed the global container CLAUDE.md from the repo template. Claude Code
-# auto-injects ~/.claude/CLAUDE.md into every session; the shared mount puts
-# this file in scope for all containers. Seed-if-missing; --reseed-global-claudemd
-# forces overwrite to pick up template updates.
-GLOBAL_CLAUDEMD_FILE="$CLAUDE_CONFIG_DIR/CLAUDE.md"
-GLOBAL_CLAUDEMD_TEMPLATE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/templates/global-claude.md"
-if [[ -f "$GLOBAL_CLAUDEMD_TEMPLATE" ]]; then
-  if $RESEED_GLOBAL_CLAUDEMD; then
-    cp "$GLOBAL_CLAUDEMD_TEMPLATE" "$GLOBAL_CLAUDEMD_FILE"
-    echo "==> Reseeded global CLAUDE.md from template"
-  elif [[ ! -f "$GLOBAL_CLAUDEMD_FILE" ]]; then
-    cp "$GLOBAL_CLAUDEMD_TEMPLATE" "$GLOBAL_CLAUDEMD_FILE"
-    echo "==> Seeded global CLAUDE.md"
-  else
-    echo "==> Global CLAUDE.md already present, skipping"
-  fi
-else
-  echo "==> Warning: $GLOBAL_CLAUDEMD_TEMPLATE not found; skipping global CLAUDE.md seed" >&2
-fi
 
 # Ensure global user settings are configured.
 GLOBAL_SETTINGS_FILE="$CLAUDE_CONFIG_DIR/settings.json"
