@@ -433,9 +433,11 @@ arXiv, GitHub code search, Stack Exchange. Add an engine by editing
 
 **Vane** (formerly Perplexica) is an AI-powered research UI at
 `http://localhost:3000`. It uses SearXNG as its search backend. On first
-access, configure the LLM endpoint (Ollama at `http://<HOST_IP>:11434` or omlx
-at `http://<HOST_IP>:8000`) via the web UI settings screen. This config
-persists in `~/.claude-agent/vane-data/` and survives `--rebuild`.
+access, configure the LLM endpoint via the web UI settings screen:
+- Ollama: `http://host.docker.internal:11434`
+- omlx: `http://host.docker.internal:8000/v1`
+
+This config persists in `~/.claude-agent/vane-data/` and survives `--rebuild`.
 
 See `ADR.md` §ADR-014 for the threat model and design rationale.
 

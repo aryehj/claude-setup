@@ -301,7 +301,10 @@ a warning).
 AI-powered research interface exposed on port 3000. It uses SearXNG as its
 search backend (`SEARXNG_API_URL=http://searxng:8080`) and the configured local
 LLM (Ollama/omlx) for AI features — configure the LLM URL via the web UI at
-`http://localhost:3000` on first access. LLM settings persist in
+`http://localhost:3000` on first access. Use `http://host.docker.internal:11434`
+(Ollama) or `http://host.docker.internal:8000/v1` (omlx) as the endpoint; the
+Vane container receives `--add-host=host.docker.internal:host-gateway` so that
+hostname resolves to the macOS host. LLM settings persist in
 `~/.claude-agent/vane-data/` and survive `--rebuild`. `--disable-search` turns
 off both SearXNG and Vane.
 
