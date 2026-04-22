@@ -779,6 +779,7 @@ if $LOCAL_SEARCH_ENABLED; then
     docker run -d \
       --name "$VANE_CONTAINER" \
       --network "$AGENT_NET_NAME" \
+      --add-host=host.docker.internal:host-gateway \
       -p "$VANE_PORT:3000" \
       -e "SEARXNG_API_URL=http://searxng:8080" \
       -v "$VANE_DATA_DIR:/home/vane/data" \
