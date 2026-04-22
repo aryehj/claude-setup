@@ -2,8 +2,8 @@
 
 ## Status
 
-- [ ] Phase 1: Draft and commit the shared CLAUDE.md template
-- [ ] Phase 2: Wire seeding into `start-claude.sh` and `start-agent.sh`
+- [x] Phase 1: Draft and commit the shared CLAUDE.md template
+- [x] Phase 2: Wire seeding into `start-claude.sh` and `start-agent.sh`
 - [ ] Phase 3: Mirror for OpenCode agents in `start-agent.sh` (after Phase 1 + 2 verified)
 
 ## Context

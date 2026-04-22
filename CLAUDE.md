@@ -103,6 +103,14 @@ clobber is per-skill-directory, not a wholesale wipe. Fetch failures warn but
 do not abort container creation. This path only runs when a new container is
 being created; re-attach to an existing container skips the sync. See ADR-005.
 
+**Global container CLAUDE.md is seeded from `templates/global-claude.md`.**
+On startup, both scripts copy the template to `~/.claude-containers/shared/CLAUDE.md`
+if that file does not exist. Claude Code auto-injects `~/.claude/CLAUDE.md` into
+every session's system prompt, so this gives models shared environment context
+(path layout, `$TMPDIR`, sandbox mounts, proxy allowlist) regardless of the
+project cwd. User edits are preserved; `--reseed-global-claudemd` overwrites
+unconditionally to pick up template updates. See ADR-015.
+
 **1M extended context is disabled; Claude Code uses the standard 200K window.**
 The `CLAUDE_CODE_DISABLE_1M_CONTEXT=1` environment variable is set in `.bashrc`,
 `/etc/profile.d/`, and passed as a container-level env var via `CONTAINER_ENV` to

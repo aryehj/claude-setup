@@ -89,6 +89,16 @@ start-claude.sh --rebuild
 This removes the existing container for the project (if any) and the
 `claude-dev:latest` image, then rebuilds from scratch.
 
+## Global container CLAUDE.md
+
+On first run, the script copies `templates/global-claude.md` from the repo
+into `~/.claude-containers/shared/CLAUDE.md`. Claude Code auto-injects that
+file into every session running inside any container, giving the model shared
+context about the environment (path layout, `$TMPDIR`, sandbox mounts, etc.)
+regardless of the project it's opened in. Your edits are preserved across
+subsequent runs. Pass `--reseed-global-claudemd` to overwrite with the current
+template.
+
 ## Included skills
 
 The `skills/` directory holds reusable Claude Code skills. Whenever
@@ -180,6 +190,9 @@ start-agent.sh --rebuild
 
 # Apply edits to the allowlist without touching the running container
 start-agent.sh --reload-allowlist
+
+# Overwrite ~/.claude-containers/shared/CLAUDE.md with the repo template
+start-agent.sh --reseed-global-claudemd
 ```
 
 First run brings up the Colima VM (`claude-agent` profile), installs
@@ -213,6 +226,17 @@ from a different directory recreates the container with the new mount.
 `~/.claude-containers/shared/` and `claude.json` are deliberately shared with
 `start-claude.sh`, so auth and skills persist across both scripts. Run only
 one at a time.
+
+## Global container CLAUDE.md
+
+On first run, `start-agent.sh` copies `templates/global-claude.md` from the
+repo into `~/.claude-containers/shared/CLAUDE.md`. Claude Code auto-injects
+that file into every session, giving the model shared context about the
+environment — path layout, proxy allowlist, local-inference host, `$TMPDIR`
+conventions — regardless of the project it's opened in. The file is shared
+with `start-claude.sh` via the same mount, so editing it once applies to both.
+Your edits are preserved across subsequent runs. Pass `--reseed-global-claudemd`
+to overwrite with the current template.
 
 ## Egress allowlist
 

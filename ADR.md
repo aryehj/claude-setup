@@ -749,3 +749,46 @@ tinyproxy RETURN rule fires. Containers not in the `claude-agent-net` network
   the allowlist. The seeded engine list was chosen from engines that use the
   standard httpx transport; the verification step (`grep -rn 'httpx\.(get|post'`
   across engine source) should be re-run if the engine list is expanded.
+
+## ADR-015: Seed a global container CLAUDE.md from a repo template
+
+### Context
+
+`~/.claude-containers/shared/` is bind-mounted to `/root/.claude/` in every
+container spawned by `start-claude.sh` and `start-agent.sh`. Claude Code
+auto-injects `~/.claude/CLAUDE.md` into every session's system prompt, but we
+weren't populating that file, so models running inside containers routinely
+formed wrong hypotheses about the environment: probing `/Users/<name>/.claude/`
+(the macOS layout suggested by the cwd) instead of `/root/.claude/`; retrying
+fetches of `github.com` without recognizing the hostname-allowlist rejection;
+fighting the read-only sandbox mounts on `/tmp` and `/root/.cache` instead of
+retargeting to `$TMPDIR`. The repo-root `CLAUDE.md` documents these facts but
+is only auto-injected when cwd is under this repo, so projects opened
+elsewhere in the container got none of it.
+
+### Decision
+
+Keep a single `templates/global-claude.md` in the repo, structured as common
+facts → claude-agent specifics → claude-dev exceptions. On startup, both
+scripts copy the template to `~/.claude-containers/shared/CLAUDE.md` if that
+path does not already exist. User edits are preserved. A
+`--reseed-global-claudemd` flag on each script overwrites unconditionally so
+template updates can be pulled in explicitly. No dynamic regeneration (no
+splicing of the current backend, current allowlist, etc.) in this iteration —
+static content, one source of truth, consequences below.
+
+### Consequences
+
+- New container sessions get environment context in their system prompt
+  regardless of cwd, reducing misdirected probing and retry loops.
+- With seed-if-missing semantics, users who ran the script before this change
+  won't pick up template updates without passing `--reseed-global-claudemd`.
+  Acceptable tradeoff: the file is user-editable, so silent overwrites would
+  destroy local customization.
+- Static claims can go stale. Any change to default allowlist contents, the
+  set of supported backends, or sandbox behavior must be reflected in
+  `templates/global-claude.md` as part of the same change.
+- Baking the file into the Dockerfile would not work: the shared bind mount
+  overrides `/root/.claude/` at runtime, so anything written there at image
+  build time is hidden. Host-side seeding is the only path that's actually
+  read.

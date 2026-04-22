@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/usr/bin/env bash
 # start-agent.sh — spin up a Colima-backed agent container for a project.
 #
 # Sibling to start-claude.sh. Uses one shared Colima VM (profile:
@@ -21,6 +21,7 @@ set -euo pipefail
 # ── args ──────────────────────────────────────────────────────────────────────
 REBUILD=false
 RELOAD_ALLOWLIST=false
+RESEED_GLOBAL_CLAUDEMD=false
 CLI_MEMORY=""
 CLI_CPUS=""
 CLI_GIT_NAME=""
@@ -45,6 +46,8 @@ OPTIONS:
   --reload-allowlist     Regenerate tinyproxy's filter file from
                          ~/.claude-agent/allowlist.txt and reload tinyproxy.
                          Fast path; does not restart the container.
+  --reseed-global-claudemd  Overwrite ~/.claude-containers/shared/CLAUDE.md
+                         with the repo template (default is seed-if-missing).
   --memory=VALUE         VM memory (e.g. 8, 8G, 8GB). Default: 8 GiB.
   --cpus=N               VM CPU count. Default: 6.
   --backend=BACKEND      Local inference backend: ollama (default) or omlx.
@@ -85,6 +88,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --rebuild)           REBUILD=true ;;
     --reload-allowlist)  RELOAD_ALLOWLIST=true ;;
+    --reseed-global-claudemd) RESEED_GLOBAL_CLAUDEMD=true ;;
     --memory=*)          CLI_MEMORY="${1#--memory=}" ;;
     --memory)            CLI_MEMORY="${2:?--memory requires a value}"; shift ;;
     --cpus=*)            CLI_CPUS="${1#--cpus=}" ;;
@@ -764,6 +768,26 @@ fi
 mkdir -p "$CLAUDE_CONFIG_DIR" "$OPENCODE_CONFIG_DIR" "$OPENCODE_DATA_DIR"
 [[ -f "$CLAUDE_JSON_FILE" ]] || echo '{}' > "$CLAUDE_JSON_FILE"
 
+# ── seed global container CLAUDE.md ──────────────────────────────────────────
+# Claude Code auto-injects ~/.claude/CLAUDE.md into every session; the shared
+# mount puts this file in scope for all containers. Seed-if-missing;
+# --reseed-global-claudemd forces overwrite to pick up template updates.
+GLOBAL_CLAUDEMD_FILE="$CLAUDE_CONFIG_DIR/CLAUDE.md"
+GLOBAL_CLAUDEMD_TEMPLATE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/templates/global-claude.md"
+if [[ -f "$GLOBAL_CLAUDEMD_TEMPLATE" ]]; then
+  if $RESEED_GLOBAL_CLAUDEMD; then
+    cp "$GLOBAL_CLAUDEMD_TEMPLATE" "$GLOBAL_CLAUDEMD_FILE"
+    echo "==> Reseeded global CLAUDE.md from template"
+  elif [[ ! -f "$GLOBAL_CLAUDEMD_FILE" ]]; then
+    cp "$GLOBAL_CLAUDEMD_TEMPLATE" "$GLOBAL_CLAUDEMD_FILE"
+    echo "==> Seeded global CLAUDE.md"
+  else
+    echo "==> Global CLAUDE.md already present, skipping"
+  fi
+else
+  echo "==> Warning: $GLOBAL_CLAUDEMD_TEMPLATE not found; skipping global CLAUDE.md seed" >&2
+fi
+
 # ── inject global ~/.claude/settings.json ────────────────────────────────────
 GLOBAL_SETTINGS_FILE="$CLAUDE_CONFIG_DIR/settings.json"
 if [[ -f "$GLOBAL_SETTINGS_FILE" ]]; then
@@ -1089,7 +1113,7 @@ exec docker run \
   --memory "${CLAUDE_AGENT_MEMORY_GB}g" \
   --cpus "$CLAUDE_AGENT_CPUS" \
   --add-host=host.docker.internal:host-gateway \
-  "${NETWORK_ARGS[@]}" \
+  ${NETWORK_ARGS[@]+"${NETWORK_ARGS[@]}"} \
   -v "$PROJECT_DIR:$PROJECT_DIR" \
   -v "$CLAUDE_CONFIG_DIR:/root/.claude" \
   -v "$CLAUDE_JSON_FILE:/root/.claude.json" \
