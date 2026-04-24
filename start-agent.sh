@@ -585,6 +585,28 @@ outgoing:
     all://: "http://$BRIDGE_IP:$TINYPROXY_PORT"
 SXNG
     echo "==> Seeded $SEARXNG_SETTINGS_FILE (secret_key generated, proxy=$BRIDGE_IP:$TINYPROXY_PORT)"
+  else
+    # Drift check: the seed block only writes when the file is missing, so a
+    # past run with a different proxy address (e.g. the old Squid port 3128)
+    # can leave a stale `outgoing.proxies.all://` value behind. Detect and
+    # rewrite just that one line; leave user customizations elsewhere alone.
+    EXPECTED_PROXY="http://$BRIDGE_IP:$TINYPROXY_PORT"
+    CURRENT_PROXY=$(awk '
+      /^outgoing:/ { in_out = 1; next }
+      in_out && /^[^[:space:]]/ { in_out = 0 }
+      in_out && /all:\/\/:/ {
+        match($0, /"[^"]+"/)
+        if (RSTART) print substr($0, RSTART+1, RLENGTH-2)
+        exit
+      }
+    ' "$SEARXNG_SETTINGS_FILE")
+    if [[ -n "$CURRENT_PROXY" && "$CURRENT_PROXY" != "$EXPECTED_PROXY" ]]; then
+      echo "==> SearXNG proxy drift: $CURRENT_PROXY → $EXPECTED_PROXY"
+      sed -i.bak -E "s|(all://:[[:space:]]*)\"[^\"]+\"|\1\"$EXPECTED_PROXY\"|" \
+        "$SEARXNG_SETTINGS_FILE"
+      rm -f "$SEARXNG_SETTINGS_FILE.bak"
+      SEARXNG_CONFIG_CHANGED=true
+    fi
   fi
 fi
 
@@ -760,6 +782,9 @@ if $LOCAL_SEARCH_ENABLED; then
       -v "$SEARXNG_SETTINGS_FILE:/etc/searxng/settings.yml:ro" \
       docker.io/searxng/searxng >/dev/null
     echo "    searxng: created"
+  elif [[ "${SEARXNG_CONFIG_CHANGED:-false}" == "true" ]]; then
+    docker restart "$SEARXNG_CONTAINER" >/dev/null || true
+    echo "    searxng: restarted (settings.yml drift fixed)"
   else
     docker start "$SEARXNG_CONTAINER" >/dev/null || true
     echo "    searxng: started (existing container)"
