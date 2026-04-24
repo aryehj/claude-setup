@@ -11,8 +11,7 @@
 FROM debian:bookworm-slim
 
 ENV DEBIAN_FRONTEND=noninteractive \
-    PATH="/root/.local/bin:/usr/local/bin:/usr/bin:/bin" \
-    CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=1
+    PATH="/root/.local/bin:/usr/local/bin:/usr/bin:/bin"
 
 # ── system packages ──────────────────────────────────────────────────────────
 RUN apt-get update -qq \

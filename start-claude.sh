@@ -46,7 +46,6 @@ GIT_USER_NAME="${CLI_GIT_NAME:-${GIT_USER_NAME:-Dev}}"
 GIT_USER_EMAIL="${CLI_GIT_EMAIL:-${GIT_USER_EMAIL:-dev@localhost}}"
 CONTAINER_ENV=(
   -e "TERM=$TERM" -e "COLORTERM=${COLORTERM:-}" -e "TERM_PROGRAM=${TERM_PROGRAM:-}"
-  -e "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=1"
   -e "GIT_AUTHOR_NAME=$GIT_USER_NAME"
   -e "GIT_AUTHOR_EMAIL=$GIT_USER_EMAIL"
   -e "GIT_COMMITTER_NAME=$GIT_USER_NAME"
@@ -259,10 +258,6 @@ mkdir -p "$UV_CACHE_DIR" 2>/dev/null || true
 export UV_PROJECT_ENVIRONMENT="${TMPDIR:-/tmp}/.venv"
 mkdir -p "$UV_PROJECT_ENVIRONMENT" 2>/dev/null || true
 UVEOF
-
-    # Disable adaptive thinking (extended thinking preamble).
-    echo 'export CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=1' >> /root/.bashrc
-    echo 'export CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=1' > /etc/profile.d/disable-adaptive-thinking.sh
 
     # ── git identity ─────────────────────────────────────────────────────────
     # Global gitconfig for normal (non-sandboxed) git operations.
