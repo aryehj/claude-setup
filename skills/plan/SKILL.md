@@ -3,8 +3,7 @@
   description: Explore the codebase and write implementation plans to /plans as markdown files
   disable-model-invocation: true
   argument-hint: "<what to plan>"
-  model: claude-opus-4-5
-  effort: high
+  model: opus
   allowed-tools:
     - Read
     - Glob

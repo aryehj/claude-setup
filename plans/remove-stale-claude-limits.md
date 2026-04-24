@@ -5,7 +5,7 @@
 - [x] Phase 1: Remove 1M context block
 - [x] Phase 2: Retire dead adaptive-thinking env var
 - [x] Phase 3: Unpin global effort
-- [ ] Phase 4: Set skill model aliases
+- [x] Phase 4: Set skill model aliases
 - [ ] Phase 5: Record ADR-017 capturing the policy
 
 ## Context

@@ -3,6 +3,7 @@ name: cleanup
 description: Post-implementation housekeeping — update CLAUDE.md, README.md, append ADR.md, and mark completed plans
 disable-model-invocation: true
 argument-hint: "[optional notes]"
+model: sonnet
 allowed-tools:
   - Read
   - Edit
