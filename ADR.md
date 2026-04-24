@@ -850,3 +850,66 @@ restriction — it covers all containers routed through the CLAUDE_AGENT chain.
   `~/.claude-agent/searxng/` and `~/.claude-agent/vane-data/`.
 - First-time Vane use requires a one-time manual LLM endpoint configuration
   in the web UI; subsequent runs restore the persisted config automatically.
+
+## ADR-017: Remove stale model-behavior pins
+
+**Date:** 2026-04-24
+**Status:** Accepted
+
+### Context
+
+Four environment-level and skill-level pins accumulated over time, each added
+for a different reason:
+
+- **`CLAUDE_CODE_DISABLE_1M_CONTEXT=1`** — added with the rationale "quality
+  degradation observed with the larger window." No specific incident documented,
+  no ADR.
+- **`CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=1`** — added to address a real,
+  widely-reported Feb–Mar 2026 issue where adaptive thinking allocated zero
+  reasoning tokens, causing hallucinations and unsound code changes. On
+  Opus 4.7+ this env var is a dead letter: adaptive thinking is the only mode
+  and the variable is silently ignored.
+- **`effortLevel: medium` in `settings.json`** — added to cap cost. Had the
+  side-effect of suppressing thinking across all models and overriding
+  model-specific defaults that Anthropic calibrates per release (currently
+  `xhigh` for Opus 4.7, `high` for Sonnet 4.6).
+- **`model: claude-opus-4-5` + `effort: high` in `skills/plan/SKILL.md`** —
+  hard-pinned the `/plan` skill to a versioned model ID with a fixed effort
+  level. No rationale documented; both stale.
+
+Each pin had become stale, counterproductive, or a dead letter on current-
+generation models, and none had a clear rollback criterion or owner.
+
+### Decision
+
+Remove all four pins. Rely on Claude Code's per-release model-native defaults
+rather than environment-level overrides.
+
+- **Skills use alias-based model references** (`opus`, `sonnet`) rather than
+  versioned IDs, so they auto-track Anthropic's latest release in each family
+  without manual maintenance. `/cleanup` is pinned to `sonnet` because it
+  writes `CLAUDE.md` and `ADR.md` prose that durably shapes future sessions.
+  `/plan` is pinned to `opus` for planning quality. `/implement` is
+  intentionally left unpinned — picking the implementation model is a
+  per-task judgment call best left to the session.
+- **Effort is omitted from skill frontmatter** across the board. Skills inherit
+  the session effort, making `/effort <level>` work situationally without
+  baking a level into the skill definition.
+- **Situational overrides** use `/effort <level>` per-session or
+  `effortLevel` in a project's `.claude/settings.local.json` — not global
+  pins that apply to every model and every task.
+
+### Consequences
+
+- Higher baseline token spend per session: model-native effort often exceeds
+  `medium`, particularly on Opus 4.7 (`xhigh` default).
+- Container sessions following a future model that regresses on adaptive
+  thinking could reintroduce the Feb–Mar 2026 zero-token-thinking symptoms.
+  The rollback lever is `/effort <level>` per-session or a project-level
+  `effortLevel` override — **not** re-adding `CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING`
+  (silently ignored on Opus 4.7+). If a future release brings back the
+  zero-token failure mode, re-pin via `settings.json`'s `effortLevel` rather
+  than the env var.
+- The effort system and model-native defaults change with each Claude release.
+  Removing the global pin means no maintenance burden and no false confidence
+  that a stale value is still optimal.
