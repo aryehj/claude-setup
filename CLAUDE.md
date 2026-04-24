@@ -118,14 +118,6 @@ In `start-agent.sh` the same template is also seeded into
 `awk` since those bubblewrap/`$TMPDIR` facts only apply inside
 `start-claude.sh`. `--reseed-global-claudemd` reseeds both copies.
 
-**1M extended context is disabled; Claude Code uses the standard 200K window.**
-The `CLAUDE_CODE_DISABLE_1M_CONTEXT=1` environment variable is set in `.bashrc`,
-`/etc/profile.d/`, and passed as a container-level env var via `CONTAINER_ENV` to
-prevent Claude Code from using the 1M context option. The `CONTAINER_ENV` path
-ensures the variable is present from process birth, before shell init runs.
-This keeps the model on its well-tested 200K context window, avoiding potential
-quality degradation observed with the larger window.
-
 **Git identity is set via both `~/.gitconfig` and environment variables.**
 `git config --global` is run during image build so `/root/.gitconfig` exists in
 the image. However, Claude Code's bubblewrap sandbox may not expose

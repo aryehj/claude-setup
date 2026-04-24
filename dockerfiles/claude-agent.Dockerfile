@@ -12,7 +12,6 @@ FROM debian:bookworm-slim
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PATH="/root/.local/bin:/usr/local/bin:/usr/bin:/bin" \
-    CLAUDE_CODE_DISABLE_1M_CONTEXT=1 \
     CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=1
 
 # ── system packages ──────────────────────────────────────────────────────────
