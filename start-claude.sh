@@ -330,18 +330,18 @@ if data.get('coauthorTag') != 'none':
     data['coauthorTag'] = 'none'
     changed = True
     print(f"==> Disabled coauthorTag in {path}")
-if data.get('effortLevel') != 'medium':
-    data['effortLevel'] = 'medium'
+if 'effortLevel' in data:
+    del data['effortLevel']
     changed = True
-    print(f"==> Set effortLevel to medium in {path}")
+    print(f"==> Removed effortLevel from {path}")
 if changed:
     with open(path, 'w') as f:
         json.dump(data, f, indent=2)
         f.write('\n')
 PYEOF
 else
-  echo '{"showThinkingSummaries": true, "coauthorTag": "none", "effortLevel": "medium"}' > "$GLOBAL_SETTINGS_FILE"
-  echo "==> Created $GLOBAL_SETTINGS_FILE with showThinkingSummaries, coauthorTag disabled, effortLevel medium"
+  echo '{"showThinkingSummaries": true, "coauthorTag": "none"}' > "$GLOBAL_SETTINGS_FILE"
+  echo "==> Created $GLOBAL_SETTINGS_FILE with showThinkingSummaries, coauthorTag disabled"
 fi
 
 # ── sync skills from upstream repo ────────────────────────────────────────────

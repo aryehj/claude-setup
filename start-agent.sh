@@ -857,8 +857,8 @@ if data.get('showThinkingSummaries') is not True:
 if data.get('coauthorTag') != 'none':
     data['coauthorTag'] = 'none'
     changed = True
-if data.get('effortLevel') != 'medium':
-    data['effortLevel'] = 'medium'
+if 'effortLevel' in data:
+    del data['effortLevel']
     changed = True
 if changed:
     with open(path, 'w') as f:
@@ -866,7 +866,7 @@ if changed:
         f.write('\n')
 PYEOF
 else
-  echo '{"showThinkingSummaries": true, "coauthorTag": "none", "effortLevel": "medium"}' > "$GLOBAL_SETTINGS_FILE"
+  echo '{"showThinkingSummaries": true, "coauthorTag": "none"}' > "$GLOBAL_SETTINGS_FILE"
 fi
 
 # ── inject OpenCode config (inference provider) ─────────────────────────────

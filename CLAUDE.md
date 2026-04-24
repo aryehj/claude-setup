@@ -136,13 +136,7 @@ shared across all containers via the volume mount). If the file exists, the
 setting is merged in; if not, a new file is created. This makes Claude Code's
 thinking process visible in the transcript.
 
-**`effortLevel` defaults to medium in global user settings.** The script sets
-`effortLevel: "medium"` in `~/.claude/settings.json` alongside the other global
-settings. This is set at the global level (not via environment variable) so that
-individual projects can override it by setting `"effortLevel"` in their
-`.claude/settings.local.json` — project settings take precedence over global
-settings. The env var `CLAUDE_CODE_EFFORT_LEVEL` is intentionally not used
-because it takes highest priority and would prevent per-project overrides.
+**`effortLevel` is intentionally unpinned.** Claude Code applies model-native defaults, which change with each release. Use `/effort <level>` or `effortLevel` in a project's `.claude/settings.local.json` for situational overrides. See ADR-017.
 
 **Sandbox is configured in strict mode.** The project-level
 `settings.local.json` sets `sandbox.failIfUnavailable: true` (hard-fail if
