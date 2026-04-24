@@ -31,6 +31,8 @@
   5. **Write the plan.** Create a single markdown file in the `plans/` directory at the project root (create the directory if it doesn't exist). Name the file with a short kebab-case slug describing the work (e.g.,
   `add-caching.md`, `fix-auth-race-condition.md`). If $ARGUMENTS describes multiple independent concerns, organize them as separate phases within this one file — do not create multiple files.
 
+  6. **Commit the plan.** Atomic commit, just the plan file, current branch. 
+
   ## Plan format
 
   ```markdown
