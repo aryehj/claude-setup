@@ -121,7 +121,8 @@ Invoke a synced skill inside any Claude Code session with its slash name, e.g.
 | Skill | What it does |
 |-------|-------------|
 | `cleanup` | Post-implementation housekeeping — updates CLAUDE.md, README.md, appends ADR.md, and renames completed plan files |
-| `plan` | Explores the codebase and writes implementation plans to `plans/` as markdown files targeted at Claude Sonnet |
+| `plan` | Explores the codebase and writes implementation plans to `plans/` as markdown files (runs on Opus) |
+| `implement` | Executes the active phase of a plan file, with task tracking and checkpoint commits |
 
 ## Environment variable reference
 
