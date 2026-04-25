@@ -61,7 +61,8 @@ The user wants Vane in its own isolated environment with:
 
 3. **Colima VM lifecycle** (`research` profile):
    - `colima start --profile research` with `--network-address` (same pattern as `claude-agent`)
-   - Default sizing: 4 GiB RAM, 2 CPUs (lighter than claude-agent since this is just Vane+SearXNG)
+   - **No custom image is built.** `research.sh` only orchestrates `docker run` against stock upstream images (`docker.io/searxng/searxng`, `docker.io/itzcrazykns1337/vane:slim-latest`). There is no `dockerfiles/research-*.Dockerfile` and no equivalent of the `claude-agent.Dockerfile` heavy base — Vane and SearXNG bring their own minimal runtimes.
+   - Default sizing: **2 GiB RAM, 2 CPUs**. The VM only hosts two long-running web app containers (SearXNG ~150 MB, Vane Next.js ~300-500 MB) plus Colima/docker overhead. No build steps, no Node/Python toolchain, no interactive shell, no LLM (LLM calls go to the host).
    - Overridable via `RESEARCH_MEMORY` / `RESEARCH_CPUS` env vars or `--memory=` / `--cpus=` flags
 
 4. **tinyproxy installation and config** in the VM:
@@ -245,6 +246,8 @@ SearXNG, the `claude-agent-net` user-defined network, the SearXNG MCP shim in th
 - **Allowlist vs. LLM egress**: The local LLM (Ollama/omlx) is accessed via `host.docker.internal`, which is resolved via `--add-host` and goes through the `$HOST_IP:$INFERENCE_PORT` iptables RETURN rule, not through tinyproxy. This mirrors the existing `start-agent.sh` architecture.
 
 - **Alternative considered**: Running Vane and SearXNG in a single container instead of two. Rejected because it would require a custom Dockerfile combining both images, increasing maintenance burden. The two-container approach reuses upstream images directly.
+
+- **Why no custom base image**: Unlike `start-agent.sh`, which builds `claude-agent:latest` from `dockerfiles/claude-agent.Dockerfile` to host the Claude Code + OpenCode CLIs and a Python MCP shim, `research.sh` runs only browser-facing services that ship as complete Docker Hub images. No agent runs *inside* the research VM — the user is the only consumer (via browser) and the LLM lives on the host. Adding a custom Dockerfile would be pure overhead.
 
 - **Migration path**: Users who used Vane at `localhost:3000` should run `research.sh` instead. OpenCode users see no change — websearch continues to work via the SearXNG that stays in `start-agent.sh`.
 
