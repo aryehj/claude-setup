@@ -2,6 +2,19 @@
 # Apply changes:  ./research.py --reload-allowlist
 # Suffix match:   'wikipedia.org' also covers 'en.wikipedia.org'.
 # Comments start with '#'.
+#
+# Tiers:
+#   READ-ONLY entries are active. UPLOAD-CAPABLE entries are commented out;
+#   uncomment per-host if you accept that an injected page could direct an
+#   exfil POST/upload to that host. tinyproxy filters by hostname, not URL
+#   path or HTTP method — there is no "read-only mode" for github.com.
+#
+# Note: pypi.org and npmjs.com accept uploads but are listed in READ-ONLY
+# because most research workflows depend on reading them. Accept the residual
+# risk or move them to UPLOAD-CAPABLE per your threat model.
+#
+# Note: many universities host Box/SharePoint/Google Drive endpoints under
+# their main domains; hostname-only filtering cannot prevent uploads there.
 
 # === Search engines ===
 google.com
@@ -9,11 +22,15 @@ bing.com
 duckduckgo.com
 search.brave.com
 api.qwant.com
+kagi.com
 
 # === Reference & encyclopaedia ===
 wikipedia.org
 wikimedia.org
 wikidata.org
+britannica.com
+plato.stanford.edu
+iep.utm.edu
 
 # === Q&A & developer reference ===
 stackoverflow.com
@@ -21,15 +38,23 @@ stackexchange.com
 developer.mozilla.org
 mozilla.org
 
-# === Academic — preprints & open access ===
+# === Preprints & open access ===
 arxiv.org
 biorxiv.org
 medrxiv.org
+chemrxiv.org
+eartharxiv.org
 plos.org
 elifesciences.org
 europepmc.org
+frontiersin.org
+mdpi.com
+oa.mg
+core.ac.uk
+base-search.net
+doaj.org
 
-# === Academic — indexing & discovery ===
+# === Indexing & discovery ===
 semanticscholar.org
 openalex.org
 crossref.org
@@ -38,13 +63,17 @@ orcid.org
 pubmed.ncbi.nlm.nih.gov
 ncbi.nlm.nih.gov
 nlm.nih.gov
+scholar.google.com
+dimensions.ai
 
-# === Academic — publishers (read-only) ===
+# === Academic publishers (read paths) ===
+# Note: submission portals on the same host cannot be filtered out.
+# editorialmanager.com and manuscriptcentral.com (third-party submission
+# systems) are simply absent from this allowlist.
 nature.com
 science.org
 cell.com
 jstor.org
-ssrn.com
 springer.com
 link.springer.com
 wiley.com
@@ -54,17 +83,136 @@ oup.com
 tandfonline.com
 sagepub.com
 acm.org
+dl.acm.org
 ieee.org
+ieeexplore.ieee.org
+pnas.org
+royalsocietypublishing.org
+aps.org
+journals.aps.org
+aip.org
+pubs.acs.org
+iopscience.iop.org
+jamanetwork.com
+nejm.org
+bmj.com
+thelancet.com
 
-# === Code hosting (read-only paths) ===
+# === Code hosting — read-only subdomains ===
+# github.com and gitlab.com are in UPLOAD-CAPABLE below.
 raw.githubusercontent.com
 codeload.github.com
 gist.githubusercontent.com
-gitlab.com
+objects.githubusercontent.com
+user-images.githubusercontent.com
 
-# === ML / AI papers ===
-paperswithcode.com
-huggingface.co
+# === Software & language docs ===
+docs.python.org
+pypi.org
+readthedocs.io
+readthedocs.org
+pkg.go.dev
+golang.org
+go.dev
+docs.rs
+crates.io
+rust-lang.org
+npmjs.com
+nodejs.org
+rubygems.org
+ruby-lang.org
+packagist.org
+php.net
+hexdocs.pm
+elixir-lang.org
+kotlinlang.org
+scala-lang.org
+clojure.org
+haskell.org
+kubernetes.io
+docs.docker.com
+docs.kernel.org
+man7.org
+gnu.org
+devdocs.io
+
+# === Standards & specs ===
+w3.org
+whatwg.org
+ietf.org
+rfc-editor.org
+datatracker.ietf.org
+iso.org
+unicode.org
+schema.org
+ecma-international.org
+khronos.org
+
+# === Legal & regulatory ===
+sec.gov
+supremecourt.gov
+federalregister.gov
+congress.gov
+uscourts.gov
+govinfo.gov
+eur-lex.europa.eu
+courtlistener.com
+law.cornell.edu
+justia.com
+oyez.org
+cfpb.gov
+ftc.gov
+gao.gov
+
+# === Open data repositories ===
+data.gov
+data.gov.uk
+data.europa.eu
+census.gov
+bls.gov
+bea.gov
+federalreserve.gov
+fred.stlouisfed.org
+worldbank.org
+data.worldbank.org
+imf.org
+oecd.org
+data.oecd.org
+ec.europa.eu
+eurostat.ec.europa.eu
+un.org
+data.un.org
+unicef.org
+wto.org
+noaa.gov
+usgs.gov
+usda.gov
+epa.gov
+nasa.gov
+eosdis.nasa.gov
+esa.int
+clinicaltrials.gov
+icpsr.umich.edu
+
+# === Health & medicine ===
+cdc.gov
+who.int
+nih.gov
+fda.gov
+ema.europa.eu
+nice.org.uk
+mayoclinic.org
+medlineplus.gov
+
+# === Science publications & magazines ===
+quantamagazine.org
+scientificamerican.com
+technologyreview.com
+arstechnica.com
+wired.com
+newscientist.com
+nautil.us
+aeon.co
 
 # === News & periodicals ===
 nytimes.com
@@ -78,17 +226,87 @@ washingtonpost.com
 theatlantic.com
 newyorker.com
 theguardian.com
+wsj.com
+bloomberg.com
+npr.org
+politico.com
+propublica.org
 
 # === Community & discussion ===
 reddit.com
 news.ycombinator.com
+lesswrong.com
+lobste.rs
+metafilter.com
+slashdot.org
 
 # === Web archive ===
 archive.org
 web.archive.org
+archive.ph
+archive.today
 
-# === Government / standards / statistics ===
-nasa.gov
-cdc.gov
-who.int
+# === ML / AI papers ===
+paperswithcode.com
+distill.pub
+openreview.net
+
+# === Major universities (research output) ===
+# Starter set; add institutions to ~/.research/allowlist.txt as needed.
+# --reseed-allowlist would overwrite local additions, so keep custom entries
+# in the on-disk file rather than here.
+mit.edu
+stanford.edu
+harvard.edu
+berkeley.edu
+princeton.edu
+yale.edu
+columbia.edu
+cmu.edu
+caltech.edu
+uchicago.edu
+cornell.edu
+upenn.edu
+northwestern.edu
+ucla.edu
+umich.edu
+ox.ac.uk
+cam.ac.uk
+ucl.ac.uk
+lse.ac.uk
+imperial.ac.uk
+ed.ac.uk
+ethz.ch
+epfl.ch
+mpg.de
+utoronto.ca
+
+# === Government / international ===
 europa.eu
+
+
+# === UPLOAD-CAPABLE — review before enabling ===
+# Uncomment per host if you accept the residual exfil risk.
+# tinyproxy cannot distinguish read paths from write paths on these hosts.
+#
+# github.com           # push, gist creation, issue/PR creation; reads available via raw.githubusercontent.com
+# gitlab.com           # push, MR creation, snippet creation; no read-only subdomain
+# bitbucket.org        # push, PR, snippet
+# huggingface.co       # model/dataset upload via HF Hub API; reads also flow through this host
+# ssrn.com             # paper submission accepted on the same hostname as reading
+# zenodo.org           # research data deposits
+# figshare.com         # research data/figures deposits
+# osf.io               # OSF project uploads
+# datadryad.org        # dataset deposits
+# kaggle.com           # notebook + dataset uploads
+
+
+# === EXPLICITLY EXCLUDED ===
+# These hosts are intentionally absent. They are pure write/exfil channels
+# with no research read value. Add them only if you have a specific need:
+#
+#   pastebin.com, hastebin.com, ix.io, dpaste.com  — anonymous text upload
+#   transfer.sh, file.io, 0x0.st                    — anonymous file upload
+#   webhook.site, requestbin.com, pipedream.com     — public webhook capture
+#   discord.com, slack.com, telegram.org            — DM/webhook delivery
+#   ngrok.io, *.trycloudflare.com                   — reverse-tunnel egress
