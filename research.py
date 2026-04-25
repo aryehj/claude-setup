@@ -358,7 +358,7 @@ def colima_profile_running(profile: str = COLIMA_PROFILE) -> bool:
         capture_output=True,
         text=True,
     )
-    return "Running" in result.stdout
+    return "Running" in result.stdout or "Running" in result.stderr
 
 
 def docker_container_exists(name: str) -> bool:
