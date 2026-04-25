@@ -245,14 +245,19 @@ git-scm.com
 npmjs.org
 npmjs.com
 yarnpkg.com
+nodejs.org
 pypi.org
 pythonhosted.org
 crates.io
 rust-lang.org
 rubygems.org
+ruby-lang.org
 packagist.org
+php.net
 pkg.go.dev
 proxy.golang.org
+golang.org
+go.dev
 hex.pm
 
 # === Container / image registries ===
@@ -274,11 +279,15 @@ ollama.com
 # === General web & reference ===
 wikipedia.org
 wikimedia.org
+wikidata.org
+britannica.com
 mozilla.org
 developer.mozilla.org
 stackoverflow.com
 stackexchange.com
 archive.org
+archive.ph
+archive.today
 
 # === Search engines ===
 google.com
@@ -286,6 +295,7 @@ duckduckgo.com
 bing.com
 search.brave.com
 api.qwant.com
+kagi.com
 # api.github.com — targeted entry for SearXNG's GitHub code-search engine.
 # Does NOT enable github.com web writes (push, PR, issue comments).
 api.github.com
@@ -297,27 +307,48 @@ nih.gov
 europepmc.org
 biorxiv.org
 medrxiv.org
+chemrxiv.org
+eartharxiv.org
 plos.org
+frontiersin.org
+mdpi.com
 biomedcentral.com
 elifesciences.org
 nature.com
 cell.com
 science.org
 sciencemag.org
+mayoclinic.org
+medlineplus.gov
+nice.org.uk
 
 # === Physical sciences, engineering, math, CS ===
 arxiv.org
 semanticscholar.org
 openalex.org
+dimensions.ai
+oa.mg
+core.ac.uk
+base-search.net
+doaj.org
 dblp.org
 acm.org
 ieee.org
 aps.org
+aip.org
 acs.org
 rsc.org
 iop.org
 ams.org
+pnas.org
+royalsocietypublishing.org
+jamanetwork.com
+nejm.org
+bmj.com
+thelancet.com
 paperswithcode.com
+openreview.net
+distill.pub
 
 # === Social sciences, humanities, general journals ===
 jstor.org
@@ -350,10 +381,33 @@ census.gov
 noaa.gov
 usgs.gov
 bls.gov
+bea.gov
 loc.gov
 gov.uk
 who.int
 europa.eu
+sec.gov
+supremecourt.gov
+federalregister.gov
+congress.gov
+uscourts.gov
+govinfo.gov
+cfpb.gov
+ftc.gov
+gao.gov
+usda.gov
+epa.gov
+data.gov
+clinicaltrials.gov
+icpsr.umich.edu
+federalreserve.gov
+fred.stlouisfed.org
+worldbank.org
+imf.org
+oecd.org
+un.org
+unicef.org
+wto.org
 
 # === News & periodicals for research context ===
 nytimes.com
@@ -366,7 +420,91 @@ bbc.co.uk
 washingtonpost.com
 theatlantic.com
 newyorker.com
+theguardian.com
 wsj.com
+bloomberg.com
+npr.org
+politico.com
+propublica.org
+
+# === Science publications & magazines ===
+quantamagazine.org
+scientificamerican.com
+technologyreview.com
+arstechnica.com
+wired.com
+newscientist.com
+nautil.us
+aeon.co
+
+# === Community & discussion ===
+reddit.com
+news.ycombinator.com
+lesswrong.com
+lobste.rs
+metafilter.com
+slashdot.org
+
+# === Software & language docs ===
+readthedocs.io
+readthedocs.org
+hexdocs.pm
+elixir-lang.org
+kotlinlang.org
+scala-lang.org
+clojure.org
+haskell.org
+kubernetes.io
+docs.docker.com
+docs.kernel.org
+man7.org
+gnu.org
+devdocs.io
+
+# === Standards & specs ===
+w3.org
+whatwg.org
+ietf.org
+rfc-editor.org
+iso.org
+unicode.org
+schema.org
+ecma-international.org
+khronos.org
+
+# === Legal & regulatory ===
+courtlistener.com
+law.cornell.edu
+justia.com
+oyez.org
+
+# === Major universities ===
+# Starter set; add institutions to ~/.claude-agent/allowlist.txt as needed.
+mit.edu
+stanford.edu
+harvard.edu
+berkeley.edu
+princeton.edu
+yale.edu
+columbia.edu
+cmu.edu
+caltech.edu
+uchicago.edu
+cornell.edu
+upenn.edu
+northwestern.edu
+ucla.edu
+umich.edu
+ox.ac.uk
+cam.ac.uk
+ucl.ac.uk
+lse.ac.uk
+imperial.ac.uk
+ed.ac.uk
+ethz.ch
+epfl.ch
+mpg.de
+utoronto.ca
 ALLOWLIST
   echo "==> Seeded allowlist at $ALLOWLIST_FILE"
 fi
