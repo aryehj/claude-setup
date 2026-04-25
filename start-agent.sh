@@ -21,6 +21,7 @@ set -euo pipefail
 # ── args ──────────────────────────────────────────────────────────────────────
 REBUILD=false
 RELOAD_ALLOWLIST=false
+RESEED_ALLOWLIST=false
 RESEED_GLOBAL_CLAUDEMD=false
 CLI_MEMORY=""
 CLI_CPUS=""
@@ -46,6 +47,9 @@ OPTIONS:
   --reload-allowlist     Regenerate tinyproxy's filter file from
                          ~/.claude-agent/allowlist.txt and reload tinyproxy.
                          Fast path; does not restart the container.
+  --reseed-allowlist     Overwrite ~/.claude-agent/allowlist.txt with the
+                         built-in default, then reload. Use after pulling repo
+                         updates that added new entries to the default list.
   --reseed-global-claudemd  Overwrite ~/.claude-containers/shared/CLAUDE.md
                          with the repo template (default is seed-if-missing).
   --memory=VALUE         VM memory (e.g. 8, 8G, 8GB). Default: 8 GiB.
@@ -66,6 +70,8 @@ ALLOWLIST:
   domains the container can reach. One domain per line; '#' for comments;
   suffix match (github.com covers api.github.com). Apply changes with:
       start-agent.sh --reload-allowlist
+  To pick up new default entries after a repo pull:
+      start-agent.sh --reseed-allowlist
 
 ENVIRONMENT:
   CLAUDE_AGENT_MEMORY    Default VM memory (overridden by --memory).
@@ -87,6 +93,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --rebuild)           REBUILD=true ;;
     --reload-allowlist)  RELOAD_ALLOWLIST=true ;;
+    --reseed-allowlist)  RESEED_ALLOWLIST=true; RELOAD_ALLOWLIST=true ;;
     --reseed-global-claudemd) RESEED_GLOBAL_CLAUDEMD=true ;;
     --memory=*)          CLI_MEMORY="${1#--memory=}" ;;
     --memory)            CLI_MEMORY="${2:?--memory requires a value}"; shift ;;
@@ -217,7 +224,7 @@ fi
 
 # ── seed allowlist (first run only) ──────────────────────────────────────────
 mkdir -p "$ALLOWLIST_DIR"
-if [[ ! -f "$ALLOWLIST_FILE" ]]; then
+if [[ ! -f "$ALLOWLIST_FILE" ]] || $RESEED_ALLOWLIST; then
   cat > "$ALLOWLIST_FILE" <<'ALLOWLIST'
 # start-agent allowlist — edit on the macOS host.
 # Apply changes:  start-agent.sh --reload-allowlist
@@ -506,7 +513,11 @@ epfl.ch
 mpg.de
 utoronto.ca
 ALLOWLIST
-  echo "==> Seeded allowlist at $ALLOWLIST_FILE"
+  if $RESEED_ALLOWLIST; then
+    echo "==> Reseeded allowlist at $ALLOWLIST_FILE"
+  else
+    echo "==> Seeded allowlist at $ALLOWLIST_FILE"
+  fi
 fi
 
 # Generate a tinyproxy filter file on the host from the allowlist.
