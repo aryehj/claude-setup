@@ -354,11 +354,17 @@ def vm_put_file(local_path: Path, remote_path: str, *, profile: str = COLIMA_PRO
 
 def colima_profile_running(profile: str = COLIMA_PROFILE) -> bool:
     result = subprocess.run(
-        ["colima", "status", "-p", profile],
+        ["colima", "list", "-p", profile, "--json"],
         capture_output=True,
         text=True,
     )
-    return "Running" in result.stdout or "Running" in result.stderr
+    if result.returncode != 0 or not result.stdout.strip():
+        return False
+    import json
+    try:
+        return json.loads(result.stdout.strip()).get("status") == "Running"
+    except (json.JSONDecodeError, AttributeError):
+        return False
 
 
 def docker_container_exists(name: str) -> bool:

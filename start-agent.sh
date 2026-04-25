@@ -390,7 +390,7 @@ PYEOF
 
 # ── Colima VM bring-up ───────────────────────────────────────────────────────
 colima_profile_running() {
-  colima status -p "$COLIMA_PROFILE" 2>&1 | grep -q 'Running'
+  colima list -p "$COLIMA_PROFILE" --json 2>/dev/null | grep -q '"Running"'
 }
 
 destroy_colima_vm() {
