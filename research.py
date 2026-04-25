@@ -759,7 +759,9 @@ def main() -> None:
         seed_allowlist(paths, force=True)
 
     # --reload-allowlist: need VM running + network discovered, then fast-exit.
+    # Seed the allowlist first so a missing file doesn't crash reload.
     if args.reload_allowlist:
+        seed_allowlist(paths)
         if not colima_profile_running(config.profile_name):
             print(f"error: Colima VM '{config.profile_name}' is not running. Start it first.", file=sys.stderr)
             sys.exit(1)
