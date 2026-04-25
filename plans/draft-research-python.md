@@ -2,7 +2,7 @@
 
 ## Status
 
-- [ ] Phase 1: Single-file `research.py`, stdlib-only, feature-parity with the bash plan
+- [x] Phase 1: Single-file `research.py`, stdlib-only, feature-parity with the bash plan
 - [ ] Phase 2: Decide whether the result is good enough to port `start-agent.sh` later
 
 ## Context
