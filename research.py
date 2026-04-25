@@ -175,14 +175,16 @@ def _parse_gib(raw: str) -> int:
 
 
 def seed_allowlist(paths: Paths) -> None:
-    if not TEMPLATE_ALLOWLIST.exists():
-        raise FileNotFoundError(
-            f"Allowlist template not found: {TEMPLATE_ALLOWLIST}\n"
-            "Ensure you are running research.py from a complete checkout of the repo."
-        )
     paths.base.mkdir(parents=True, exist_ok=True)
     if not paths.allowlist_file.exists():
-        paths.allowlist_file.write_text(TEMPLATE_ALLOWLIST.read_text())
+        try:
+            text = TEMPLATE_ALLOWLIST.read_text()
+        except FileNotFoundError:
+            raise FileNotFoundError(
+                f"Allowlist template not found: {TEMPLATE_ALLOWLIST}\n"
+                "Ensure you are running research.py from a complete checkout of the repo."
+            ) from None
+        paths.allowlist_file.write_text(text)
         print(f"==> Seeded allowlist at {paths.allowlist_file}")
 
 
