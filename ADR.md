@@ -1055,6 +1055,55 @@ not overwritten; `--reseed-allowlist` (Phase 3) is the opt-in migration path.
   assumption `start-claude.sh` makes for `templates/global-claude.md`. This
   is intentional and documented.
 - Existing users will not see the expanded seed until they run
-  `--reseed-allowlist` (Phase 3 of `plans/expand-research-allowlist.md`) or
-  manually delete `~/.research/allowlist.txt`. New users get the expanded seed
-  automatically.
+  `--reseed-allowlist` or manually delete `~/.research/allowlist.txt`. New
+  users get the expanded seed automatically.
+
+## ADR-020: Tiered allowlist structure — READ-ONLY vs UPLOAD-CAPABLE
+
+**Date:** 2026-04-25
+**Status:** Accepted
+
+### Context
+
+`templates/research-allowlist.txt` previously mixed read-oriented hosts
+(arxiv.org, wikipedia.org) with upload-capable hosts (gitlab.com,
+huggingface.co) without distinguishing them. tinyproxy filters by hostname
+only — it cannot distinguish a read path from a write path on the same host.
+A model operating in the research environment could, if instructed by an
+injected page, push to gitlab.com or upload a dataset to huggingface.co as
+easily as it could read from them. The seed gave no signal that these hosts
+carried different risk.
+
+### Decision
+
+Rewrite the template with two explicit tiers:
+
+- **READ-ONLY** (active by default): hosts where the primary use-case is
+  reading — search engines, reference sites, preprint servers, academic
+  publishers, software docs, standards bodies, open data repositories, news,
+  universities. Expanded from 66 to 223 active entries.
+- **UPLOAD-CAPABLE** (commented out): hosts where the same hostname also
+  accepts writes — `github.com`, `gitlab.com`, `huggingface.co`, `zenodo.org`,
+  `ssrn.com`, `kaggle.com`, etc. Each entry carries a short inline rationale.
+  Users uncomment per-host, accepting the residual risk explicitly.
+
+An **EXPLICITLY EXCLUDED** documentation block at the end names pure exfil
+channels (anonymous paste/upload sites, webhook capture services,
+reverse-tunnel hosts) and explains why they are absent.
+
+The template preamble states the constraint plainly: tinyproxy cannot enforce
+"read-only mode" on a hostname — the tiering is documentation of risk, not
+technical enforcement.
+
+### Consequences
+
+- New users get a substantially larger and better-organized seed (223 entries
+  vs 66), covering the common research use-cases that the old seed missed.
+- The risk distinction between read-oriented and upload-capable hosts is
+  visible in the file, not implied. Users who need github.com make a conscious
+  choice rather than inheriting it silently.
+- `--reseed-allowlist` lets existing users migrate to the new template without
+  deleting state manually.
+- `gitlab.com` and `huggingface.co` are no longer active by default; users who
+  relied on them must uncomment. This is an intentional breaking change for
+  a security reason.

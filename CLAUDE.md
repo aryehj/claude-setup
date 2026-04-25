@@ -127,12 +127,11 @@ In `start-agent.sh` the same template is also seeded into
 On first run, `seed_allowlist()` reads the template and writes it to
 `~/.research/allowlist.txt`. If the template file is missing (broken checkout),
 it raises a clear `FileNotFoundError`. Existing on-disk allowlists are never
-silently overwritten — use `--reseed-allowlist` (Phase 3 of
-`plans/expand-research-allowlist.md`) to opt in. This mirrors the
-`templates/global-claude.md` → `~/.claude-containers/shared/CLAUDE.md` pattern.
-The template is plain text, one domain per line, designed for one-line PRs;
-the `_ALLOWLIST_SEED` Python string constant was removed in favor of the file.
-See ADR-019.
+silently overwritten — use `--reseed-allowlist` to pick up template updates.
+This mirrors the `templates/global-claude.md` → `~/.claude-containers/shared/CLAUDE.md`
+pattern. The template is plain text, one domain per line, organized into a
+READ-ONLY tier (active) and a commented-out UPLOAD-CAPABLE tier (user opts in
+per host). See ADR-019 and ADR-020.
 
 **Git identity is set via both `~/.gitconfig` and environment variables.**
 `git config --global` is run during image build so `/root/.gitconfig` exists in
