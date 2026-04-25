@@ -442,6 +442,52 @@ This config persists in `~/.claude-agent/vane-data/` and survives `--rebuild`.
 
 See `ADR.md` §ADR-014 for the threat model and design rationale.
 
+---
+
+# research.py
+
+Spins up a dedicated Colima VM (`research` profile) with an isolated egress
+firewall and two containers: **SearXNG** (meta-search) and **Vane** (AI
+research UI at `http://localhost:3000`). State lives in `~/.research/`.
+
+## Requirements
+
+- macOS with Colima and docker installed
+- Local inference server optional (Ollama or omlx), same as `start-agent.sh`
+
+## Usage
+
+```bash
+./research.py                          # bring up the environment
+./research.py --reload-allowlist       # update tinyproxy filter without restart
+./research.py --rebuild                # recreate containers (prompts for VM deletion)
+./research.py --backend=omlx          # use omlx instead of Ollama
+```
+
+On first run, seeds `~/.research/allowlist.txt` from `templates/research-allowlist.txt`.
+Edit the on-disk file and run `--reload-allowlist` to apply changes.
+
+## Egress allowlist
+
+Same model as `start-agent.sh`: in-VM tinyproxy + iptables RESEARCH chain.
+The on-disk allowlist (`~/.research/allowlist.txt`) is seeded from
+`templates/research-allowlist.txt` on first run. Edit it with:
+
+```bash
+$EDITOR ~/.research/allowlist.txt
+./research.py --reload-allowlist
+```
+
+## Environment variable reference (research.py)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CLAUDE_AGENT_BACKEND` | `ollama` | Inference backend: `ollama` or `omlx` (overridden by `--backend`) |
+| `OMLX_API_KEY` | *(unset)* | API key for omlx |
+| `OLLAMA_HOST` | `0.0.0.0:11434` | Ollama bind address (host-side) |
+
+---
+
 ## Environment variable reference (start-agent-specific)
 
 | Variable | Default | Description |

@@ -8,9 +8,14 @@ using Apple Containers. One script, one container per project.
 ```
 start-claude.sh              — Apple Containers path; per-project microVM with Claude Code
 start-agent.sh               — Colima path; shared VM + container with Claude Code + OpenCode + VM-level egress allowlist
+research.py                  — Python script; isolated Colima VM + Vane + SearXNG research environment
 dockerfiles/                 — Dockerfiles built by start-agent.sh (claude-agent.Dockerfile)
+templates/                   — seed templates copied to host state dirs on first run
+  global-claude.md           — seeded to ~/.claude-containers/shared/CLAUDE.md
+  research-allowlist.txt     — seeded to ~/.research/allowlist.txt by research.py
 skills/                      — reusable Claude Code skills (back up of ~/.claude/skills/)
 plans/                       — implementation plans written by /plan skill
+tests/                       — unit tests (test_research.py covers research.py pure helpers)
 ROADMAP.md                   — planned work
 README.md                    — usage reference
 ADR.md                       — architecture decision records
@@ -117,6 +122,17 @@ In `start-agent.sh` the same template is also seeded into
 `## Differences in claude-dev` section is stripped on the OpenCode copy via
 `awk` since those bubblewrap/`$TMPDIR` facts only apply inside
 `start-claude.sh`. `--reseed-global-claudemd` reseeds both copies.
+
+**`research.py` allowlist seed lives in `templates/research-allowlist.txt`.**
+On first run, `seed_allowlist()` reads the template and writes it to
+`~/.research/allowlist.txt`. If the template file is missing (broken checkout),
+it raises a clear `FileNotFoundError`. Existing on-disk allowlists are never
+silently overwritten — use `--reseed-allowlist` (Phase 3 of
+`plans/expand-research-allowlist.md`) to opt in. This mirrors the
+`templates/global-claude.md` → `~/.claude-containers/shared/CLAUDE.md` pattern.
+The template is plain text, one domain per line, designed for one-line PRs;
+the `_ALLOWLIST_SEED` Python string constant was removed in favor of the file.
+See ADR-019.
 
 **Git identity is set via both `~/.gitconfig` and environment variables.**
 `git config --global` is run during image build so `/root/.gitconfig` exists in

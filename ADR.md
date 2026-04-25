@@ -1012,3 +1012,49 @@ from this probe does not justify a port on its own merits.
   exactly the kind of pure-function logic that would also be unit-testable if
   extracted into a Python module — but that is a decision for that plan, not
   this one.
+
+## ADR-019: Externalize research.py allowlist seed to `templates/research-allowlist.txt`
+
+**Date:** 2026-04-25
+**Status:** Accepted
+
+### Context
+
+`research.py` carried its default allowlist as a Python triple-quoted string
+constant (`_ALLOWLIST_SEED`, ~96 lines). The seed needed substantial expansion
+(tiered READ-ONLY / UPLOAD-CAPABLE structure, dozens of new domains). Keeping
+it embedded in Python made the list harder to diff, harder to review in PRs,
+and impossible to edit without touching Python syntax. This parallels
+`templates/global-claude.md`, which is seeded to
+`~/.claude-containers/shared/CLAUDE.md` by `start-agent.sh` and
+`start-claude.sh` on first run.
+
+### Decision
+
+Move the allowlist body to `templates/research-allowlist.txt` (plain text, one
+domain per line). Add a module-level constant:
+
+```python
+TEMPLATE_ALLOWLIST = Path(__file__).parent / "templates" / "research-allowlist.txt"
+```
+
+`seed_allowlist()` reads from this path instead of the in-memory string. If
+the file is missing, it raises `FileNotFoundError` with a message pointing at
+the expected path — this is a developer-facing failure (broken checkout), not
+a user-runtime failure. Existing on-disk `~/.research/allowlist.txt` files are
+not overwritten; `--reseed-allowlist` (Phase 3) is the opt-in migration path.
+
+### Consequences
+
+- Editing the seed allowlist is now a one-line diff in a plain text file,
+  reviewable without Python context. Template changes are visible at a glance
+  in PR diffs.
+- A `research.py` invocation from a broken checkout (templates/ missing or
+  deleted) now fails loudly rather than silently falling back to a stale seed.
+- `research.py` depends on being run from a complete repo checkout, same
+  assumption `start-claude.sh` makes for `templates/global-claude.md`. This
+  is intentional and documented.
+- Existing users will not see the expanded seed until they run
+  `--reseed-allowlist` (Phase 3 of `plans/expand-research-allowlist.md`) or
+  manually delete `~/.research/allowlist.txt`. New users get the expanded seed
+  automatically.
