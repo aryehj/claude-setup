@@ -460,12 +460,14 @@ research UI at `http://localhost:3000`). State lives in `~/.research/`.
 ```bash
 ./research.py                          # bring up the environment
 ./research.py --reload-allowlist       # update tinyproxy filter without restart
+./research.py --reseed-allowlist       # overwrite ~/.research/allowlist.txt with current template
 ./research.py --rebuild                # recreate containers (prompts for VM deletion)
 ./research.py --backend=omlx          # use omlx instead of Ollama
 ```
 
 On first run, seeds `~/.research/allowlist.txt` from `templates/research-allowlist.txt`.
-Edit the on-disk file and run `--reload-allowlist` to apply changes.
+Edit the on-disk file and run `--reload-allowlist` to apply changes. To pick up
+upstream template updates, run `--reseed-allowlist` (overwrites the on-disk file).
 
 ## Egress allowlist
 
@@ -476,6 +478,12 @@ The on-disk allowlist (`~/.research/allowlist.txt`) is seeded from
 ```bash
 $EDITOR ~/.research/allowlist.txt
 ./research.py --reload-allowlist
+```
+
+To pick up template updates after a `git pull`, run:
+
+```bash
+./research.py --reseed-allowlist --reload-allowlist
 ```
 
 ## Environment variable reference (research.py)

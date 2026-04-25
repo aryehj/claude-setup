@@ -15,6 +15,7 @@ Host-side state lives in ~/.research/:
 Usage:
   ./research.py                         bring up the environment
   ./research.py --reload-allowlist      update tinyproxy filter without restarting
+  ./research.py --reseed-allowlist      overwrite ~/.research/allowlist.txt with current template
   ./research.py --rebuild               recreate containers (optionally VM too)
   ./research.py --backend=omlx          use omlx instead of Ollama
 """
@@ -130,6 +131,13 @@ ENVIRONMENT:
         help="Regenerate tinyproxy filter from ~/.research/allowlist.txt and reload tinyproxy. Fast path; does not restart containers.",
     )
     p.add_argument(
+        "--reseed-allowlist",
+        action="store_true",
+        dest="reseed_allowlist",
+        help=f"Overwrite ~/.research/allowlist.txt with the current template "
+             f"({TEMPLATE_ALLOWLIST.name}). Use after pulling allowlist updates.",
+    )
+    p.add_argument(
         "--backend",
         choices=["ollama", "omlx"],
         default=os.environ.get("RESEARCH_BACKEND", "ollama"),
@@ -174,18 +182,20 @@ def _parse_gib(raw: str) -> int:
 # ── Allowlist seed ─────────────────────────────────────────────────────────────
 
 
-def seed_allowlist(paths: Paths) -> None:
+def seed_allowlist(paths: Paths, force: bool = False) -> None:
     paths.base.mkdir(parents=True, exist_ok=True)
-    if not paths.allowlist_file.exists():
-        try:
-            text = TEMPLATE_ALLOWLIST.read_text()
-        except FileNotFoundError:
-            raise FileNotFoundError(
-                f"Allowlist template not found: {TEMPLATE_ALLOWLIST}\n"
-                "Ensure you are running research.py from a complete checkout of the repo."
-            ) from None
-        paths.allowlist_file.write_text(text)
-        print(f"==> Seeded allowlist at {paths.allowlist_file}")
+    if not force and paths.allowlist_file.exists():
+        return
+    try:
+        text = TEMPLATE_ALLOWLIST.read_text()
+    except FileNotFoundError:
+        raise FileNotFoundError(
+            f"Allowlist template not found: {TEMPLATE_ALLOWLIST}\n"
+            "Ensure you are running research.py from a complete checkout of the repo."
+        ) from None
+    paths.allowlist_file.write_text(text)
+    verb = "Reseeded" if force else "Seeded"
+    print(f"==> {verb} allowlist at {paths.allowlist_file}")
 
 
 # ── Pure helpers ───────────────────────────────────────────────────────────────
@@ -743,6 +753,10 @@ def main() -> None:
         backend=args.backend,
         vane_port=args.vane_port,
     )
+
+    # --reseed-allowlist: overwrite on-disk allowlist before any other operation.
+    if args.reseed_allowlist:
+        seed_allowlist(paths, force=True)
 
     # --reload-allowlist: need VM running + network discovered, then fast-exit.
     if args.reload_allowlist:
