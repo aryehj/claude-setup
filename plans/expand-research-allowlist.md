@@ -2,7 +2,7 @@
 
 ## Status
 
-- [ ] Phase 1: Externalize seed to `templates/research-allowlist.txt` (mechanical; Haiku ok)
+- [x] Phase 1: Externalize seed to `templates/research-allowlist.txt` (mechanical; Haiku ok)
 - [ ] Phase 2: Rewrite the allowlist body with READ-ONLY + UPLOAD-CAPABLE tiers and expanded scope
 - [ ] Phase 3: Add `--reseed-allowlist` flag
 
