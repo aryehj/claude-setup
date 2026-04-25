@@ -8,14 +8,20 @@ Creates a dedicated Colima VM (profile: research) with its own egress firewall
   - research-vane: Vane AI research UI, accessible at http://localhost:3000
 
 Host-side state lives in ~/.research/:
-  allowlist.txt     — one domain per line; suffix-matched; edit and --reload-allowlist
-  searxng/settings.yml  — seeded on first run
-  vane-data/        — Vane persistent state (LLM config survives --rebuild)
+  denylist-sources.txt      pinned upstream feed URLs; --refresh-denylist re-fetches
+  denylist-additions.txt    locally-curated extra blocks (exfil-capable services)
+  denylist-overrides.txt    FP escape hatch; entries here are removed from the final filter
+  denylist-cache/           fetched copies of each upstream feed
+  searxng/settings.yml      seeded on first run
+  vane-data/                Vane persistent state (LLM config survives --rebuild)
+
+The composed denylist is: (cached-upstream ∪ additions) − overrides.
 
 Usage:
   ./research.py                         bring up the environment
-  ./research.py --reload-allowlist      update tinyproxy filter without restarting
-  ./research.py --reseed-allowlist      overwrite ~/.research/allowlist.txt with current template
+  ./research.py --reload-denylist       recompose filter from local files (no network)
+  ./research.py --refresh-denylist      re-fetch upstream feeds, then reload
+  ./research.py --reseed-denylist       overwrite sources/additions templates from repo
   ./research.py --rebuild               recreate containers (optionally VM too)
   ./research.py --backend=omlx          use omlx instead of Ollama
 """
@@ -28,6 +34,8 @@ import secrets
 import subprocess
 import sys
 import tempfile
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
@@ -35,7 +43,8 @@ from typing import List, Optional
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 
-TEMPLATE_ALLOWLIST = Path(__file__).parent / "templates" / "research-allowlist.txt"
+TEMPLATE_DENYLIST_SOURCES = Path(__file__).parent / "templates" / "research-denylist-sources.txt"
+TEMPLATE_DENYLIST_ADDITIONS = Path(__file__).parent / "templates" / "research-denylist-additions.txt"
 
 COLIMA_PROFILE = "research"
 CONTAINER_SEARXNG = "research-searxng"
@@ -55,8 +64,20 @@ class Paths:
     base: Path = field(default_factory=lambda: Path.home() / ".research")
 
     @property
-    def allowlist_file(self) -> Path:
-        return self.base / "allowlist.txt"
+    def denylist_sources_file(self) -> Path:
+        return self.base / "denylist-sources.txt"
+
+    @property
+    def denylist_additions_file(self) -> Path:
+        return self.base / "denylist-additions.txt"
+
+    @property
+    def denylist_overrides_file(self) -> Path:
+        return self.base / "denylist-overrides.txt"
+
+    @property
+    def denylist_cache_dir(self) -> Path:
+        return self.base / "denylist-cache"
 
     @property
     def searxng_dir(self) -> Path:
@@ -106,11 +127,16 @@ def parse_args() -> argparse.Namespace:
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-ALLOWLIST:
-  Edit ~/.research/allowlist.txt on the macOS host to change which domains
-  are reachable. One domain per line; '#' for comments; suffix-matched
-  (wikipedia.org also covers en.wikipedia.org). Apply changes with:
-      ./research.py --reload-allowlist
+DENYLIST:
+  research.py uses a denylist (default-allow) so Vane can scrape arbitrary
+  search-result URLs. The composed denylist is:
+      (cached upstream feeds ∪ denylist-additions.txt) − denylist-overrides.txt
+
+  All three files live in ~/.research/ on the macOS host.
+    --reload-denylist    recompose filter from local files (no network)
+    --refresh-denylist   re-fetch upstream feeds, then reload
+    --reseed-denylist    overwrite sources/additions from repo templates
+                         (overrides.txt is never overwritten — it is user state)
 
 ENVIRONMENT:
   RESEARCH_MEMORY        Default VM memory GiB (overridden by --memory)
@@ -125,17 +151,22 @@ ENVIRONMENT:
         help="Remove containers and recreate. With confirmation, also delete the Colima VM.",
     )
     p.add_argument(
-        "--reload-allowlist",
+        "--reload-denylist",
         action="store_true",
-        dest="reload_allowlist",
-        help="Regenerate tinyproxy filter from ~/.research/allowlist.txt and reload tinyproxy. Fast path; does not restart containers.",
+        dest="reload_denylist",
+        help="Recompose the tinyproxy filter from local files (cache + additions − overrides) and reload tinyproxy. No network. Fast path; does not restart containers.",
     )
     p.add_argument(
-        "--reseed-allowlist",
+        "--refresh-denylist",
         action="store_true",
-        dest="reseed_allowlist",
-        help=f"Overwrite ~/.research/allowlist.txt with the current template "
-             f"({TEMPLATE_ALLOWLIST.name}). Use after pulling allowlist updates.",
+        dest="refresh_denylist",
+        help="Re-fetch each URL in denylist-sources.txt into denylist-cache/, then recompose and reload (implies --reload-denylist).",
+    )
+    p.add_argument(
+        "--reseed-denylist",
+        action="store_true",
+        dest="reseed_denylist",
+        help="Overwrite ~/.research/denylist-sources.txt and denylist-additions.txt with current repo templates. Use after pulling repo updates. denylist-overrides.txt is never overwritten.",
     )
     p.add_argument(
         "--backend",
@@ -179,32 +210,145 @@ def _parse_gib(raw: str) -> int:
         )
 
 
-# ── Allowlist seed ─────────────────────────────────────────────────────────────
+# ── Denylist seed / compose / fetch ────────────────────────────────────────────
 
 
-def seed_allowlist(paths: Paths, force: bool = False) -> None:
-    paths.base.mkdir(parents=True, exist_ok=True)
-    if not force and paths.allowlist_file.exists():
-        return
+def _seed_file(template: Path, dest: Path, label: str, force: bool) -> bool:
+    """Copy template → dest unless dest exists (or force=True). Returns True if written."""
+    if dest.exists() and not force:
+        return False
     try:
-        text = TEMPLATE_ALLOWLIST.read_text()
+        text = template.read_text()
     except FileNotFoundError:
         raise FileNotFoundError(
-            f"Allowlist template not found: {TEMPLATE_ALLOWLIST}\n"
+            f"{label} template not found: {template}\n"
             "Ensure you are running research.py from a complete checkout of the repo."
         ) from None
-    paths.allowlist_file.write_text(text)
+    dest.write_text(text)
     verb = "Reseeded" if force else "Seeded"
-    print(f"==> {verb} allowlist at {paths.allowlist_file}")
+    print(f"==> {verb} {label} at {dest}")
+    return True
+
+
+def seed_denylist_files(paths: Paths, force: bool = False) -> None:
+    """Bootstrap ~/.research/ denylist files from templates.
+
+    Creates the base dir, denylist-cache/, an empty denylist-overrides.txt,
+    and seeds denylist-sources.txt + denylist-additions.txt from templates.
+    overrides.txt is never overwritten by --reseed (it is user state).
+    """
+    paths.base.mkdir(parents=True, exist_ok=True)
+    paths.denylist_cache_dir.mkdir(parents=True, exist_ok=True)
+    _seed_file(TEMPLATE_DENYLIST_SOURCES, paths.denylist_sources_file, "denylist sources", force)
+    _seed_file(TEMPLATE_DENYLIST_ADDITIONS, paths.denylist_additions_file, "denylist additions", force)
+    if not paths.denylist_overrides_file.exists():
+        paths.denylist_overrides_file.write_text(
+            "# research.py denylist overrides — entries here are removed from the\n"
+            "# final filter. Use this to undo a false positive pulled in by an\n"
+            "# upstream feed. One domain per line; '#' for comments.\n"
+        )
+
+
+def _read_domain_lines(path: Path) -> List[str]:
+    """Read a denylist file and return cleaned bare-domain entries.
+
+    Strips comments, blank lines, hagezi 'wildcard' prefix (`*.`), and
+    hosts-file IP prefix (`0.0.0.0 `). Lowercases for stable dedupe.
+    """
+    if not path.exists():
+        return []
+    out: List[str] = []
+    for raw in path.read_text().splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line:
+            continue
+        # Strip "0.0.0.0 example.com" or "127.0.0.1 example.com" hosts format.
+        parts = line.split()
+        if len(parts) == 2 and parts[0] in ("0.0.0.0", "127.0.0.1"):
+            line = parts[1]
+        elif len(parts) > 1:
+            # Unknown multi-token line — skip rather than guess.
+            continue
+        # Strip hagezi wildcard prefix.
+        if line.startswith("*."):
+            line = line[2:]
+        out.append(line.lower())
+    return out
+
+
+def compose_denylist(paths: Paths) -> List[str]:
+    """Build the final denylist as: (cached-upstream ∪ additions) − overrides.
+
+    Returns a sorted, deduped list of bare domain strings.
+    """
+    domains: set[str] = set()
+    if paths.denylist_cache_dir.is_dir():
+        for cached in sorted(paths.denylist_cache_dir.glob("*.txt")):
+            domains.update(_read_domain_lines(cached))
+    domains.update(_read_domain_lines(paths.denylist_additions_file))
+    overrides = set(_read_domain_lines(paths.denylist_overrides_file))
+    domains -= overrides
+    return sorted(domains)
+
+
+def _read_source_urls(sources_file: Path) -> List[str]:
+    """Read denylist-sources.txt and return uncommented URLs."""
+    if not sources_file.exists():
+        return []
+    urls: List[str] = []
+    for raw in sources_file.read_text().splitlines():
+        url = raw.split("#", 1)[0].strip()
+        if url:
+            urls.append(url)
+    return urls
+
+
+def refresh_denylist_cache(paths: Paths, *, abort_on_any_failure: bool = False) -> None:
+    """Download each URL in denylist-sources.txt into denylist_cache_dir.
+
+    Each response is written atomically (via .tmp + rename). On fetch failure,
+    the existing cached copy is left in place and the next URL is attempted.
+    If abort_on_any_failure=True (first-run bootstrap with no cache), any
+    failure raises RuntimeError so we don't start a VM with a partial denylist.
+    """
+    paths.denylist_cache_dir.mkdir(parents=True, exist_ok=True)
+    urls = _read_source_urls(paths.denylist_sources_file)
+    if not urls:
+        print(f"==> No upstream denylist sources configured in {paths.denylist_sources_file}")
+        return
+
+    failures: List[str] = []
+    for url in urls:
+        basename = url.rsplit("/", 1)[-1] or "feed.txt"
+        dest = paths.denylist_cache_dir / basename
+        tmp = dest.with_suffix(dest.suffix + ".tmp")
+        print(f"==> Fetching {url}")
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "research.py/denylist"})
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                tmp.write_bytes(resp.read())
+            tmp.replace(dest)
+        except (urllib.error.URLError, OSError, TimeoutError) as exc:
+            print(f"warning: failed to fetch {url}: {exc}", file=sys.stderr)
+            tmp.unlink(missing_ok=True)
+            failures.append(url)
+
+    if failures and abort_on_any_failure:
+        raise RuntimeError(
+            f"First-run denylist bootstrap failed: {len(failures)} of {len(urls)} "
+            f"upstream feeds could not be fetched. Check connectivity and re-run "
+            f"with --refresh-denylist before the research VM is brought up."
+        )
 
 
 # ── Pure helpers ───────────────────────────────────────────────────────────────
 
-def allowlist_to_regex_filter(lines: List[str]) -> str:
-    """Convert allowlist lines to a tinyproxy filter file body.
+def denylist_to_regex_filter(lines: List[str]) -> str:
+    """Convert denylist domains to a tinyproxy filter file body.
 
     Each non-comment domain becomes an anchored regex that matches the domain
-    itself and any subdomain: (^|\\.)example\\.com$
+    itself and any subdomain: (^|\\.)example\\.com$ — same encoding as the
+    previous allowlist mode; only the FilterDefaultDeny semantics differ.
     """
     out: List[str] = []
     for raw in lines:
@@ -260,7 +404,7 @@ StatFile "/usr/share/tinyproxy/stats.html"
 LogFile "/var/log/tinyproxy/tinyproxy.log"
 LogLevel Info
 MaxClients 100
-FilterDefaultDeny Yes
+FilterDefaultDeny No
 Filter "/etc/tinyproxy/filter"
 FilterExtended Yes
 FilterURLs No
@@ -276,12 +420,33 @@ def render_iptables_apply_script(
     host_ip: str,
     tinyproxy_port: int,
     inference_port: int,
+    has_hashlimit: bool = True,
 ) -> str:
     """Return a shell script that applies the RESEARCH iptables chain.
 
     All variables are interpolated here at template-render time so the
     resulting shell script has no $VAR references — no nested escaping needed.
+
+    has_hashlimit selects the rate-limit rule shape: xt_hashlimit gives
+    per-source-IP limits, plain `-m limit` is a coarser global cap fallback.
     """
+    if has_hashlimit:
+        rate_limit_rules = (
+            "# Rate limit: max 30 new connections/sec per source IP (burst 50).\n"
+            "# Defense-in-depth against bulk exfil; secondary to denylist.\n"
+            "iptables -A RESEARCH -m conntrack --ctstate NEW -m hashlimit \\\n"
+            "  --hashlimit-above 30/sec --hashlimit-burst 50 \\\n"
+            "  --hashlimit-mode srcip --hashlimit-name research_newconn \\\n"
+            "  -j DROP\n"
+        )
+    else:
+        rate_limit_rules = (
+            "# Rate limit fallback (no xt_hashlimit): coarse global cap.\n"
+            "iptables -A RESEARCH -m conntrack --ctstate NEW -m limit \\\n"
+            "  --limit 100/sec --limit-burst 150 -j RETURN\n"
+            "iptables -A RESEARCH -m conntrack --ctstate NEW -j DROP\n"
+        )
+
     return f"""\
 #!/bin/sh
 set -e
@@ -310,8 +475,25 @@ iptables -A RESEARCH -d {bridge_ip} -p udp --dport 53 -j RETURN
 iptables -A RESEARCH -d {bridge_ip} -p tcp --dport 53 -j RETURN
 # Allow Vane → SearXNG on port 8080 within research-net.
 iptables -A RESEARCH -s {research_net_cidr} -d {research_net_cidr} -p tcp --dport 8080 -j RETURN
-iptables -A RESEARCH -j REJECT --reject-with icmp-admin-prohibited
+{rate_limit_rules}iptables -A RESEARCH -j REJECT --reject-with icmp-admin-prohibited
 """
+
+
+def vm_has_hashlimit(profile: str = COLIMA_PROFILE) -> bool:
+    """Probe the VM for xt_hashlimit availability. Best-effort; default True on error.
+
+    Tries `iptables -m hashlimit -h` (no kernel module required for help text)
+    then falls back to a real rule probe via a throwaway chain.
+    """
+    result = vm_sh(
+        "sudo iptables -m hashlimit --help 2>&1 | grep -q hashlimit-name && echo ok || echo missing",
+        check=False,
+    )
+    if "ok" in result.stdout:
+        return True
+    if "missing" in result.stdout:
+        return False
+    return True
 
 
 # ── Subprocess wrappers ────────────────────────────────────────────────────────
@@ -532,9 +714,12 @@ def apply_firewall(config: VmConfig, paths: Paths) -> None:
     """Push tinyproxy config + filter into the VM, then apply iptables rules."""
     assert config.bridge_ip and config.bridge_cidr and config.host_ip and config.research_net_cidr
 
-    allowlist_lines = paths.allowlist_file.read_text().splitlines()
-    filter_body = allowlist_to_regex_filter(allowlist_lines)
+    denylist_domains = compose_denylist(paths)
+    filter_body = denylist_to_regex_filter(denylist_domains)
     conf_body = render_tinyproxy_conf(config.bridge_ip, TINYPROXY_PORT)
+    has_hashlimit = vm_has_hashlimit(config.profile_name)
+    if not has_hashlimit:
+        print("warning: xt_hashlimit not available in VM; using coarse '-m limit' fallback.", file=sys.stderr)
     fw_script = render_iptables_apply_script(
         bridge_ip=config.bridge_ip,
         bridge_cidr=config.bridge_cidr,
@@ -542,6 +727,7 @@ def apply_firewall(config: VmConfig, paths: Paths) -> None:
         host_ip=config.host_ip,
         tinyproxy_port=TINYPROXY_PORT,
         inference_port=config.inference_port,
+        has_hashlimit=has_hashlimit,
     )
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -568,11 +754,7 @@ def apply_firewall(config: VmConfig, paths: Paths) -> None:
             check=True,
         )
 
-    entry_count = sum(
-        1 for line in allowlist_lines
-        if line.split("#", 1)[0].strip()
-    )
-    print(f"==> Firewall applied ({entry_count} allowlist entries)")
+    print(f"==> Firewall applied ({len(denylist_domains)} denylist entries)")
     print(f"    proxy: http://{config.bridge_ip}:{TINYPROXY_PORT}")
 
 
@@ -713,12 +895,12 @@ def rebuild_teardown(config: VmConfig) -> None:
         print(f"==> Keeping Colima VM; only containers will be rebuilt.")
 
 
-def reload_allowlist_fast_path(paths: Paths, config: VmConfig) -> None:
-    """Regenerate tinyproxy filter and reload tinyproxy. No container restart."""
+def reload_denylist_fast_path(paths: Paths, config: VmConfig) -> None:
+    """Recompose denylist from local files, push filter, reload tinyproxy. No container restart."""
     assert config.bridge_ip and config.research_net_cidr
 
-    allowlist_lines = paths.allowlist_file.read_text().splitlines()
-    filter_body = allowlist_to_regex_filter(allowlist_lines)
+    denylist_domains = compose_denylist(paths)
+    filter_body = denylist_to_regex_filter(denylist_domains)
     conf_body = render_tinyproxy_conf(config.bridge_ip, TINYPROXY_PORT)
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -734,11 +916,7 @@ def reload_allowlist_fast_path(paths: Paths, config: VmConfig) -> None:
         "sudo systemctl reload tinyproxy 2>/dev/null || sudo systemctl restart tinyproxy"
     )
 
-    entry_count = sum(
-        1 for line in allowlist_lines
-        if line.split("#", 1)[0].strip()
-    )
-    print(f"==> Allowlist reloaded ({entry_count} entries)")
+    print(f"==> Denylist reloaded ({len(denylist_domains)} entries)")
 
 
 # ── main ───────────────────────────────────────────────────────────────────────
@@ -754,21 +932,22 @@ def main() -> None:
         vane_port=args.vane_port,
     )
 
-    # --reseed-allowlist: overwrite on-disk allowlist before any other operation.
-    if args.reseed_allowlist:
-        seed_allowlist(paths, force=True)
+    # --reseed-denylist: overwrite source/additions templates before any other op.
+    if args.reseed_denylist:
+        seed_denylist_files(paths, force=True)
 
-    # --reload-allowlist: need VM running + network discovered, then fast-exit.
-    # Seed the allowlist first so a missing file doesn't crash reload.
-    if args.reload_allowlist:
-        seed_allowlist(paths)
+    # --refresh-denylist / --reload-denylist: VM-bound fast path.
+    if args.refresh_denylist or args.reload_denylist:
+        seed_denylist_files(paths)
+        if args.refresh_denylist:
+            refresh_denylist_cache(paths)
         if not colima_profile_running(config.profile_name):
             print(f"error: Colima VM '{config.profile_name}' is not running. Start it first.", file=sys.stderr)
             sys.exit(1)
         ensure_docker_context(config.profile_name)
         config = discover_network(config)
         ensure_docker_network(config)
-        reload_allowlist_fast_path(paths, config)
+        reload_denylist_fast_path(paths, config)
         return
 
     # --rebuild: tear down containers (and optionally VM) before bring-up.
@@ -780,7 +959,14 @@ def main() -> None:
             print(f"==> VM '{config.profile_name}' not running; nothing to remove.")
 
     # ── Full bring-up ──────────────────────────────────────────────────────────
-    seed_allowlist(paths)
+    seed_denylist_files(paths)
+
+    # Bootstrap: if no upstream cache yet, fetch now. Abort on any failure so we
+    # don't bring up a research VM with a partial denylist.
+    cache_empty = not any(paths.denylist_cache_dir.glob("*.txt"))
+    if cache_empty and _read_source_urls(paths.denylist_sources_file):
+        print("==> First-run bootstrap: fetching upstream denylist feeds")
+        refresh_denylist_cache(paths, abort_on_any_failure=True)
 
     ensure_colima_vm(config)
     ensure_docker_context(config.profile_name)
@@ -806,7 +992,7 @@ def main() -> None:
         print(f"              use http://host.docker.internal:{config.inference_port} (Ollama)")
     else:
         print(f"              use http://host.docker.internal:{config.inference_port}/v1 (omlx)")
-    print(f"    proxy   : http://{config.bridge_ip}:{TINYPROXY_PORT}  (allowlist: {paths.allowlist_file})")
+    print(f"    proxy   : http://{config.bridge_ip}:{TINYPROXY_PORT}  (denylist sources: {paths.denylist_sources_file})")
 
 
 if __name__ == "__main__":

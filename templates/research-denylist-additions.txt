@@ -1,0 +1,71 @@
+# research.py local denylist additions — hosts NOT in upstream feeds.
+#
+# Edit on the macOS host; apply with:
+#   ./research.py --reload-denylist
+#
+# These are legitimate services that prompt-injection payloads might
+# weaponize for exfiltration. Hagezi/StevenBlack/etc. won't include them
+# because they're not malicious infrastructure.
+#
+# Format: one domain per line; '#' starts a comment. Suffix-matched, so
+# adding 'discord.com' also blocks 'cdn.discord.com'.
+#
+# To remove an entry pulled in by upstream feeds (false positive), add it
+# to denylist-overrides.txt instead — that file survives --refresh-denylist.
+
+# === Anonymous paste/upload ===
+pastebin.com
+hastebin.com
+paste.ee
+ix.io
+dpaste.com
+sprunge.us
+termbin.com
+rentry.co
+justpaste.it
+paste.gg
+transfer.sh
+file.io
+0x0.st
+catbox.moe
+litterbox.catbox.moe
+uguu.se
+gofile.io
+wetransfer.com
+
+# === Webhook capture / request inspection ===
+webhook.site
+requestbin.com
+pipedream.com
+hookbin.com
+beeceptor.com
+requestcatcher.com
+
+# === Messaging / DM delivery ===
+discord.com
+discordapp.com
+slack.com
+telegram.org
+api.telegram.org
+
+# === Reverse tunnels ===
+ngrok.io
+ngrok.app
+trycloudflare.com
+localhost.run
+serveo.net
+bore.pub
+
+# === Code hosting (write paths) ===
+# Reads still work via raw.githubusercontent.com / codeload.github.com
+github.com
+gitlab.com
+bitbucket.org
+
+# === Dataset/model upload hubs ===
+huggingface.co
+zenodo.org
+figshare.com
+osf.io
+datadryad.org
+kaggle.com

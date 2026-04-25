@@ -1,0 +1,22 @@
+# research.py upstream denylist feeds — pinned by commit SHA.
+#
+# Apply changes:
+#   ./research.py --refresh-denylist     fetch fresh copies from currently-pinned URLs
+#   ./research.py --reseed-denylist      overwrite this file from the repo template
+#                                        (use after pulling start-claude updates)
+#
+# Format: one URL per line; '#' starts a comment.
+#
+# Pinning policy: never use 'main' / 'HEAD'. Pinning to a specific SHA forces
+# a human review of upstream changes before they take effect locally — both
+# routine churn and a hypothetical compromise of the upstream repo. To pick up
+# upstream changes, edit this file (or run --reseed-denylist after the repo
+# template is updated) and then run --refresh-denylist.
+#
+# hagezi/dns-blocklists, pinned 2026-04-25
+#   pro      ~395k entries  Ads / tracking / scam / malware / fake (broad)
+#   fake     ~14k entries   Fake stores, scam streaming, rip-offs (wildcard format)
+#   tif      ~1.15M entries Threat intel feed (rotates frequently)
+https://raw.githubusercontent.com/hagezi/dns-blocklists/b3c6077683c41884beff8b1a7678d09a9c5e9e00/domains/pro.txt
+https://raw.githubusercontent.com/hagezi/dns-blocklists/b3c6077683c41884beff8b1a7678d09a9c5e9e00/wildcard/fake.txt
+https://raw.githubusercontent.com/hagezi/dns-blocklists/b3c6077683c41884beff8b1a7678d09a9c5e9e00/domains/tif.txt

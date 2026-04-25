@@ -6,22 +6,22 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from research import (
-    allowlist_to_regex_filter,
+    denylist_to_regex_filter,
     render_iptables_apply_script,
     render_searxng_settings,
 )
 
 
-# ── allowlist_to_regex_filter ─────────────────────────────────────────────────
+# ── denylist_to_regex_filter ─────────────────────────────────────────────────
 
-def test_allowlist_basic_domain():
-    result = allowlist_to_regex_filter(["wikipedia.org"])
+def test_denylist_filter_basic_domain():
+    result = denylist_to_regex_filter(["wikipedia.org"])
     assert "(^|\\.)wikipedia\\.org$" in result
 
 
-def test_allowlist_subdomain_match():
+def test_denylist_filter_subdomain_match():
     pattern = re.compile(r"\(\^\|\\\.\)wikipedia\\\.org\$")
-    result = allowlist_to_regex_filter(["wikipedia.org"])
+    result = denylist_to_regex_filter(["wikipedia.org"])
     assert pattern.search(result)
     # The compiled regex should match subdomains
     line_re = re.compile(r"(^|\.)wikipedia\.org$")
@@ -30,36 +30,36 @@ def test_allowlist_subdomain_match():
     assert not line_re.search("not-wikipedia.org")
 
 
-def test_allowlist_skips_comments():
+def test_denylist_filter_skips_comments():
     lines = ["# this is a comment", "example.com", "# another comment"]
-    result = allowlist_to_regex_filter(lines)
+    result = denylist_to_regex_filter(lines)
     assert "comment" not in result
     assert "example" in result
 
 
-def test_allowlist_skips_blank_lines():
+def test_denylist_filter_skips_blank_lines():
     lines = ["", "   ", "google.com", ""]
-    result = allowlist_to_regex_filter(lines)
+    result = denylist_to_regex_filter(lines)
     assert result.count("(^|") == 1
 
 
-def test_allowlist_inline_comment_stripped():
+def test_denylist_filter_inline_comment_stripped():
     lines = ["google.com  # search engine"]
-    result = allowlist_to_regex_filter(lines)
+    result = denylist_to_regex_filter(lines)
     assert "search engine" not in result
     assert "google" in result
 
 
-def test_allowlist_special_chars_escaped():
+def test_denylist_filter_special_chars_escaped():
     lines = ["api.example-corp.com"]
-    result = allowlist_to_regex_filter(lines)
+    result = denylist_to_regex_filter(lines)
     # hyphen and dot are escaped
     assert r"api\.example\-corp\.com" in result or r"api\.example-corp\.com" in result
 
 
-def test_allowlist_empty_input():
-    assert allowlist_to_regex_filter([]) == ""
-    assert allowlist_to_regex_filter(["# only comments"]) == ""
+def test_denylist_filter_empty_input():
+    assert denylist_to_regex_filter([]) == ""
+    assert denylist_to_regex_filter(["# only comments"]) == ""
 
 
 # ── render_searxng_settings ───────────────────────────────────────────────────

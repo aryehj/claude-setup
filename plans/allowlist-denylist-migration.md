@@ -3,7 +3,8 @@
 ## Status
 
 - [x] Phase 1: Expand start-agent.sh allowlist (Haiku ok)
-- [ ] Phase 2: Convert research.py to layered denylist (Opus recommended)
+- [x] Phase 2: Convert research.py to layered denylist (Opus recommended)
+  - Sub-phase deferred: migration notice (step 13) + new compose_denylist tests
 - [ ] Phase 3: Update documentation and ADRs
 
 ## Context
