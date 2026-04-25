@@ -34,6 +34,8 @@ from typing import List, Optional
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 
+TEMPLATE_ALLOWLIST = Path(__file__).parent / "templates" / "research-allowlist.txt"
+
 COLIMA_PROFILE = "research"
 CONTAINER_SEARXNG = "research-searxng"
 CONTAINER_VANE = "research-vane"
@@ -171,108 +173,16 @@ def _parse_gib(raw: str) -> int:
 
 # ── Allowlist seed ─────────────────────────────────────────────────────────────
 
-_ALLOWLIST_SEED = """\
-# research.py allowlist — edit on the macOS host.
-# Apply changes:  ./research.py --reload-allowlist
-# Suffix match:   'wikipedia.org' also covers 'en.wikipedia.org'.
-# Comments start with '#'.
-
-# === Search engines ===
-google.com
-bing.com
-duckduckgo.com
-search.brave.com
-api.qwant.com
-
-# === Reference & encyclopaedia ===
-wikipedia.org
-wikimedia.org
-wikidata.org
-
-# === Q&A & developer reference ===
-stackoverflow.com
-stackexchange.com
-developer.mozilla.org
-mozilla.org
-
-# === Academic — preprints & open access ===
-arxiv.org
-biorxiv.org
-medrxiv.org
-plos.org
-elifesciences.org
-europepmc.org
-
-# === Academic — indexing & discovery ===
-semanticscholar.org
-openalex.org
-crossref.org
-doi.org
-orcid.org
-pubmed.ncbi.nlm.nih.gov
-ncbi.nlm.nih.gov
-nlm.nih.gov
-
-# === Academic — publishers (read-only) ===
-nature.com
-science.org
-cell.com
-jstor.org
-ssrn.com
-springer.com
-link.springer.com
-wiley.com
-onlinelibrary.wiley.com
-cambridge.org
-oup.com
-tandfonline.com
-sagepub.com
-acm.org
-ieee.org
-
-# === Code hosting (read-only paths) ===
-raw.githubusercontent.com
-codeload.github.com
-gist.githubusercontent.com
-gitlab.com
-
-# === ML / AI papers ===
-paperswithcode.com
-huggingface.co
-
-# === News & periodicals ===
-nytimes.com
-economist.com
-ft.com
-reuters.com
-apnews.com
-bbc.com
-bbc.co.uk
-washingtonpost.com
-theatlantic.com
-newyorker.com
-theguardian.com
-
-# === Community & discussion ===
-reddit.com
-news.ycombinator.com
-
-# === Web archive ===
-archive.org
-web.archive.org
-
-# === Government / standards / statistics ===
-nasa.gov
-cdc.gov
-who.int
-europa.eu
-"""
-
 
 def seed_allowlist(paths: Paths) -> None:
+    if not TEMPLATE_ALLOWLIST.exists():
+        raise FileNotFoundError(
+            f"Allowlist template not found: {TEMPLATE_ALLOWLIST}\n"
+            "Ensure you are running research.py from a complete checkout of the repo."
+        )
     paths.base.mkdir(parents=True, exist_ok=True)
     if not paths.allowlist_file.exists():
-        paths.allowlist_file.write_text(_ALLOWLIST_SEED)
+        paths.allowlist_file.write_text(TEMPLATE_ALLOWLIST.read_text())
         print(f"==> Seeded allowlist at {paths.allowlist_file}")
 
 
