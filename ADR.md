@@ -913,3 +913,102 @@ rather than environment-level overrides.
 - The effort system and model-native defaults change with each Claude release.
   Removing the global pin means no maintenance burden and no false confidence
   that a stale value is still optimal.
+
+## ADR-018: research.py as a Python probe; do not proactively port start-agent.sh
+
+**Date:** 2026-04-25
+**Status:** Accepted
+
+### Context
+
+`plans/draft-research-python.md` proposed writing the new `research` host-side
+orchestrator in Python (stdlib-only, single file) rather than as another bash
+sibling to `start-agent.sh`. The plan was framed as a probe: build it in Python
+greenfield, then evaluate whether the result is clearly cleaner than a bash
+equivalent would have been. If yes, the case for porting `start-agent.sh` later
+becomes empirical; if not, the lesson is cheap.
+
+Phase 1 produced `research.py` (879 lines, stdlib-only, executable via shebang)
+with feature parity to the `research.sh` outline in
+`plans/research-vm-isolation.md`, plus `tests/test_research.py` (17 unit tests
+exercising the pure helpers — all passing).
+
+### Decision
+
+Keep `research.py` as Python. Do **not** proactively port `start-agent.sh` or
+`start-claude.sh`. The repo is, for now, deliberately bilingual: bash for the
+two existing host-side orchestrators, Python for `research.py`.
+
+The path to a future `start-agent.sh` port remains open if it is otherwise
+warranted (e.g., a major refactor is already on the table), but the evidence
+from this probe does not justify a port on its own merits.
+
+### Evaluation against Phase 2 criteria
+
+1. **Line count.** 879 Python lines vs. the bash plan's 400-500 estimate — a
+   ~1.7-2x ratio against Python at first glance. Adjusted: ~107 of the 879
+   are the allowlist seed (identical in either language) and ~75 are argparse
+   declarations that replace bash's hand-rolled flag parsing + drift-prone
+   help text. Net "logic" line count is closer to 1.4x the bash estimate, and
+   in exchange Python gets typed dataclasses, a real arg parser, and pure
+   helpers that are unit-testable. Not a clear win on size; not a loss either.
+
+2. **Templating fragility eliminated.** `render_iptables_apply_script()` is
+   the single biggest concrete win. The function returns a fully-interpolated
+   shell script with zero `${VAR}` references remaining — verified by a unit
+   test (`test_iptables_no_uninterpolated_vars`). The bash equivalent would
+   nest a heredoc inside a `colima ssh` heredoc, requiring two layers of
+   `\$VAR` escaping that historically bite during edits. This category of bug
+   is *gone*, not reduced.
+
+3. **Testability is real, not theoretical.** `tests/test_research.py` exists
+   and runs (17/17 passing). The pure helpers (`allowlist_to_regex_filter`,
+   `render_searxng_settings`, `render_iptables_apply_script`,
+   `render_tinyproxy_conf`) became testable as a side effect of the
+   data-vs-orchestration split. A bash version would have no equivalent —
+   the regex generator can only be tested by running the whole script.
+
+4. **Edit-run ergonomics.** Comparable to bash. No build step, single file,
+   `./research.py` works. Python's import-time errors (typos in dataclass
+   fields, missing imports) surface faster than bash's run-time errors, but
+   not dramatically.
+
+5. **Bug-density during development.** Lower than the equivalent bash would
+   have been, mostly attributable to (2). Subprocess wrappers around `colima
+   ssh` were also less fiddly than the existing `start-agent.sh` heredocs —
+   `vm_sh()` pipes the command via stdin, sidestepping colima's argv-join
+   double-quoting. This matches Unknown #2 in the plan.
+
+### Why not port start-agent.sh
+
+- `start-agent.sh` is 1201 lines of working, debugged code with substantial
+  institutional knowledge baked into its 17 ADRs. The bug surface introduced
+  by a wholesale port — even one done carefully — would likely exceed the
+  ergonomic gain for some time.
+- The Python wins demonstrated above (templating, testability, real arg
+  parsing) are largest in *new* code where the bash patterns haven't been
+  written yet. Retrofitting them onto an existing working script captures
+  less of the upside.
+- `start-agent.sh` is operationally critical for this dev environment.
+  `research.py` is not — it spins up an isolated browser-facing tool. The
+  blast radius of a regression differs by orders of magnitude.
+
+### Consequences
+
+- The repo now has two host-side languages. New host-side scripts should
+  default to Python following the patterns in `research.py` (dataclasses for
+  config, pure helpers separated from subprocess wrappers, argparse for CLI,
+  unit tests for pure helpers).
+- `start-agent.sh` and `start-claude.sh` remain bash. Edits to those scripts
+  should follow the existing bash idioms; do not introduce piecemeal Python
+  helpers called from bash, which would be the worst of both languages.
+- If a future change to `start-agent.sh` would touch a substantial fraction
+  of the script (say >30% of lines, or rework of the firewall/allowlist core),
+  reconsider porting at that point — the migration cost amortizes over a
+  rewrite that was happening anyway. Until then, the bilingual repo is the
+  cheaper steady state.
+- `tests/test_research.py` is the seed for the broader test suite proposed in
+  `plans/draft-tests.md`. Phase 4 of that plan (settings-injection tests) is
+  exactly the kind of pure-function logic that would also be unit-testable if
+  extracted into a Python module — but that is a decision for that plan, not
+  this one.
