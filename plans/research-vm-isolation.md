@@ -3,32 +3,34 @@
 ## Status
 
 - [ ] Phase 1: Create research.sh with isolated Colima VM
-- [ ] Phase 2: Remove Vane/SearXNG complexity from start-agent.sh
-- [ ] Phase 3: Clean up Dockerfile and documentation
+- [ ] Phase 2: Remove Vane from start-agent.sh (keep SearXNG)
+- [ ] Phase 3: Update documentation
 
 ## Context
 
 `start-agent.sh` currently manages three containers on the same Colima VM (`claude-agent` profile):
 - `claude-agent`: Claude Code + OpenCode CLI
-- `searxng`: Privacy-respecting meta-search engine
-- `vane`: AI research UI (formerly Perplexica)
+- `searxng`: Privacy-respecting meta-search engine — load-bearing for OpenCode's `websearch` permission via the SearXNG MCP shim baked into the claude-agent image at `/opt/searxng-mcp/server.py`
+- `vane`: AI research UI (formerly Perplexica) — *not* used by OpenCode; only consumed via browser at `localhost:3000`
 
-All three share the same `claude-agent-net` docker network and the same egress firewall (tinyproxy + iptables CLAUDE_AGENT chain). This coupling adds ~200 lines of complexity to `start-agent.sh` (lines 172-176, 192-197, 489-496, 535-551, 554-610, 701-705, 775-823, 1017-1028, 1082, 1172-1175) and means Vane/SearXNG cannot be used independently of the claude-agent container.
+All three share the `claude-agent-net` docker network and the same egress firewall (tinyproxy + iptables CLAUDE_AGENT chain). Vane is the loose coupling here — it shares SearXNG with OpenCode but is otherwise independent of the agent container, and its presence is the reason port 3000 leaves the VM and the reason `--disable-search` exists.
 
 The user wants Vane in its own isolated environment with:
 - Its own Colima VM (network-isolated from `claude-agent`)
-- Its own SearXNG instance
+- Its own SearXNG instance (independent of the SearXNG that OpenCode uses)
 - Its own egress firewall with a permissive research-oriented allowlist
 - Access to local LLM (Ollama/omlx) on the host
 - Browser access via localhost:3000
 
+**Important**: SearXNG stays in `start-agent.sh` because OpenCode's websearch tool is backed by it via the MCP shim at `/opt/searxng-mcp/server.py` (see `start-agent.sh` lines 1017-1024 and `dockerfiles/claude-agent.Dockerfile` lines 63-75). Removing SearXNG from `start-agent.sh` would break OpenCode websearch. Only Vane and Vane-specific complexity is removed.
+
 ## Goals
 
 - New `research.sh` script that spins up an isolated Vane+SearXNG environment
-- Remove all Vane/SearXNG code from `start-agent.sh`
-- Remove the SearXNG MCP shim from the claude-agent Dockerfile
+- Remove Vane (and only Vane) from `start-agent.sh`; keep SearXNG and the MCP shim
 - `start-agent.sh` and `research.sh` can run simultaneously without interference
-- Vane accessible at `http://localhost:3000` from the host browser
+- OpenCode's `websearch` tool continues to work in `start-agent.sh` (backed by the SearXNG that remains)
+- Vane accessible at `http://localhost:3000` from the host browser, fed by its *own* dedicated SearXNG
 - LLM configuration in Vane points to host Ollama/omlx
 
 ## Unknowns / To Verify
@@ -138,109 +140,97 @@ The user wants Vane in its own isolated environment with:
 
 ---
 
-## Phase 2: Remove Vane/SearXNG complexity from start-agent.sh
+## Phase 2: Remove Vane from start-agent.sh (keep SearXNG)
+
+SearXNG, the `claude-agent-net` user-defined network, the SearXNG MCP shim in the Dockerfile, and the OpenCode `websearch=allow` + `mcp.searxng` config block all stay. Only Vane and Vane-specific complexity is removed.
 
 ### Steps
 
-1. **Remove CLI flags and variables**:
-   - Remove `--enable-local-search` (already deprecated, just the warning on line 101)
-   - Remove `--disable-search` flag handling (lines 102, 13, 56-57, 82)
-   - Remove `CLI_DISABLE_SEARCH` variable (line 30)
-   - Remove `CLAUDE_AGENT_DISABLE_SEARCH` references (lines 82, 172)
-   - Remove `LOCAL_SEARCH_ENABLED` variable and all conditionals using it (lines 172-175)
-   - Remove `SEARXNG_CONTAINER`, `SEARXNG_DIR`, `SEARXNG_SETTINGS_FILE`, `VANE_CONTAINER`, `VANE_DATA_DIR`, `VANE_PORT` (lines 192-197)
+1. **Decide the fate of `--disable-search`**: With Vane gone, `--disable-search` would only control SearXNG. Two options:
+   - **Option A (recommended)**: Keep `--disable-search` working but rename internally — the flag still skips SearXNG (and therefore disables OpenCode websearch). User-facing semantics unchanged. `LOCAL_SEARCH_ENABLED` variable name remains accurate.
+   - **Option B**: Remove `--disable-search` entirely, make SearXNG always-on. Simpler but removes an opt-out for users who want to skip SearXNG entirely.
+   - The plan assumes Option A. If Option B is preferred at implementation time, additionally remove items in step 2 below and unconditional-ize the `if $LOCAL_SEARCH_ENABLED` blocks that remain after Vane removal.
 
-2. **Remove `--rebuild` Vane/SearXNG cleanup** (lines 489-496):
-   - Delete the blocks that remove `searxng` and `vane` containers during rebuild
+2. **Remove Vane-only variables** (line 195-197):
+   - Remove `VANE_CONTAINER`, `VANE_DATA_DIR`, `VANE_PORT`
+   - Keep `SEARXNG_CONTAINER`, `SEARXNG_DIR`, `SEARXNG_SETTINGS_FILE`
 
-3. **Remove `claude-agent-net` network creation** (lines 535-551):
-   - Delete the entire network creation block
-   - Remove `AGENT_NET_NAME`, `AGENT_NET_CIDR` variables
+3. **Remove Vane from `--rebuild` cleanup** (lines 493-496):
+   - Delete only the `vane` container rm block; keep the `searxng` rm block intact
 
-4. **Remove SearXNG settings.yml seed** (lines 554-610):
-   - Delete the `if $LOCAL_SEARCH_ENABLED` block that seeds and drift-checks `settings.yml`
-   - Delete `SEARXNG_CONFIG_CHANGED` variable
-
-5. **Remove inter-container iptables rule** (lines 701-705):
-   - Delete the `if [ "$LOCAL_SEARCH_ENABLED" = "true" ]` rule for port 8080
-
-6. **Remove SearXNG container lifecycle** (lines 775-797):
-   - Delete the entire `if $LOCAL_SEARCH_ENABLED; then ... fi` block for SearXNG
-
-7. **Remove Vane container lifecycle** (lines 799-823):
+4. **Remove Vane container lifecycle** (lines 799-823):
    - Delete the entire `if $LOCAL_SEARCH_ENABLED; then ... fi` block for Vane
+   - SearXNG block immediately above (lines 775-797) stays
 
-8. **Simplify OpenCode config injection** (lines 1015-1028):
-   - Change `perms.setdefault('websearch', 'deny')` to always apply (line 1026)
-   - Remove the `if local_search_enabled` block that injects `mcp.searxng` (lines 1017-1024)
-   - Remove the `local_search_enabled` parameter from the Python script entirely
+5. **Remove Vane references in startup output** (lines 1181-1182):
+   - Delete the `vane    : http://localhost:$VANE_PORT (AI research UI)` echo line
+   - Keep the `search  : SearXNG on $AGENT_NET_NAME` line
 
-9. **Clean up DOCKER_ENV_ARGS** (line 1082):
-   - Remove `,searxng` from `NO_PROXY`
+6. **Update help text** (lines 56-57, 82, 13):
+   - Update `--disable-search` description: change "Skip SearXNG and Vane containers" to "Skip SearXNG container (also disables OpenCode websearch)"
+   - Update `CLAUDE_AGENT_DISABLE_SEARCH` env var description similarly
+   - Remove `[--disable-search]` from usage line if Option B; otherwise keep
 
-10. **Remove network args from docker run** (lines 1172-1175):
-    - Delete `NETWORK_ARGS` variable and its usage in `docker run`
+7. **Update CLAUDE.md project doc** (search for `Vane runs alongside SearXNG by default` block in `CLAUDE.md`):
+   - Delete the entire `**Vane runs alongside SearXNG by default.**` paragraph
+   - Update the `**SearXNG-backed websearch runs by default.**` paragraph: replace `Pass --disable-search (env: CLAUDE_AGENT_DISABLE_SEARCH=1) to skip both SearXNG and Vane` with `Pass --disable-search to skip SearXNG (which also disables OpenCode websearch)`. Drop the `--enable-local-search` deprecation sentence if Option B.
 
-11. **Clean up allowlist seed** (lines 283-358):
-    - Remove search engine entries (`search.brave.com`, `api.github.com` comment, etc.) that were only needed for SearXNG
-    - Keep entries useful for webfetch and general dev work
+### What does NOT change
 
-12. **Update usage/help text** to remove `--disable-search` and related documentation
+- `dockerfiles/claude-agent.Dockerfile` lines 63-75 (the SearXNG MCP shim copy + venv) — stays
+- `dockerfiles/searxng-mcp/server.py` — stays
+- `claude-agent-net` user-defined network creation (lines 535-551) — stays (still needed for claude-agent ↔ searxng DNS)
+- iptables intra-network rule for port 8080 (lines 701-705) — stays (still needed for claude-agent → searxng MCP path)
+- SearXNG settings.yml seed and drift-check (lines 554-610) — stays
+- SearXNG container lifecycle (lines 775-797) — stays
+- OpenCode config `mcp.searxng` injection (lines 1017-1024) — stays
+- `NO_PROXY=...,searxng` (line 1082) — stays
+- `NETWORK_ARGS=(--network "$AGENT_NET_NAME")` for claude-agent (lines 1172-1175) — stays
+- Search engine entries in the allowlist (lines 283-358) — stays (needed for SearXNG fan-out)
 
 ### Files
 
-- `start-agent.sh` (modify, remove ~200 lines)
+- `start-agent.sh` (modify, remove ~30 lines: Vane container block, Vane variables, Vane rebuild cleanup, Vane echo lines)
+- `CLAUDE.md` (modify, remove the Vane paragraph)
 
 ### Testing
 
 1. Run `start-agent.sh --rebuild` and verify it completes without errors
-2. Verify `claude-agent` container starts and `claude` CLI works
-3. Verify `docker network ls` does NOT show `claude-agent-net`
-4. Verify `docker ps` does NOT show `searxng` or `vane` containers
-5. Run `start-agent.sh` without `--rebuild` and verify re-attach works
-6. Verify webfetch still works from inside the container (egress via tinyproxy)
+2. Verify `claude-agent` and `searxng` containers exist; `vane` does NOT (`docker ps`)
+3. Verify port 3000 is no longer bound on the host (`lsof -iTCP:3000 -sTCP:LISTEN` empty)
+4. Inside the container, run a quick OpenCode websearch (e.g. `opencode run "search the web for latest python release"`) and verify results return — proves the SearXNG MCP path still works
+5. Verify `--disable-search` still skips SearXNG (and therefore websearch) if Option A retained
+6. Run `start-agent.sh` (no rebuild) and verify re-attach works
 
 ---
 
-## Phase 3: Clean up Dockerfile and documentation
+## Phase 3: Update documentation
 
 ### Steps
 
-1. **Remove SearXNG MCP shim from Dockerfile** (`dockerfiles/claude-agent.Dockerfile` lines 63-75):
-   - Delete the `COPY searxng-mcp/server.py` line
-   - Delete the `uv venv /opt/searxng-mcp/venv` and `uv pip install` lines
-   - Delete the comment block explaining the shim
-
-2. **Delete `dockerfiles/searxng-mcp/` directory**:
-   - Remove `dockerfiles/searxng-mcp/server.py`
-
-3. **Update CLAUDE.md**:
+1. **Update CLAUDE.md** (in addition to Vane-paragraph removal already covered in Phase 2):
    - Add `research.sh` to the Layout section
-   - Add a new "research.sh key decisions" section explaining the isolated VM architecture
-   - Remove references to SearXNG/Vane from the "start-agent.sh key decisions" section
-   - Update the `--disable-search` references
+   - Add a new "research.sh key decisions" section after the "start-agent.sh key decisions" section, explaining: separate Colima profile for VM-level isolation, dedicated SearXNG (not shared with claude-agent), permissive research-oriented allowlist, host-port 3000 for browser access, LLM via host.docker.internal
 
-4. **Update ADR.md**:
-   - Add ADR-018 documenting the extraction of Vane/SearXNG into `research.sh`
-   - Mark ADR-014 and ADR-016 as superseded by ADR-018
+2. **Update ADR.md**:
+   - Add ADR-018 documenting the extraction of Vane into `research.sh`. Reference the design choice: Vane was always a browser-only consumer of SearXNG, never accessed by OpenCode, so isolating it cleanly separates "agent's search backend" from "user-facing research UI". Note that the SearXNG that remains in `start-agent.sh` is dedicated to OpenCode and is *not* shared with research.sh's SearXNG (each runs in its own VM with its own egress firewall).
+   - Update ADR-016 status: "**Superseded by ADR-018** for the Vane portion. The default-on SearXNG decision still stands for OpenCode's websearch backend."
+   - Leave ADR-014 unchanged (still describes the SearXNG architecture that remains in start-agent.sh)
 
-5. **Update README.md**:
-   - Add `research.sh` usage section
-   - Update `start-agent.sh` usage to remove `--disable-search`
+3. **Update README.md**:
+   - Add a `research.sh` usage section (basic invocation, `--rebuild`, `--reload-allowlist`, allowlist file location)
+   - Note that running both `start-agent.sh` and `research.sh` simultaneously is supported
 
 ### Files
 
-- `dockerfiles/claude-agent.Dockerfile` (modify)
-- `dockerfiles/searxng-mcp/server.py` (delete)
 - `CLAUDE.md` (modify)
 - `ADR.md` (modify)
 - `README.md` (modify)
 
 ### Testing
 
-1. Run `start-agent.sh --rebuild` to rebuild the image without the MCP shim
-2. Verify `/opt/searxng-mcp/` does not exist inside the container
-3. Review documentation for accuracy and completeness
+- Review documentation for accuracy and completeness
+- Verify ADR cross-references resolve correctly
 
 ---
 
@@ -256,4 +246,6 @@ The user wants Vane in its own isolated environment with:
 
 - **Alternative considered**: Running Vane and SearXNG in a single container instead of two. Rejected because it would require a custom Dockerfile combining both images, increasing maintenance burden. The two-container approach reuses upstream images directly.
 
-- **Migration path**: Users who relied on `--disable-search` to avoid Vane/SearXNG no longer need it; the default is now no search. Users who want research capabilities run `research.sh` separately.
+- **Migration path**: Users who used Vane at `localhost:3000` should run `research.sh` instead. OpenCode users see no change — websearch continues to work via the SearXNG that stays in `start-agent.sh`.
+
+- **Two SearXNG instances by design**: `start-agent.sh`'s SearXNG (inside the `claude-agent` Colima VM, on `claude-agent-net`) serves OpenCode's MCP shim. `research.sh`'s SearXNG (inside the `research` Colima VM, on `research-net`) serves Vane. They are independent: separate egress allowlists, separate VMs, separate settings.yml. This is intentional — coupling them back together would defeat the network-isolation goal.
