@@ -17,6 +17,10 @@
 #   pro      ~395k entries  Ads / tracking / scam / malware / fake (broad)
 #   fake     ~14k entries   Fake stores, scam streaming, rip-offs (wildcard format)
 #   tif      ~1.15M entries Threat intel feed (rotates frequently)
+#
+# tif is commented out by default: the combined ~1.5M-entry filter OOM-kills
+# tinyproxy at the default 2 GiB VM size. Uncomment only if you also bump the
+# VM with `./research.py --rebuild --memory=4` (or larger).
 https://raw.githubusercontent.com/hagezi/dns-blocklists/b3c6077683c41884beff8b1a7678d09a9c5e9e00/domains/pro.txt
 https://raw.githubusercontent.com/hagezi/dns-blocklists/b3c6077683c41884beff8b1a7678d09a9c5e9e00/wildcard/fake.txt
-https://raw.githubusercontent.com/hagezi/dns-blocklists/b3c6077683c41884beff8b1a7678d09a9c5e9e00/domains/tif.txt
+# https://raw.githubusercontent.com/hagezi/dns-blocklists/b3c6077683c41884beff8b1a7678d09a9c5e9e00/domains/tif.txt
