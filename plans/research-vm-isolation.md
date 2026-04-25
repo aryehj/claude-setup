@@ -1,8 +1,8 @@
-# Vane/SearXNG Isolation into research.sh
+# Vane/SearXNG Isolation into research.py
 
 ## Status
 
-- [ ] Phase 1: Create research.sh with isolated Colima VM
+- [x] Phase 1: Create research script with isolated Colima VM (implemented as `research.py`)
 - [ ] Phase 2: Remove Vane from start-agent.sh (keep SearXNG)
 - [ ] Phase 3: Update documentation
 
@@ -26,9 +26,9 @@ The user wants Vane in its own isolated environment with:
 
 ## Goals
 
-- New `research.sh` script that spins up an isolated Vane+SearXNG environment
+- New `research.py` script that spins up an isolated Vane+SearXNG environment (implemented; see Phase 1 note)
 - Remove Vane (and only Vane) from `start-agent.sh`; keep SearXNG and the MCP shim
-- `start-agent.sh` and `research.sh` can run simultaneously without interference
+- `start-agent.sh` and `research.py` can run simultaneously without interference
 - OpenCode's `websearch` tool continues to work in `start-agent.sh` (backed by the SearXNG that remains)
 - Vane accessible at `http://localhost:3000` from the host browser, fed by its *own* dedicated SearXNG
 - LLM configuration in Vane points to host Ollama/omlx
@@ -42,6 +42,11 @@ The user wants Vane in its own isolated environment with:
 ---
 
 ## Phase 1: Create research.sh with isolated Colima VM (Opus recommended)
+
+> **Implemented.** This phase was completed as `research.py` (Python, stdlib-only)
+> rather than `research.sh` (bash). See `plans/implemented-research-python.md` for
+> the rationale and ADR-018 for the evaluation. The steps below are preserved for
+> historical reference; actual implementation details are in `research.py`.
 
 ### Steps
 
@@ -210,17 +215,17 @@ SearXNG, the `claude-agent-net` user-defined network, the SearXNG MCP shim in th
 ### Steps
 
 1. **Update CLAUDE.md** (in addition to Vane-paragraph removal already covered in Phase 2):
-   - Add `research.sh` to the Layout section
-   - Add a new "research.sh key decisions" section after the "start-agent.sh key decisions" section, explaining: separate Colima profile for VM-level isolation, dedicated SearXNG (not shared with claude-agent), permissive research-oriented allowlist, host-port 3000 for browser access, LLM via host.docker.internal
+   - Add `research.py` to the Layout section (already present if added during Phase 1 implementation)
+   - Add a new "research.py key decisions" section after the "start-agent.sh key decisions" section (or verify it exists from Phase 1 implementation), explaining: separate Colima profile for VM-level isolation, dedicated SearXNG (not shared with claude-agent), permissive research-oriented allowlist, host-port 3000 for browser access, LLM via host.docker.internal
 
 2. **Update ADR.md**:
-   - Add ADR-018 documenting the extraction of Vane into `research.sh`. Reference the design choice: Vane was always a browser-only consumer of SearXNG, never accessed by OpenCode, so isolating it cleanly separates "agent's search backend" from "user-facing research UI". Note that the SearXNG that remains in `start-agent.sh` is dedicated to OpenCode and is *not* shared with research.sh's SearXNG (each runs in its own VM with its own egress firewall).
-   - Update ADR-016 status: "**Superseded by ADR-018** for the Vane portion. The default-on SearXNG decision still stands for OpenCode's websearch backend."
+   - Add ADR-021 documenting the extraction of Vane from `start-agent.sh` into standalone `research.py`. Reference the design choice: Vane was always a browser-only consumer of SearXNG, never accessed by OpenCode, so isolating it cleanly separates "agent's search backend" from "user-facing research UI". Note that the SearXNG that remains in `start-agent.sh` is dedicated to OpenCode and is *not* shared with `research.py`'s SearXNG (each runs in its own VM with its own egress firewall). Reference ADR-018 (which documents the Python language choice) as prior art.
+   - Update ADR-016 status: "**Superseded by ADR-021** for the Vane portion. The default-on SearXNG decision still stands for OpenCode's websearch backend."
    - Leave ADR-014 unchanged (still describes the SearXNG architecture that remains in start-agent.sh)
 
 3. **Update README.md**:
-   - Add a `research.sh` usage section (basic invocation, `--rebuild`, `--reload-allowlist`, allowlist file location)
-   - Note that running both `start-agent.sh` and `research.sh` simultaneously is supported
+   - Add a `research.py` usage section (basic invocation, `--rebuild`, `--reload-allowlist`, allowlist file location)
+   - Note that running both `start-agent.sh` and `research.py` simultaneously is supported
 
 ### Files
 
@@ -237,9 +242,9 @@ SearXNG, the `claude-agent-net` user-defined network, the SearXNG MCP shim in th
 
 ## Notes
 
-- **Simultaneous operation**: `start-agent.sh` (profile `claude-agent`) and `research.sh` (profile `research`) use separate Colima VMs, so they can run concurrently without interference. They share host ports differently: `start-agent.sh` uses no host ports by default; `research.sh` binds port 3000.
+- **Simultaneous operation**: `start-agent.sh` (profile `claude-agent`) and `research.py` (profile `research`) use separate Colima VMs, so they can run concurrently without interference. They share host ports differently: `start-agent.sh` uses no host ports by default; `research.py` binds port 3000.
 
-- **Port conflict**: If another service uses port 3000 on the host, add a `--port=` flag to `research.sh` to allow override.
+- **Port conflict**: If another service uses port 3000 on the host, add a `--port=` flag to `research.py` to allow override.
 
 - **Data persistence**: `~/.research/vane-data/` persists Vane's LLM configuration across `--rebuild`. Consider documenting the one-time LLM setup step prominently.
 
@@ -247,8 +252,8 @@ SearXNG, the `claude-agent-net` user-defined network, the SearXNG MCP shim in th
 
 - **Alternative considered**: Running Vane and SearXNG in a single container instead of two. Rejected because it would require a custom Dockerfile combining both images, increasing maintenance burden. The two-container approach reuses upstream images directly.
 
-- **Why no custom base image**: Unlike `start-agent.sh`, which builds `claude-agent:latest` from `dockerfiles/claude-agent.Dockerfile` to host the Claude Code + OpenCode CLIs and a Python MCP shim, `research.sh` runs only browser-facing services that ship as complete Docker Hub images. No agent runs *inside* the research VM — the user is the only consumer (via browser) and the LLM lives on the host. Adding a custom Dockerfile would be pure overhead.
+- **Why no custom base image**: Unlike `start-agent.sh`, which builds `claude-agent:latest` from `dockerfiles/claude-agent.Dockerfile` to host the Claude Code + OpenCode CLIs and a Python MCP shim, `research.py` runs only browser-facing services that ship as complete Docker Hub images. No agent runs *inside* the research VM — the user is the only consumer (via browser) and the LLM lives on the host. Adding a custom Dockerfile would be pure overhead.
 
-- **Migration path**: Users who used Vane at `localhost:3000` should run `research.sh` instead. OpenCode users see no change — websearch continues to work via the SearXNG that stays in `start-agent.sh`.
+- **Migration path**: Users who used Vane at `localhost:3000` should run `research.py` instead. OpenCode users see no change — websearch continues to work via the SearXNG that stays in `start-agent.sh`.
 
-- **Two SearXNG instances by design**: `start-agent.sh`'s SearXNG (inside the `claude-agent` Colima VM, on `claude-agent-net`) serves OpenCode's MCP shim. `research.sh`'s SearXNG (inside the `research` Colima VM, on `research-net`) serves Vane. They are independent: separate egress allowlists, separate VMs, separate settings.yml. This is intentional — coupling them back together would defeat the network-isolation goal.
+- **Two SearXNG instances by design**: `start-agent.sh`'s SearXNG (inside the `claude-agent` Colima VM, on `claude-agent-net`) serves OpenCode's MCP shim. `research.py`'s SearXNG (inside the `research` Colima VM, on `research-net`) serves Vane. They are independent: separate egress allowlists, separate VMs, separate settings.yml. This is intentional — coupling them back together would defeat the network-isolation goal.
