@@ -492,6 +492,37 @@ port 8888 and performs O(1) hash-table domain lookups — supporting million-ent
 denylists without OOM. (start-agent.sh uses tinyproxy for its ~280-entry allowlist;
 the asymmetry is intentional — see ADR-021.)
 
+### Threat model
+
+**Primary motivation: research quality.** The upstream hagezi feeds (`multi.pro`,
+`fake`, `tif`) block misinformation sites, content farms, AI SEO slop, and
+malicious infrastructure. This is load-bearing for Vane's usefulness — unfiltered
+search results degrade research quality faster than they create security risk.
+
+**Secondary motivation: exfil hygiene.** `denylist-additions.txt` blocks
+legitimate-but-weaponizable services that upstream feeds won't cover: anonymous
+paste/upload sites, webhook capture endpoints, reverse tunnels, messaging APIs,
+code-hosting write paths. This limits what a prompt-injection payload in a
+search result could reach.
+
+**Acknowledged limitation:** an adversary who controls their own domain (or
+registers a fresh one) bypasses both layers. Human supervision of Vane is the
+actual exfil control, not the proxy. See ADR-023 for the full threat-model
+framing.
+
+### Feed contents and refresh cadence
+
+| Feed | Purpose | Refresh cadence |
+|------|---------|-----------------|
+| `multi.pro` | Broad coverage — malware, tracking, content farms, AI slop | Monthly |
+| `fake` | Misinformation and propaganda sites | Monthly |
+| `tif` | Active threat intel — entries rotate as threats are taken down | Daily or weekly |
+
+The `tif` feed degrades fastest when stale. Run `--refresh-denylist` weekly at
+minimum; daily is ideal if you use research.py regularly.
+
+### Editing the denylist
+
 To update the denylist without restarting containers:
 
 ```bash

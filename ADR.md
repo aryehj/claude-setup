@@ -1181,6 +1181,92 @@ Key implementation details:
 - Squid is an additional VM-level dependency for the `research` Colima profile,
   installed idempotently via `apt-get install squid` on first bring-up.
 
+## ADR-023: Layered denylist model for research.py
+
+**Date:** 2026-04-26
+**Status:** Accepted
+
+### Context
+
+research.py needed an egress filter that lets Vane (the AI research UI) scrape
+arbitrary search-result URLs while still blocking low-quality or weaponizable
+content. An allowlist approach (ADR-019, ADR-020) was incompatible with that
+goal — a domain that appears in a search result cannot be predicted in advance,
+so any allowlist aggressive enough to provide useful filtering would also block
+legitimate results.
+
+The migration also surfaced a secondary concern: legitimate-but-exfil-capable
+services (pastebins, webhook capture, reverse tunnels, code-hosting write paths)
+would not appear in any curated research-quality filter, yet a prompt-injection
+payload could instruct Vane to exfiltrate through them.
+
+### Decision
+
+Replace research.py's allowlist with a three-layer denylist model:
+
+    Final denylist = (cached-upstream ∪ denylist-additions.txt) − denylist-overrides.txt
+
+**Layer 1 — Upstream feeds** (`~/.research/denylist-sources.txt`, seeded from
+`templates/research-denylist-sources.txt`): URL-pinned downloads from
+hagezi/dns-blocklists. Three feeds:
+- `multi.pro` — broad-coverage malware, phishing, tracking, content farms,
+  AI SEO slop. Primary quality filter.
+- `fake` — misinformation and propaganda sites. Research-quality filter.
+- `tif` — active threat intelligence feed; rotates frequently as threats are
+  taken down.
+
+**Layer 2 — Local additions** (`~/.research/denylist-additions.txt`, seeded
+from `templates/research-denylist-additions.txt`): ~50 curated domains that
+the upstream feeds won't include because they're legitimate services, not
+malicious infrastructure. These are the exfil-capable targets: anonymous paste
+and upload sites, webhook capture services, messaging delivery APIs, reverse
+tunnels, and code-hosting write paths.
+
+**Layer 3 — Local overrides** (`~/.research/denylist-overrides.txt`, empty by
+default): User-maintained escape hatch for upstream false positives. Any domain
+in overrides is removed from the final filter regardless of which upstream feed
+pulled it in. `--refresh-denylist` never clobbers this file.
+
+**Why denylist for research.py; why allowlist stays for start-agent.sh:**
+- research.py runs Vane interactively — the user selects queries and supervises
+  results. The bottleneck is research quality; the threat is prompt-injection via
+  returned content, not autonomous tool use. A denylist lets Vane reach the long
+  tail of search results while filtering known-bad domains.
+- start-agent.sh runs Claude Code and OpenCode with more autonomous tool surface
+  — model-initiated webfetch, PR creation, code pushes. Tighter egress control
+  (allowlist + tinyproxy) is warranted there. The asymmetry is intentional.
+
+**Pinning policy:**
+Upstream feed URLs in `denylist-sources.txt` are pinned to a specific commit SHA
+(or release tag), never to `main` / `HEAD`. This ensures upstream changes — including
+potentially malicious additions from a compromised maintainer — flow through only
+after a human reviews the diff. `--refresh-denylist` fetches the currently-pinned
+SHA's content; updating the pin requires editing `denylist-sources.txt` and running
+`--reseed-denylist`, which is an explicit human action.
+
+**Rate limiting:**
+iptables rate limiting (hashlimit / limit module) is added to the RESEARCH chain
+as defense-in-depth against bulk exfil. Rate limiting is secondary to the denylist;
+a slow trickle can still exfiltrate under the limit, and an attacker-controlled
+domain bypasses both. The actual exfil control is human supervision.
+
+### Consequences
+
+- Vane can scrape arbitrary search-result URLs, including the long tail of
+  legitimate research domains that an allowlist could never enumerate.
+- The upstream hagezi feeds provide broad quality filtering (~400k–1.5M entries)
+  that no manually-curated allowlist could match. Research quality improves.
+- Known-bad infrastructure (malware, phishing, content farms) is filtered
+  consistently without manual maintenance once feeds are pinned.
+- A real adversary who controls their own domain — or who registers a fresh
+  domain not yet in upstream feeds — bypasses the denylist. This is an
+  acknowledged residual risk. Human supervision of Vane is the actual exfil
+  control, not the proxy.
+- Refresh cadence matters: `tif` (threat intel) benefits from daily or weekly
+  refresh as entries rotate. `pro` and `fake` are stable; monthly refresh is
+  sufficient. Falling behind on `tif` means the active-threat coverage degrades.
+- See ADR-021 for why Squid is used instead of tinyproxy at this scale.
+
 ## ADR-022: Hard-exit on legacy allowlist.txt; no smooth migration
 
 **Date:** 2026-04-26
@@ -1219,3 +1305,43 @@ take the explicit action.
   meaningful state in the new layout, and the old allowlist was superseded.
 - No migration code to maintain. The check is a two-line conditional; once the
   user has migrated, it never fires again.
+
+## ADR-024: Expand start-agent.sh allowlist with research.py READ-ONLY entries
+
+**Date:** 2026-04-26
+**Status:** Accepted
+
+### Context
+
+start-agent.sh's allowlist (~150 entries) was seeded for Claude Code + git
+workflows, not research workflows. When OpenCode uses its `webfetch` and
+`websearch` tools, it reaches domains common in research — academic publishers,
+preprint servers, documentation hosts, reference sites — that were absent from
+the allowlist, causing 403s on valid fetches.
+
+`templates/research-allowlist.txt` had already accumulated ~223 READ-ONLY
+research entries (ADR-020). Phase 2 of the allowlist/denylist migration retired
+that file (research.py switched to denylist mode), but its READ-ONLY entries
+remained valid candidates for start-agent.sh.
+
+### Decision
+
+Merge the READ-ONLY tier of `templates/research-allowlist.txt` into
+start-agent.sh's inline heredoc allowlist, preserving start-agent.sh's
+existing category comments and organization style. UPLOAD-CAPABLE entries
+(commented-out tier in the research template) are excluded — the start-agent.sh
+security model intentionally keeps write-capable hosts off the default allowlist.
+
+After consuming these entries, `templates/research-allowlist.txt` has no remaining
+consumers and is deleted from the repo.
+
+### Consequences
+
+- OpenCode `webfetch` / `websearch` hits far fewer 403s on common research
+  domains; agent effectiveness for research tasks improves.
+- start-agent.sh remains allowlist-based (not denylist). The expanded allowlist
+  is still human-reviewable and LLM-uneditable. The threat model from ADR-010
+  is unchanged.
+- Write-capable hosts (github.com, gitlab.com, huggingface.co, etc.) remain
+  absent from the default seed. Users who need them add them manually and accept
+  the residual write-path risk explicitly (same as before).

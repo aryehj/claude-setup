@@ -129,7 +129,7 @@ On first run both files are seeded to `~/.research/`. The composed denylist is
 `(cached-upstream ∪ denylist-additions.txt) − denylist-overrides.txt`. Upstream
 feeds are URL-pinned downloads cached in `~/.research/denylist-cache/`. On-disk
 files are never silently overwritten — use `--reseed-denylist` to pick up template
-updates. See ADR-019 and ADR-020.
+updates. See ADR-023.
 
 **`research.py` hard-exits if `~/.research/allowlist.txt` is detected.**
 Installations predating the denylist migration have this file. `research.py`
