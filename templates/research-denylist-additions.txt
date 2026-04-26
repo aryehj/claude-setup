@@ -58,7 +58,7 @@ bore.pub
 
 # === Code hosting (write paths) ===
 # Reads still work via raw.githubusercontent.com / codeload.github.com
-github.com
+# github.com
 gitlab.com
 bitbucket.org
 

@@ -23,4 +23,4 @@
 # VM with `./research.py --rebuild --memory=4` (or larger).
 https://raw.githubusercontent.com/hagezi/dns-blocklists/b3c6077683c41884beff8b1a7678d09a9c5e9e00/domains/pro.txt
 https://raw.githubusercontent.com/hagezi/dns-blocklists/b3c6077683c41884beff8b1a7678d09a9c5e9e00/wildcard/fake.txt
-# https://raw.githubusercontent.com/hagezi/dns-blocklists/b3c6077683c41884beff8b1a7678d09a9c5e9e00/domains/tif.txt
+https://raw.githubusercontent.com/hagezi/dns-blocklists/b3c6077683c41884beff8b1a7678d09a9c5e9e00/domains/tif.txt
