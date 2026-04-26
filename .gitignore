@@ -30,3 +30,6 @@ refs
 
 # testing things temporarily
 .temp
+
+# Vane eval run outputs (scratch; not source-of-truth)
+tests/vane-eval/results/
