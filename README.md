@@ -568,6 +568,33 @@ To pick up template updates after `git pull`:
 ./research.py --reseed-denylist --reload-denylist
 ```
 
+## Research-quality eval harness
+
+`tests/vane-eval/` holds an OFAT sweep that measures how model, prompt style,
+temperature, and thinking mode affect single-turn research output quality.
+
+**Cheap phase** (no Vane in the loop — hits omlx directly):
+
+```bash
+export OMLX_API_KEY=your-key
+OMLX_BASE="http://0.0.0.0:8000/v1"   # adjust to wherever omlx is listening
+
+# Single query, specific models
+uv run python tests/vane-eval/run_cheap.py \
+  --base-url "$OMLX_BASE" \
+  --models "gemma-4-26b-a4b-it-8bit,gemma-4-E4B-it-MLX-8bit" \
+  --queries q1
+
+# Full sweep (all discovered models × all six queries; ~54 calls for 4 models)
+uv run python tests/vane-eval/run_cheap.py --base-url "$OMLX_BASE"
+```
+
+Output lands in `tests/vane-eval/results/cheap-<UTC-ts>/` — one `.md` per cell
+plus a `MANIFEST.md`. Open a Claude Code session and paste the grading prompt
+from `tests/vane-eval/JUDGE.md` (added in Phase 4) to score the results.
+
+Tests: `uv run --with pytest pytest tests/vane-eval/`
+
 ## Environment variable reference (research.py)
 
 | Variable | Default | Description |

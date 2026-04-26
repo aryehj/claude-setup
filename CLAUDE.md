@@ -16,7 +16,14 @@ templates/                   — seed templates copied to host state dirs on fir
   research-denylist-additions.txt     — seeded to ~/.research/denylist-additions.txt by research.py
 skills/                      — reusable Claude Code skills (back up of ~/.claude/skills/)
 plans/                       — implementation plans written by /plan skill
-tests/                       — unit tests (test_research.py covers research.py pure helpers)
+tests/                       — unit tests and eval harness
+  test_research.py                     — unit tests for research.py pure helpers
+  probe-vane-egress.sh                 — smoke test for research-vane egress env vars
+  vane-eval/                           — Vane research-quality eval harness (OFAT sweep)
+    queries.md                         — six research queries with reference answers
+    run_cheap.py                       — cheap phase: OFAT sweep against omlx directly
+    lib/                               — shared helpers (cells.py, queries.py)
+    test_lib.py, test_run_cheap.py     — pytest suites for lib + run_cheap
 ROADMAP.md                   — planned work
 README.md                    — usage reference
 ADR.md                       — architecture decision records
