@@ -3,7 +3,7 @@
 research.py — spin up an isolated Vane + SearXNG research environment.
 
 Creates a dedicated Colima VM (profile: research) with its own egress firewall
-(tinyproxy + iptables RESEARCH chain) and runs two containers:
+(Squid + iptables RESEARCH chain) and runs two containers:
   - research-searxng: SearXNG meta-search engine
   - research-vane: Vane AI research UI, accessible at http://localhost:3000
 
@@ -50,7 +50,7 @@ COLIMA_PROFILE = "research"
 CONTAINER_SEARXNG = "research-searxng"
 CONTAINER_VANE = "research-vane"
 RESEARCH_NET_NAME = "research-net"
-TINYPROXY_PORT = 8888
+SQUID_PORT = 8888
 
 DEFAULT_MEMORY_GIB = 2
 DEFAULT_CPUS = 2
@@ -154,7 +154,7 @@ ENVIRONMENT:
         "--reload-denylist",
         action="store_true",
         dest="reload_denylist",
-        help="Recompose the tinyproxy filter from local files (cache + additions − overrides) and reload tinyproxy. No network. Fast path; does not restart containers.",
+        help="Recompose the Squid denylist from local files (cache + additions − overrides) and reconfigure Squid. No network. Fast path; does not restart containers.",
     )
     p.add_argument(
         "--refresh-denylist",
@@ -343,23 +343,22 @@ def refresh_denylist_cache(paths: Paths, *, abort_on_any_failure: bool = False) 
 
 # ── Pure helpers ───────────────────────────────────────────────────────────────
 
-def denylist_to_regex_filter(lines: List[str]) -> str:
-    """Convert denylist domains to a tinyproxy filter file body.
+def denylist_to_squid_acl(domains: List[str]) -> str:
+    """Convert bare domain names to a Squid dstdomain ACL file body.
 
-    Each non-comment domain becomes an anchored regex that matches the domain
-    itself and any subdomain: (^|\\.)example\\.com$ — same encoding as the
-    previous allowlist mode; only the FilterDefaultDeny semantics differ.
+    Each entry becomes .example.com (dotted-suffix form). Squid matches this
+    as example.com itself plus any subdomain — O(1) hash lookup, no regex NFA.
     """
     out: List[str] = []
-    for raw in lines:
-        domain = raw.split("#", 1)[0].strip()
+    for domain in domains:
+        domain = domain.split("#", 1)[0].strip()
         if not domain:
             continue
-        out.append(f"(^|\\.){re.escape(domain)}$")
+        out.append(f".{domain}")
     return "\n".join(out) + "\n" if out else ""
 
 
-def render_searxng_settings(bridge_ip: str, tinyproxy_port: int, secret: str) -> str:
+def render_searxng_settings(bridge_ip: str, proxy_port: int, secret: str) -> str:
     """Return the body of settings.yml for the research SearXNG instance."""
     return f"""\
 use_default_settings:
@@ -387,29 +386,32 @@ search:
 
 outgoing:
   proxies:
-    all://: "http://{bridge_ip}:{tinyproxy_port}"
+    all://: "http://{bridge_ip}:{proxy_port}"
 """
 
 
-def render_tinyproxy_conf(bridge_ip: str, tinyproxy_port: int) -> str:
-    """Return the body of tinyproxy.conf for the research VM."""
+def render_squid_conf(bridge_ip: str, squid_port: int) -> str:
+    """Return a minimal squid.conf for the research VM.
+
+    Explicitly omits Debian's default squid.conf.default so only these
+    directives are active. cache deny all makes this a pure filtering
+    forward proxy, not a caching proxy.
+    """
     return f"""\
-User tinyproxy
-Group tinyproxy
-Port {tinyproxy_port}
-Listen {bridge_ip}
-Timeout 600
-DefaultErrorFile "/usr/share/tinyproxy/default.html"
-StatFile "/usr/share/tinyproxy/stats.html"
-LogFile "/var/log/tinyproxy/tinyproxy.log"
-LogLevel Info
-MaxClients 100
-FilterDefaultDeny No
-Filter "/etc/tinyproxy/filter"
-FilterExtended Yes
-FilterURLs No
-ConnectPort 443
-ConnectPort 80
+http_port {bridge_ip}:{squid_port}
+visible_hostname research-squid
+
+acl denylist dstdomain "/etc/squid/denylist.txt"
+acl SSL_ports port 443
+acl Safe_ports port 80 443
+
+http_access deny denylist
+http_access deny CONNECT !SSL_ports
+http_access deny !Safe_ports
+http_access allow all
+
+access_log /var/log/squid/access.log
+cache deny all
 """
 
 
@@ -418,7 +420,7 @@ def render_iptables_apply_script(
     bridge_cidr: str,
     research_net_cidr: str,
     host_ip: str,
-    tinyproxy_port: int,
+    proxy_port: int,
     inference_port: int,
     has_hashlimit: bool = True,
 ) -> str:
@@ -469,7 +471,7 @@ iptables -C DOCKER-USER -s {research_net_cidr} -j RESEARCH 2>/dev/null \\
 
 # Rules in order:
 iptables -A RESEARCH -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
-iptables -A RESEARCH -d {bridge_ip} -p tcp --dport {tinyproxy_port} -j RETURN
+iptables -A RESEARCH -d {bridge_ip} -p tcp --dport {proxy_port} -j RETURN
 iptables -A RESEARCH -d {host_ip}   -p tcp --dport {inference_port} -j RETURN
 iptables -A RESEARCH -d {bridge_ip} -p udp --dport 53 -j RETURN
 iptables -A RESEARCH -d {bridge_ip} -p tcp --dport 53 -j RETURN
@@ -702,21 +704,24 @@ def ensure_docker_network(config: VmConfig) -> None:
     print(f"==> Research network: {RESEARCH_NET_NAME} cidr={cidr}")
 
 
-def install_tinyproxy(config: VmConfig) -> None:
-    result = vm_sh("command -v tinyproxy", check=False)
+def install_squid(config: VmConfig) -> None:
+    result = vm_sh("command -v squid", check=False)
     if result.returncode != 0:
-        print("==> Installing tinyproxy in Colima VM")
+        print("==> Installing Squid in Colima VM")
         vm_sh("sudo apt-get update -qq")
-        vm_sh("sudo apt-get install -y tinyproxy")
+        vm_sh("sudo apt-get install -y squid")
+        # Squid auto-starts on install with default config; stop it so
+        # apply_firewall can write the minimal config before restarting.
+        vm_sh("sudo systemctl stop squid 2>/dev/null || true")
 
 
 def apply_firewall(config: VmConfig, paths: Paths) -> None:
-    """Push tinyproxy config + filter into the VM, then apply iptables rules."""
+    """Push Squid config + denylist into the VM, then apply iptables rules."""
     assert config.bridge_ip and config.bridge_cidr and config.host_ip and config.research_net_cidr
 
     denylist_domains = compose_denylist(paths)
-    filter_body = denylist_to_regex_filter(denylist_domains)
-    conf_body = render_tinyproxy_conf(config.bridge_ip, TINYPROXY_PORT)
+    acl_body = denylist_to_squid_acl(denylist_domains)
+    conf_body = render_squid_conf(config.bridge_ip, SQUID_PORT)
     has_hashlimit = vm_has_hashlimit(config.profile_name)
     if not has_hashlimit:
         print("warning: xt_hashlimit not available in VM; using coarse '-m limit' fallback.", file=sys.stderr)
@@ -725,26 +730,26 @@ def apply_firewall(config: VmConfig, paths: Paths) -> None:
         bridge_cidr=config.bridge_cidr,
         research_net_cidr=config.research_net_cidr,
         host_ip=config.host_ip,
-        tinyproxy_port=TINYPROXY_PORT,
+        proxy_port=SQUID_PORT,
         inference_port=config.inference_port,
         has_hashlimit=has_hashlimit,
     )
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
-        conf_file = tmp_path / "tinyproxy.conf"
-        filter_file = tmp_path / "filter"
+        conf_file = tmp_path / "squid.conf"
+        acl_file = tmp_path / "denylist.txt"
         fw_file = tmp_path / "firewall-apply.sh"
 
         conf_file.write_text(conf_body)
-        filter_file.write_text(filter_body)
+        acl_file.write_text(acl_body)
         fw_file.write_text(fw_script)
 
-        vm_put_file(conf_file, "/etc/tinyproxy/tinyproxy.conf")
-        vm_put_file(filter_file, "/etc/tinyproxy/filter")
+        vm_put_file(conf_file, "/etc/squid/squid.conf")
+        vm_put_file(acl_file, "/etc/squid/denylist.txt")
 
-        vm_sh("sudo systemctl enable --now tinyproxy >/dev/null 2>&1 || true")
-        vm_sh("sudo systemctl restart tinyproxy")
+        vm_sh("sudo systemctl enable --now squid >/dev/null 2>&1 || true")
+        vm_sh("sudo systemctl restart squid")
 
         fw_content = fw_file.read_bytes()
         subprocess.run(
@@ -755,7 +760,7 @@ def apply_firewall(config: VmConfig, paths: Paths) -> None:
         )
 
     print(f"==> Firewall applied ({len(denylist_domains)} denylist entries)")
-    print(f"    proxy: http://{config.bridge_ip}:{TINYPROXY_PORT}")
+    print(f"    proxy: http://{config.bridge_ip}:{SQUID_PORT}")
 
 
 def seed_searxng_settings(paths: Paths, config: VmConfig) -> None:
@@ -764,13 +769,13 @@ def seed_searxng_settings(paths: Paths, config: VmConfig) -> None:
         secret = secrets.token_hex(32)
         assert config.bridge_ip
         paths.searxng_settings.write_text(
-            render_searxng_settings(config.bridge_ip, TINYPROXY_PORT, secret)
+            render_searxng_settings(config.bridge_ip, SQUID_PORT, secret)
         )
-        print(f"==> Seeded {paths.searxng_settings} (secret_key generated, proxy={config.bridge_ip}:{TINYPROXY_PORT})")
+        print(f"==> Seeded {paths.searxng_settings} (secret_key generated, proxy={config.bridge_ip}:{SQUID_PORT})")
     else:
         # Drift check: fix stale proxy address if it doesn't match current bridge IP.
         assert config.bridge_ip
-        expected_proxy = f"http://{config.bridge_ip}:{TINYPROXY_PORT}"
+        expected_proxy = f"http://{config.bridge_ip}:{SQUID_PORT}"
         content = paths.searxng_settings.read_text()
         m = re.search(r'all://:\s*"([^"]+)"', content)
         if m and m.group(1) != expected_proxy:
@@ -896,24 +901,19 @@ def rebuild_teardown(config: VmConfig) -> None:
 
 
 def reload_denylist_fast_path(paths: Paths, config: VmConfig) -> None:
-    """Recompose denylist from local files, push filter, reload tinyproxy. No container restart."""
+    """Recompose denylist from local files, push ACL file, reconfigure Squid. No container restart."""
     assert config.bridge_ip and config.research_net_cidr
 
     denylist_domains = compose_denylist(paths)
-    filter_body = denylist_to_regex_filter(denylist_domains)
-    conf_body = render_tinyproxy_conf(config.bridge_ip, TINYPROXY_PORT)
+    acl_body = denylist_to_squid_acl(denylist_domains)
 
     with tempfile.TemporaryDirectory() as tmp:
-        tmp_path = Path(tmp)
-        conf_file = tmp_path / "tinyproxy.conf"
-        filter_file = tmp_path / "filter"
-        conf_file.write_text(conf_body)
-        filter_file.write_text(filter_body)
-        vm_put_file(conf_file, "/etc/tinyproxy/tinyproxy.conf")
-        vm_put_file(filter_file, "/etc/tinyproxy/filter")
+        acl_file = Path(tmp) / "denylist.txt"
+        acl_file.write_text(acl_body)
+        vm_put_file(acl_file, "/etc/squid/denylist.txt")
 
     vm_sh(
-        "sudo systemctl reload tinyproxy 2>/dev/null || sudo systemctl restart tinyproxy"
+        "sudo squid -k reconfigure 2>/dev/null || sudo systemctl restart squid"
     )
 
     print(f"==> Denylist reloaded ({len(denylist_domains)} entries)")
@@ -974,7 +974,7 @@ def main() -> None:
     config = discover_network(config)
     ensure_docker_network(config)
 
-    install_tinyproxy(config)
+    install_squid(config)
     seed_searxng_settings(paths, config)
     apply_firewall(config, paths)
 
@@ -992,7 +992,7 @@ def main() -> None:
         print(f"              use http://host.docker.internal:{config.inference_port} (Ollama)")
     else:
         print(f"              use http://host.docker.internal:{config.inference_port}/v1 (omlx)")
-    print(f"    proxy   : http://{config.bridge_ip}:{TINYPROXY_PORT}  (denylist sources: {paths.denylist_sources_file})")
+    print(f"    proxy   : http://{config.bridge_ip}:{SQUID_PORT}  (denylist sources: {paths.denylist_sources_file})")
 
 
 if __name__ == "__main__":

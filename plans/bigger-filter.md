@@ -2,7 +2,7 @@
 
 ## Status
 
-- [ ] Phase 1: Swap tinyproxy for Squid in research.py (clean cut)
+- [x] Phase 1: Swap tinyproxy for Squid in research.py (clean cut)
 - [ ] Phase 2: Re-enable hagezi `tif` by default + docs/ADR
 
 ## Context

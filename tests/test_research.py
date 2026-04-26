@@ -1,65 +1,56 @@
 """Unit tests for research.py pure helpers."""
-import re
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from research import (
-    denylist_to_regex_filter,
+    denylist_to_squid_acl,
     render_iptables_apply_script,
     render_searxng_settings,
 )
 
 
-# ── denylist_to_regex_filter ─────────────────────────────────────────────────
+# ── denylist_to_squid_acl ────────────────────────────────────────────────────
 
-def test_denylist_filter_basic_domain():
-    result = denylist_to_regex_filter(["wikipedia.org"])
-    assert "(^|\\.)wikipedia\\.org$" in result
-
-
-def test_denylist_filter_subdomain_match():
-    pattern = re.compile(r"\(\^\|\\\.\)wikipedia\\\.org\$")
-    result = denylist_to_regex_filter(["wikipedia.org"])
-    assert pattern.search(result)
-    # The compiled regex should match subdomains
-    line_re = re.compile(r"(^|\.)wikipedia\.org$")
-    assert line_re.search("wikipedia.org")
-    assert line_re.search("en.wikipedia.org")
-    assert not line_re.search("not-wikipedia.org")
+def test_denylist_squid_acl_basic_domain():
+    result = denylist_to_squid_acl(["wikipedia.org"])
+    assert ".wikipedia.org" in result
 
 
-def test_denylist_filter_skips_comments():
-    lines = ["# this is a comment", "example.com", "# another comment"]
-    result = denylist_to_regex_filter(lines)
-    assert "comment" not in result
-    assert "example" in result
+def test_denylist_squid_acl_dotted_prefix():
+    result = denylist_to_squid_acl(["example.com"])
+    assert result.strip() == ".example.com"
 
 
-def test_denylist_filter_skips_blank_lines():
-    lines = ["", "   ", "google.com", ""]
-    result = denylist_to_regex_filter(lines)
-    assert result.count("(^|") == 1
+def test_denylist_squid_acl_multiple_domains():
+    result = denylist_to_squid_acl(["alpha.com", "beta.com"])
+    lines = result.strip().splitlines()
+    assert ".alpha.com" in lines
+    assert ".beta.com" in lines
 
 
-def test_denylist_filter_inline_comment_stripped():
-    lines = ["google.com  # search engine"]
-    result = denylist_to_regex_filter(lines)
+def test_denylist_squid_acl_skips_blank_lines():
+    result = denylist_to_squid_acl(["", "   ", "google.com", ""])
+    lines = [l for l in result.splitlines() if l.strip()]
+    assert len(lines) == 1
+
+
+def test_denylist_squid_acl_inline_comment_stripped():
+    result = denylist_to_squid_acl(["google.com  # search engine"])
     assert "search engine" not in result
-    assert "google" in result
+    assert ".google.com" in result
 
 
-def test_denylist_filter_special_chars_escaped():
-    lines = ["api.example-corp.com"]
-    result = denylist_to_regex_filter(lines)
-    # hyphen and dot are escaped
-    assert r"api\.example\-corp\.com" in result or r"api\.example-corp\.com" in result
+def test_denylist_squid_acl_no_regex_escaping():
+    result = denylist_to_squid_acl(["api.example-corp.com"])
+    assert ".api.example-corp.com" in result
+    assert "\\" not in result
 
 
-def test_denylist_filter_empty_input():
-    assert denylist_to_regex_filter([]) == ""
-    assert denylist_to_regex_filter(["# only comments"]) == ""
+def test_denylist_squid_acl_empty_input():
+    assert denylist_to_squid_acl([]) == ""
+    assert denylist_to_squid_acl(["# only comments"]) == ""
 
 
 # ── render_searxng_settings ───────────────────────────────────────────────────
@@ -103,7 +94,7 @@ def test_iptables_no_uninterpolated_vars():
         bridge_cidr="172.17.0.0/16",
         research_net_cidr="172.20.0.0/24",
         host_ip="192.168.5.1",
-        tinyproxy_port=8888,
+        proxy_port=8888,
         inference_port=11434,
     )
     # No shell variable references should remain (all interpolated at render time)
@@ -119,7 +110,7 @@ def test_iptables_contains_research_chain():
         bridge_cidr="172.17.0.0/16",
         research_net_cidr="172.20.0.0/24",
         host_ip="192.168.5.1",
-        tinyproxy_port=8888,
+        proxy_port=8888,
         inference_port=11434,
     )
     assert "RESEARCH" in script
@@ -132,7 +123,7 @@ def test_iptables_interpolates_ips():
         bridge_cidr="10.1.2.0/24",
         research_net_cidr="10.5.6.0/24",
         host_ip="192.168.99.1",
-        tinyproxy_port=9999,
+        proxy_port=9999,
         inference_port=8000,
     )
     assert "10.1.2.3" in script
@@ -148,7 +139,7 @@ def test_iptables_ends_with_reject():
         bridge_cidr="172.17.0.0/16",
         research_net_cidr="172.20.0.0/24",
         host_ip="192.168.5.1",
-        tinyproxy_port=8888,
+        proxy_port=8888,
         inference_port=11434,
     )
     assert "REJECT" in script
@@ -160,7 +151,7 @@ def test_iptables_allows_intra_net_8080():
         bridge_cidr="172.17.0.0/16",
         research_net_cidr="172.20.0.0/24",
         host_ip="192.168.5.1",
-        tinyproxy_port=8888,
+        proxy_port=8888,
         inference_port=11434,
     )
     assert "--dport 8080" in script
