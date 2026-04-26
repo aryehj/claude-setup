@@ -3,7 +3,7 @@
 ## Status
 
 - [x] Phase 1: Query set, references, shared helpers
-- [ ] Phase 2: Cheap-phase OFAT sweep against omlx
+- [x] Phase 2: Cheap-phase OFAT sweep against omlx
 - [ ] Phase 3: Vane API confirm sweep
 - [ ] Phase 4: Grading harness for human-in-loop Claude Code judge
 
