@@ -2,6 +2,10 @@
 .claude
 .venv
 
+# Python bytecode
+__pycache__/
+*.pyc
+
 # Shell dotfiles (sandbox artifacts)
 .bash_profile
 .bashrc
