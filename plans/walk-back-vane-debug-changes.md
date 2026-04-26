@@ -2,7 +2,7 @@
 
 ## Status
 
-- [ ] Phase 1: Restore `HTTP_PROXY` on Vane + ADR/CLAUDE.md rewrite
+- [x] Phase 1: Restore `HTTP_PROXY` on Vane + ADR/CLAUDE.md rewrite
 - [ ] Phase 2: Drop redundant `google-analytics.com` addition (Haiku ok)
 - [ ] Phase 3: Repo hygiene — rename plan, delete one-off script (Haiku ok)
 

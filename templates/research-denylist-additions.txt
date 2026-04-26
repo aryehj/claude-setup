@@ -80,5 +80,5 @@ doubleclick.net
 googleadservices.com
 googletagmanager.com
 googletagservices.com
-google-analytics.com
+# google-analytics.com is already in pro-onlydomains.txt; verified 2026-04-26
 adservice.google.com
