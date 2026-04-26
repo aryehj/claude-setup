@@ -1464,3 +1464,101 @@ purposes — uncommenting one will re-fetch on the next refresh.
 - Five new unit tests in `tests/test_research.py` cover the helper:
   happy path, no-op, all-sources-removed, missing cache dir, and
   commented-out-URL handling.
+
+## ADR-027: research.py: route Vane through Squid via `HTTPS_PROXY` only
+
+**Date:** 2026-04-26
+**Status:** Accepted
+
+### Context
+
+`research.py` is built around a default-allow Squid proxy with a denylist
+(ADR-021, ADR-023): the design intent is that Vane can scrape arbitrary
+URLs *unless* they match the denylist, and that all of Vane's egress is
+visible and filterable at Squid.
+
+Initially the Vane container was started with only `SEARXNG_API_URL` set —
+no proxy env vars. Squid was not in Vane's egress path at all. Vane's
+scrape attempts went direct to the docker bridge, hit the L3 default
+REJECT in the `RESEARCH` iptables chain, and failed silently. Vane fell
+back to whatever snippets SearXNG returned, the LLM synthesized from
+snippets, and (because the LLM has no introspection into the upstream
+pipeline) reported its synthesis as "scraping" with fabricated
+success/failure tallies. Symptoms looked like "search just doesn't work
+very well" rather than a configuration bug.
+
+### First attempt and the regression it caused
+
+The obvious fix was to pass all three proxy env vars on Vane's
+`docker run`:
+
+```
+HTTP_PROXY=http://{bridge_ip}:{SQUID_PORT}
+HTTPS_PROXY=http://{bridge_ip}:{SQUID_PORT}
+NO_PROXY={CONTAINER_SEARXNG},host.docker.internal,localhost,127.0.0.1
+```
+
+This made queries hang indefinitely. The `/api/chat` SSE stream stayed
+open, Vane emitted the "searching" UI-state event with the decomposed
+sub-queries, and then nothing — no SearXNG calls, no Squid traffic, no
+errors. A sidecar `curl` with the *exact same* env vars worked perfectly
+(curl correctly applies `NO_PROXY` and bypassed Squid for the SearXNG
+hostname), proving the env values were correct and the regression was
+specifically Vane's HTTP-client behavior. Some interaction between
+`HTTP_PROXY` and Vane's HTTP client (Next.js / its langchain pipeline)
+silently swallowed the SearXNG `fetch()` for `http://research-searxng:8080`.
+
+### Decision
+
+Pass only two env vars on Vane's `docker run` in `ensure_vane_container`:
+
+```
+HTTPS_PROXY=http://{bridge_ip}:{SQUID_PORT}
+NO_PROXY={CONTAINER_SEARXNG},host.docker.internal,localhost,127.0.0.1
+```
+
+Specifically: **drop `HTTP_PROXY`**. That single variable is what triggers
+Vane's bad path. With only `HTTPS_PROXY` set:
+
+- `http://research-searxng:8080` (Vane → SearXNG) — no proxy applies
+  (HTTPS_PROXY only governs HTTPS URLs) → goes direct over the docker
+  bridge → works.
+- `http://host.docker.internal:8000` (Vane → host LLM) — same; direct →
+  works.
+- `https://*` scrape targets — `HTTPS_PROXY` applies → routed through
+  Squid → denylist enforced as designed.
+
+`NO_PROXY` is kept as belt-and-suspenders — even though `HTTP_PROXY` is
+no longer set, some libraries consult `NO_PROXY` independently when
+choosing whether to apply `HTTPS_PROXY`. Including the in-network
+hostnames there ensures the SearXNG call is unambiguously direct.
+
+The change only takes effect on container creation, so picking it up on
+an existing install requires `docker rm -f research-vane && ./research.py`
+(or a full `--rebuild`).
+
+### Consequences
+
+- **HTTPS scrape targets are routed through Squid** and the denylist
+  applies to them. The vast majority of the modern web is HTTPS, so the
+  "default-allow with denylist" design intent is in force for the cases
+  that matter.
+- **HTTP-only scrape targets (a small minority of the web) are not
+  reachable** by Vane — they go direct and hit the L3 REJECT. Accepted as
+  a tradeoff for keeping the SearXNG path working without depending on
+  Vane's HTTP-client honoring `NO_PROXY` correctly.
+- Squid's `access.log` becomes the authoritative record of HTTPS scrapes,
+  with `TCP_DENIED` markers for denylist hits. More reliable than any
+  system-prompt instruction asking the model to list scraped URLs
+  (which only produces confabulated summaries).
+- The deeper "why does setting `HTTP_PROXY` break Vane's `fetch()`"
+  question is left unresolved. A more principled fix would require
+  tracing through Vane's (Perplexica-fork) HTTP-client setup. Out of
+  scope here — the workaround is robust and the tradeoff is acceptable.
+- A smoke test in `tests/probe-vane-egress.sh` checks that `HTTPS_PROXY`
+  and `NO_PROXY` are present on the running container and that a sidecar
+  HTTPS request through Squid succeeds.
+- The `start-agent.sh` Vane container is *not* changed by this ADR.
+  That container shares a bridge with `claude-agent`, which is a
+  different threat model (search-result-borne prompt injection reaching
+  the coding agent). Tracked separately.

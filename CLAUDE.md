@@ -166,6 +166,22 @@ Squid 6 rejects ACL files that contain both a domain and one of its subdomains â
 `start-agent.sh` stays on tinyproxy (~280-entry allowlist, regex fine at that
 scale). See ADR-021.
 
+**`research.py` Vane container is wired through Squid via `HTTPS_PROXY` only.**
+`ensure_vane_container` passes `HTTPS_PROXY=http://{bridge_ip}:8888` plus
+`NO_PROXY=research-searxng,host.docker.internal,localhost,127.0.0.1`.
+**Setting `HTTP_PROXY` is deliberately avoided** â€” when both were set, Vane's
+HTTP client silently swallowed the `fetch()` to `http://research-searxng:8080`
+(SearXNG) even though `NO_PROXY` should have exempted it; queries hung at the
+"searching" UI state with no further events. A sidecar curl with the same env
+worked fine, so the regression was specifically Vane's HTTP-client interaction
+with `HTTP_PROXY`. The HTTPS-only configuration leaves http:// targets
+(SearXNG, host LLM) on the direct bridge path and routes https:// scrapes
+through Squid where the denylist applies. Cost: HTTP-only scrape targets
+(small slice of the web) hit the L3 REJECT and aren't fetchable. Existing
+installs need `docker rm -f research-vane && ./research.py` (or full
+`--rebuild`) to pick up the env vars. `tests/probe-vane-egress.sh` checks the
+env vars and a sidecar HTTPS round-trip. See ADR-027.
+
 **Git identity is set via both `~/.gitconfig` and environment variables.**
 `git config --global` is run during image build so `/root/.gitconfig` exists in
 the image. However, Claude Code's bubblewrap sandbox may not expose
