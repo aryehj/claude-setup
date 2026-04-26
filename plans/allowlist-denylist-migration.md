@@ -4,7 +4,7 @@
 
 - [x] Phase 1: Expand start-agent.sh allowlist (Haiku ok)
 - [x] Phase 2: Convert research.py to layered denylist (Opus recommended)
-- [ ] Phase 3: Update documentation and ADRs
+- [x] Phase 3: Update documentation and ADRs
 
 ## Context
 
