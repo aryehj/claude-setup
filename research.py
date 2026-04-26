@@ -343,19 +343,43 @@ def refresh_denylist_cache(paths: Paths, *, abort_on_any_failure: bool = False) 
 
 # ── Pure helpers ───────────────────────────────────────────────────────────────
 
+def _prune_subdomains(domains: List[str]) -> List[str]:
+    """Remove entries that are subdomains of other entries in the list.
+
+    Squid 6 rejects a dstdomain ACL file that contains both a domain and one
+    of its subdomains — the subdomain is redundant and treated as a fatal error.
+    If both 'sub.example.com' and 'example.com' are present, only 'example.com'
+    is kept (it already covers the subdomain via suffix matching).
+    """
+    domain_set = set(domains)
+    result: List[str] = []
+    for domain in domains:
+        parts = domain.split(".")
+        covered = any(
+            ".".join(parts[i:]) in domain_set
+            for i in range(1, len(parts))
+        )
+        if not covered:
+            result.append(domain)
+    return result
+
+
 def denylist_to_squid_acl(domains: List[str]) -> str:
     """Convert bare domain names to a Squid dstdomain ACL file body.
 
     Each entry becomes .example.com (dotted-suffix form). Squid matches this
     as example.com itself plus any subdomain — O(1) hash lookup, no regex NFA.
+
+    Subdomains of entries already present in the list are pruned first;
+    Squid 6 treats redundant subdomain entries as a fatal config error.
     """
-    out: List[str] = []
+    clean: List[str] = []
     for domain in domains:
         domain = domain.split("#", 1)[0].strip()
-        if not domain:
-            continue
-        out.append(f".{domain}")
-    return "\n".join(out) + "\n" if out else ""
+        if domain:
+            clean.append(domain)
+    pruned = _prune_subdomains(clean)
+    return "\n".join(f".{d}" for d in pruned) + "\n" if pruned else ""
 
 
 def render_searxng_settings(bridge_ip: str, proxy_port: int, secret: str) -> str:

@@ -5,6 +5,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from research import (
+    _prune_subdomains,
     denylist_to_squid_acl,
     render_iptables_apply_script,
     render_searxng_settings,
@@ -51,6 +52,37 @@ def test_denylist_squid_acl_no_regex_escaping():
 def test_denylist_squid_acl_empty_input():
     assert denylist_to_squid_acl([]) == ""
     assert denylist_to_squid_acl(["# only comments"]) == ""
+
+
+# ── _prune_subdomains ────────────────────────────────────────────────────────
+
+def test_prune_subdomains_drops_covered_entry():
+    result = _prune_subdomains(["sub.example.com", "example.com"])
+    assert "sub.example.com" not in result
+    assert "example.com" in result
+
+
+def test_prune_subdomains_keeps_disjoint_entries():
+    result = _prune_subdomains(["alpha.com", "beta.com"])
+    assert set(result) == {"alpha.com", "beta.com"}
+
+
+def test_prune_subdomains_deep_nesting():
+    # only the shallowest ancestor is kept
+    result = _prune_subdomains(["a.b.example.com", "b.example.com", "example.com"])
+    assert result == ["example.com"]
+
+
+def test_prune_subdomains_empty():
+    assert _prune_subdomains([]) == []
+
+
+def test_denylist_squid_acl_no_subdomain_redundancy():
+    # Squid 6 rejects a file where both a domain and its subdomain appear.
+    result = denylist_to_squid_acl(["sub.example.com", "example.com"])
+    lines = result.strip().splitlines()
+    assert ".example.com" in lines
+    assert ".sub.example.com" not in lines
 
 
 # ── render_searxng_settings ───────────────────────────────────────────────────
