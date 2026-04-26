@@ -1699,3 +1699,57 @@ Vane's SearXNG calls and LLM calls go direct over the bridge as intended.
   decision.
 - Existing installs need `docker rm -f research-vane && ./research.py` (or full
   `--rebuild`) to pick up the corrected env vars.
+
+---
+
+## ADR-030: Temperature mutation via config.json + container restart in run_vane.py
+
+**Date:** 2026-04-26
+**Status:** Accepted
+
+### Context
+
+The Vane confirm-sweep (`tests/vane-eval/run_vane.py`) needs to replay cheap-phase
+cells with varying temperature, prompt style, and model through Vane's full search
+pipeline. Vane's `POST /api/search` body (`src/app/api/search/route.ts`) accepts
+only `chatModel`, `embeddingModel`, `query`, `sources`, `optimizationMode`,
+`history`, `systemInstructions`, and `stream` — no `temperature` or thinking flag.
+The openaiLLM provider inside Vane falls back to `this.config.options?.temperature`
+when the search agent calls `generateText` without an explicit options object,
+meaning temperature lives in the provider's config record, not in the API request.
+
+### Decision
+
+`run_vane.py` controls temperature by:
+
+1. Reading `~/.research/vane-data/data/config.json` (the host path bound into the
+   container as `/home/vane/data/config.json`).
+2. Mutating `modelProviders[id=<provider_id>].config.options.temperature` to the
+   desired value via `mutate_temperature()`, which is idempotent — returns `False`
+   without writing if the value already matches.
+3. Calling `docker restart research-vane` and polling
+   `GET /api/providers` until a 200 response before issuing the next cell's search
+   request. Restarts only occur when the value actually changed.
+
+Prompt style is handled without a restart: `research_system` maps to
+`systemInstructions` in the request body; `structured` prepends a format hint to
+`query`; `bare` leaves both fields empty.
+
+Thinking is not exposed by Vane's API or config — it remains a model-selection
+knob exactly as in `run_cheap.py` (`cell.thinking` selects a model with
+server-side reasoning enabled).
+
+Pass `--no-restart` to skip the docker restart + config write (useful when
+running a single-cell smoke test where temperature is known to be already correct).
+
+### Consequences
+
+- Container restarts add ~10–30s per temperature boundary. A sweep with three
+  distinct temperature values across three cells incurs at most two restarts.
+- If `~/.research/vane-data/data/config.json` doesn't exist (e.g., the Vane
+  container was never started, or the data dir is missing), temperature mutation
+  silently fails with a warning and the cell runs with whatever temperature Vane
+  currently has.
+- `run_vane.py` is designed to run on the macOS host, not from inside the
+  `start-claude.sh` microVM — the dev container has no route to `localhost:3000`
+  and no `docker` binary for the research VM.

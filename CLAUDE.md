@@ -22,8 +22,11 @@ tests/                       — unit tests and eval harness
   vane-eval/                           — Vane research-quality eval harness (OFAT sweep)
     queries.md                         — six research queries with reference answers
     run_cheap.py                       — cheap phase: OFAT sweep against omlx directly
+    select_winners.py                  — pick winner + ablations from a graded cheap run
+    run_vane.py                        — Vane confirm phase: replay winner through full pipeline
     lib/                               — shared helpers (cells.py, queries.py)
     test_lib.py, test_run_cheap.py     — pytest suites for lib + run_cheap
+    test_run_vane.py                   — pytest suite for select_winners + run_vane helpers
 ROADMAP.md                   — planned work
 README.md                    — usage reference
 ADR.md                       — architecture decision records

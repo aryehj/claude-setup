@@ -570,10 +570,10 @@ To pick up template updates after `git pull`:
 
 ## Research-quality eval harness
 
-`tests/vane-eval/` holds an OFAT sweep that measures how model, prompt style,
-temperature, and thinking mode affect single-turn research output quality.
+`tests/vane-eval/` holds a two-phase OFAT sweep that measures how model, prompt
+style, temperature, and thinking mode affect single-turn research output quality.
 
-**Cheap phase** (no Vane in the loop — hits omlx directly):
+**Phase 1 — Cheap sweep** (hits omlx directly, no Vane pipeline):
 
 ```bash
 export OMLX_API_KEY=your-key
@@ -585,13 +585,39 @@ uv run python tests/vane-eval/run_cheap.py \
   --models "gemma-4-26b-a4b-it-8bit,gemma-4-E4B-it-MLX-8bit" \
   --queries q1
 
-# Full sweep (all discovered models × all six queries; ~54 calls for 4 models)
+# Full sweep (all discovered models × all six queries)
 uv run python tests/vane-eval/run_cheap.py --base-url "$OMLX_BASE"
 ```
 
-Output lands in `tests/vane-eval/results/cheap-<UTC-ts>/` — one `.md` per cell
-plus a `MANIFEST.md`. Open a Claude Code session and paste the grading prompt
-from `tests/vane-eval/JUDGE.md` (added in Phase 4) to score the results.
+Output: `tests/vane-eval/results/cheap-<UTC-ts>/` — one `.md` per cell plus
+`MANIFEST.md`. Grade the results using `tests/vane-eval/JUDGE.md` (added in
+Phase 4). A `SCORES.md` is written into the run dir by the grader.
+
+**Phase 2 — Pick winners and confirm through Vane** (run from the macOS host
+where `localhost:3000` resolves to Vane and `docker` is reachable):
+
+```bash
+# Select winner + ≤2 ablations from the graded cheap run
+uv run python tests/vane-eval/select_winners.py \
+  --from tests/vane-eval/results/cheap-<ts>
+# Edit results/cheap-<ts>/winners.json if needed, then:
+
+# Replay winner through Vane's full SearXNG → scrape → cite → answer pipeline
+uv run python tests/vane-eval/run_vane.py \
+  --winners tests/vane-eval/results/cheap-<ts>/winners.json \
+  --queries q1,q3,q5
+```
+
+`select_winners.py` pre-fills `winners.json` from `SCORES.md` if grading has
+already been done; otherwise it writes a hand-edit template. `run_vane.py` hits
+`POST /api/search` for each cell × query and adds a Citations list and Metrics
+block (`citation_count`, `edu_gov_wiki_share`, `denylist_hits`) to each cell
+file. Temperature is mutated via `~/.research/vane-data/data/config.json` and
+the container is restarted between cells when the value changes (Vane's search
+API does not accept a per-request `temperature` parameter).
+
+Output: `tests/vane-eval/results/vane-<UTC-ts>/` — one `.md` per cell plus
+`MANIFEST.md` linking back to the source cheap run.
 
 Tests: `uv run --with pytest pytest tests/vane-eval/`
 
