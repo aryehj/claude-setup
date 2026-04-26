@@ -1180,3 +1180,42 @@ Key implementation details:
   default to Squid; small allowlists are fine with tinyproxy.
 - Squid is an additional VM-level dependency for the `research` Colima profile,
   installed idempotently via `apt-get install squid` on first bring-up.
+
+## ADR-022: Hard-exit on legacy allowlist.txt; no smooth migration
+
+**Date:** 2026-04-26
+**Status:** Accepted
+
+### Context
+
+The allowlist→denylist migration (ADR-019 → ADR-021) replaced `~/.research/allowlist.txt`
+with a three-file layout (`denylist-sources.txt`, `denylist-additions.txt`,
+`denylist-overrides.txt`) plus a `denylist-cache/` directory. An existing
+installation has the old file; a new `research.py` invocation would proceed past
+the seed step (which checks for the *new* files, not the old one), silently
+ignore the old allowlist, and bring up the research VM in denylist mode with no
+prior setup — either fetching upstream feeds from scratch or failing if the
+sources file is misconfigured.
+
+### Decision
+
+Detect the old layout at startup: if `~/.research/allowlist.txt` exists,
+`_check_legacy_allowlist()` prints a hard error naming the two manual steps
+(`rm -rf ~/.research/`, then `./research.py --rebuild`) and exits non-zero
+immediately, before any seeding, fetching, or VM bring-up.
+
+No automatic migration: don't translate `allowlist.txt` to an equivalent
+denylist, don't rename it, don't seed around it. YAGNI — the old allowlist
+model is incompatible with the new one by design (allowlist vs. denylist mode),
+and a translated allowlist would be semantically wrong anyway. The user must
+take the explicit action.
+
+### Consequences
+
+- Existing users get a clear, actionable error instead of a silent behavior
+  change or a partially-initialized state.
+- `denylist-overrides.txt` and any custom edits to old `allowlist.txt` are lost
+  on `rm -rf ~/.research/`. Accepted: users have had no time to accumulate
+  meaningful state in the new layout, and the old allowlist was superseded.
+- No migration code to maintain. The check is a two-line conditional; once the
+  user has migrated, it never fires again.

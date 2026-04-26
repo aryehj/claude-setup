@@ -11,8 +11,9 @@ start-agent.sh               — Colima path; shared VM + container with Claude 
 research.py                  — Python script; isolated Colima VM + Vane + SearXNG research environment
 dockerfiles/                 — Dockerfiles built by start-agent.sh (claude-agent.Dockerfile)
 templates/                   — seed templates copied to host state dirs on first run
-  global-claude.md           — seeded to ~/.claude-containers/shared/CLAUDE.md
-  research-allowlist.txt     — seeded to ~/.research/allowlist.txt by research.py
+  global-claude.md                    — seeded to ~/.claude-containers/shared/CLAUDE.md
+  research-denylist-sources.txt       — seeded to ~/.research/denylist-sources.txt by research.py
+  research-denylist-additions.txt     — seeded to ~/.research/denylist-additions.txt by research.py
 skills/                      — reusable Claude Code skills (back up of ~/.claude/skills/)
 plans/                       — implementation plans written by /plan skill
 tests/                       — unit tests (test_research.py covers research.py pure helpers)
@@ -129,6 +130,12 @@ On first run both files are seeded to `~/.research/`. The composed denylist is
 feeds are URL-pinned downloads cached in `~/.research/denylist-cache/`. On-disk
 files are never silently overwritten — use `--reseed-denylist` to pick up template
 updates. See ADR-019 and ADR-020.
+
+**`research.py` hard-exits if `~/.research/allowlist.txt` is detected.**
+Installations predating the denylist migration have this file. `research.py`
+prints the two manual steps required (`rm -rf ~/.research/`, then `--rebuild`)
+and exits non-zero. No automatic migration — the user must take the explicit
+action. See ADR-022.
 
 **`research.py` uses Squid (not tinyproxy) as the in-VM filtering proxy.**
 Squid's `dstdomain` ACL performs O(1) hash-table lookups, supporting million-entry

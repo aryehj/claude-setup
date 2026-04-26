@@ -470,6 +470,15 @@ On first run, seeds `~/.research/denylist-sources.txt` and `denylist-additions.t
 from `templates/`. Edit the on-disk files and run `--reload-denylist` to apply
 changes. To pick up upstream template updates, run `--reseed-denylist`.
 
+**Existing users:** if you ran `research.py` before the denylist migration, you
+have a `~/.research/allowlist.txt`. On next launch `research.py` will print the
+required steps and exit:
+
+```bash
+rm -rf ~/.research/
+./research.py --rebuild
+```
+
 ## Egress denylist
 
 research.py uses a **denylist** (default-allow) so Vane can scrape arbitrary
