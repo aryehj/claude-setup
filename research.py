@@ -213,6 +213,24 @@ def _parse_gib(raw: str) -> int:
 # ── Denylist seed / compose / fetch ────────────────────────────────────────────
 
 
+def _check_legacy_allowlist(paths: Paths) -> None:
+    """Exit loudly if the old allowlist-based layout is detected."""
+    legacy = paths.base / "allowlist.txt"
+    if legacy.exists():
+        print(
+            f"error: {legacy} exists — this installation predates the denylist migration.\n"
+            "\n"
+            "Manual steps required:\n"
+            f"  1. rm -rf {paths.base}\n"
+            "  2. ./research.py --rebuild\n"
+            "\n"
+            "The old allowlist.txt is no longer used. Delete the directory and let\n"
+            "research.py recreate it from the current templates.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+
 def _seed_file(template: Path, dest: Path, label: str, force: bool) -> bool:
     """Copy template → dest unless dest exists (or force=True). Returns True if written."""
     if dest.exists() and not force:
@@ -955,6 +973,7 @@ def main() -> None:
     args = parse_args()
 
     paths = Paths()
+    _check_legacy_allowlist(paths)
     config = VmConfig(
         memory_gib=args.memory,
         cpus=args.cpus,

@@ -6,9 +6,11 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from research import (
     _prune_subdomains,
+    compose_denylist,
     denylist_to_squid_acl,
     render_iptables_apply_script,
     render_searxng_settings,
+    Paths,
 )
 
 
@@ -187,6 +189,126 @@ def test_iptables_allows_intra_net_8080():
     )
     assert "--dport 8080" in script
     assert "172.20.0.0/24" in script
+
+
+# ── compose_denylist ─────────────────────────────────────────────────────────
+
+def _make_paths(tmp_path) -> Paths:
+    p = Paths(base=tmp_path)
+    p.denylist_cache_dir.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def test_compose_denylist_union_cache_and_additions(tmp_path):
+    p = _make_paths(tmp_path)
+    (p.denylist_cache_dir / "feed.txt").write_text("evil.com\n")
+    p.denylist_additions_file.write_text("pastebin.com\n")
+    result = compose_denylist(p)
+    assert "evil.com" in result
+    assert "pastebin.com" in result
+
+
+def test_compose_denylist_overrides_subtract(tmp_path):
+    p = _make_paths(tmp_path)
+    (p.denylist_cache_dir / "feed.txt").write_text("evil.com\nfalsepositiv.com\n")
+    p.denylist_additions_file.write_text("pastebin.com\n")
+    p.denylist_overrides_file.write_text("falsepositiv.com\n")
+    result = compose_denylist(p)
+    assert "evil.com" in result
+    assert "pastebin.com" in result
+    assert "falsepositiv.com" not in result
+
+
+def test_compose_denylist_overrides_can_remove_addition(tmp_path):
+    p = _make_paths(tmp_path)
+    p.denylist_additions_file.write_text("pastebin.com\n")
+    p.denylist_overrides_file.write_text("pastebin.com\n")
+    result = compose_denylist(p)
+    assert "pastebin.com" not in result
+
+
+def test_compose_denylist_multiple_cache_files_merged(tmp_path):
+    p = _make_paths(tmp_path)
+    (p.denylist_cache_dir / "pro.txt").write_text("alpha.com\n")
+    (p.denylist_cache_dir / "fake.txt").write_text("beta.com\n")
+    result = compose_denylist(p)
+    assert "alpha.com" in result
+    assert "beta.com" in result
+
+
+def test_compose_denylist_sorted_and_deduped(tmp_path):
+    p = _make_paths(tmp_path)
+    (p.denylist_cache_dir / "feed.txt").write_text("z.com\na.com\nz.com\n")
+    p.denylist_additions_file.write_text("m.com\na.com\n")
+    result = compose_denylist(p)
+    assert result == sorted(set(result))
+    assert result.count("a.com") == 1
+    assert result.count("z.com") == 1
+
+
+def test_compose_denylist_missing_additions_tolerated(tmp_path):
+    p = _make_paths(tmp_path)
+    (p.denylist_cache_dir / "feed.txt").write_text("evil.com\n")
+    # additions file does not exist
+    result = compose_denylist(p)
+    assert "evil.com" in result
+
+
+def test_compose_denylist_missing_overrides_tolerated(tmp_path):
+    p = _make_paths(tmp_path)
+    (p.denylist_cache_dir / "feed.txt").write_text("evil.com\n")
+    # overrides file does not exist — should not crash
+    result = compose_denylist(p)
+    assert "evil.com" in result
+
+
+def test_compose_denylist_empty_cache_dir(tmp_path):
+    p = _make_paths(tmp_path)
+    p.denylist_additions_file.write_text("pastebin.com\n")
+    result = compose_denylist(p)
+    assert result == ["pastebin.com"]
+
+
+def test_compose_denylist_strips_comments_and_blank_lines(tmp_path):
+    p = _make_paths(tmp_path)
+    (p.denylist_cache_dir / "feed.txt").write_text(
+        "# a comment\n\nevil.com\n  # another\nspam.com\n"
+    )
+    result = compose_denylist(p)
+    assert "evil.com" in result
+    assert "spam.com" in result
+    assert len([d for d in result if d.startswith("#")]) == 0
+
+
+def test_compose_denylist_strips_hosts_format(tmp_path):
+    p = _make_paths(tmp_path)
+    (p.denylist_cache_dir / "feed.txt").write_text("0.0.0.0 evil.com\n127.0.0.1 spam.com\n")
+    result = compose_denylist(p)
+    assert "evil.com" in result
+    assert "spam.com" in result
+    assert any("0.0.0.0" in d for d in result) is False
+
+
+def test_compose_denylist_strips_wildcard_prefix(tmp_path):
+    p = _make_paths(tmp_path)
+    (p.denylist_cache_dir / "feed.txt").write_text("*.evil.com\n")
+    result = compose_denylist(p)
+    assert "evil.com" in result
+    assert "*.evil.com" not in result
+
+
+def test_compose_denylist_set_algebra_invariant(tmp_path):
+    # Final = (cache ∪ additions) − overrides
+    p = _make_paths(tmp_path)
+    cache = {"a.com", "b.com", "c.com"}
+    additions = {"b.com", "d.com"}
+    overrides = {"c.com", "d.com"}
+    (p.denylist_cache_dir / "feed.txt").write_text("\n".join(cache) + "\n")
+    p.denylist_additions_file.write_text("\n".join(additions) + "\n")
+    p.denylist_overrides_file.write_text("\n".join(overrides) + "\n")
+    result = set(compose_denylist(p))
+    expected = (cache | additions) - overrides
+    assert result == expected
 
 
 if __name__ == "__main__":

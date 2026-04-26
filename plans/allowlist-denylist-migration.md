@@ -4,7 +4,6 @@
 
 - [x] Phase 1: Expand start-agent.sh allowlist (Haiku ok)
 - [x] Phase 2: Convert research.py to layered denylist (Opus recommended)
-  - Sub-phase deferred: migration notice (step 13) + new compose_denylist tests
 - [ ] Phase 3: Update documentation and ADRs
 
 ## Context
@@ -324,11 +323,12 @@ Final denylist = (upstream-feeds ∪ additions) − overrides
     - Line 809: status printout
 
 13. **Migration handling for existing users**:
-    - On first run, if `~/.research/allowlist.txt` exists and the new files don't,
-      print a one-time migration notice explaining the change and pointing to
-      `--refresh-denylist`.
-    - Do not delete the old allowlist file — leave it as a reference for the user to
-      compare against.
+    - On startup, if `~/.research/allowlist.txt` exists, print a hard warning that
+      the allowlist model has been replaced and the user must manually:
+        1. Delete `~/.research/` (or at minimum `~/.research/allowlist.txt`).
+        2. Run `./research.py --rebuild` to recreate from scratch.
+    - Then exit non-zero. Do not attempt to migrate, translate, or seed anything.
+      Force the user to take the explicit action.
 
 14. **Delete the old template** `templates/research-allowlist.txt` once Phase 1 has
     consumed it (Phase 1 copies entries into start-agent.sh; nothing else references
