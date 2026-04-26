@@ -27,7 +27,7 @@ if str(_HERE) not in sys.path:
 from lib.cells import Cell, call_omlx, discover_omlx_models, write_cell_output
 from lib.queries import load as load_queries
 
-_DEFAULT_BASE_URL = "http://host.docker.internal:8000/v1"
+_DEFAULT_BASE_URL = "http://0.0.0.0:8000/v1"
 _PROMPT_STYLES = ["bare", "structured", "research_system"]
 _TEMPERATURES = [0.0, 0.3, 0.7]
 _THINKING_VALUES = [False, True]
