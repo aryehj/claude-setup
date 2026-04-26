@@ -905,6 +905,7 @@ def ensure_vane_container(paths: Paths, config: VmConfig) -> None:
                 "--add-host", "host.docker.internal:host-gateway",
                 "-p", f"{config.vane_port}:3000",
                 "-e", f"SEARXNG_API_URL=http://{CONTAINER_SEARXNG}:8080",
+                "-e", f"HTTP_PROXY=http://{config.bridge_ip}:{SQUID_PORT}",
                 "-e", f"HTTPS_PROXY=http://{config.bridge_ip}:{SQUID_PORT}",
                 "-e", f"NO_PROXY={CONTAINER_SEARXNG},host.docker.internal,localhost,127.0.0.1",
                 "-v", f"{paths.vane_data_dir}:/home/vane/data",

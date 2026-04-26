@@ -391,21 +391,21 @@ Squid 6 rejects ACL files that contain both a domain and one of its subdomains �
 `start-agent.sh` stays on tinyproxy (~280-entry allowlist, regex fine at that
 scale). See ADR-021.
 
-**`research.py` Vane container is wired through Squid via `HTTPS_PROXY` only.**
-`ensure_vane_container` passes `HTTPS_PROXY=http://{bridge_ip}:8888` plus
+**`research.py` Vane container is wired through Squid via `HTTP_PROXY` and `HTTPS_PROXY`.**
+`ensure_vane_container` passes all three proxy env vars: `HTTP_PROXY`,
+`HTTPS_PROXY` (both `http://{bridge_ip}:8888`), and
 `NO_PROXY=research-searxng,host.docker.internal,localhost,127.0.0.1`.
-**Setting `HTTP_PROXY` is deliberately avoided** — when both were set, Vane's
-HTTP client silently swallowed the `fetch()` to `http://research-searxng:8080`
-(SearXNG) even though `NO_PROXY` should have exempted it; queries hung at the
-"searching" UI state with no further events. A sidecar curl with the same env
-worked fine, so the regression was specifically Vane's HTTP-client interaction
-with `HTTP_PROXY`. The HTTPS-only configuration leaves http:// targets
-(SearXNG, host LLM) on the direct bridge path and routes https:// scrapes
-through Squid where the denylist applies. Cost: HTTP-only scrape targets
-(small slice of the web) hit the L3 REJECT and aren't fetchable. Existing
-installs need `docker rm -f research-vane && ./research.py` (or full
-`--rebuild`) to pick up the env vars. `tests/probe-vane-egress.sh` checks the
-env vars and a sidecar HTTPS round-trip. See ADR-027.
+The structural reason: the `RESEARCH` iptables chain REJECTs all
+research-net→external traffic, so both HTTP and HTTPS scrape targets need a
+proxy path out. `NO_PROXY` exempts in-network direct-bridge destinations
+(SearXNG and the host LLM endpoint). An earlier HTTPS-only configuration
+(ADR-027) was based on a wrong-Vane observation during a debug session where
+two Vane containers shared host port 3000; post-dedup testing confirmed
+`HTTP_PROXY` causes no regression on `research-vane`. See ADR-029 (supersedes
+ADR-027 after the ADR-028 dedup). Existing installs need
+`docker rm -f research-vane && ./research.py` (or full `--rebuild`) to pick up
+the corrected env vars. `tests/probe-vane-egress.sh` checks all three env vars
+and a sidecar HTTPS round-trip.
 
 ## Commit style
 

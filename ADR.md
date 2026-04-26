@@ -1470,7 +1470,7 @@ purposes — uncommenting one will re-fetch on the next refresh.
 ## ADR-027: research.py: route Vane through Squid via `HTTPS_PROXY` only
 
 **Date:** 2026-04-26
-**Status:** Accepted
+**Status:** Superseded by ADR-029
 
 ### Context
 
@@ -1565,6 +1565,18 @@ an existing install requires `docker rm -f research-vane && ./research.py`
   different threat model (search-result-borne prompt injection reaching
   the coding agent). Tracked separately.
 
+### Update (post-dedup)
+
+ADR-028's dedup of the two Vane containers revealed that the original
+"queries hang" observation could not be reliably attributed to
+`research-vane` — during that debug session two Vane containers shared
+host port 3000, and the browser likely reached `start-agent.sh`'s Vane
+(different env, different SearXNG sibling name, different network). Direct
+re-testing post-dedup with `HTTP_PROXY` set on `research-vane` showed
+queries succeeding; Squid's `access.log` confirmed 80+ fresh CONNECT
+entries from Vane's IP, plus `TCP_DENIED/403` hits for denylist-blocked
+ad/tracking domains. The HTTPS-only workaround was unnecessary. See ADR-029.
+
 ## ADR-028: Extract Vane from start-agent.sh into standalone research.py
 
 **Date:** 2026-04-26
@@ -1628,3 +1640,62 @@ instance. The two SearXNG instances are independent by design (see Notes in
   "skip SearXNG (disables OpenCode websearch)".
 - The `start-agent.sh` allowlist no longer needs to accommodate Vane's scrape
   targets. Scrape-range decisions are `research.py`'s concern alone.
+
+## ADR-029: research.py: route Vane through Squid via both `HTTP_PROXY` and `HTTPS_PROXY`
+
+**Date:** 2026-04-26
+**Status:** Accepted (supersedes ADR-027)
+
+### Context
+
+ADR-027 documented an HTTPS-only proxy configuration for `research-vane`, based
+on an observation that setting `HTTP_PROXY` alongside `HTTPS_PROXY` caused Vane's
+queries to hang indefinitely at the "searching" UI state with no SearXNG calls
+visible in Squid. ADR-028 subsequently extracted Vane from `start-agent.sh` into
+`research.py`, which inadvertently revealed the root cause: during the original
+debug session, two separate Vane containers were bound to host port 3000
+simultaneously — one from `start-agent.sh` and one from `research.py`. The
+browser reached whichever won the bind, so observations about "research-vane's"
+behavior were actually observations about `start-agent.sh`'s Vane, which had a
+different SearXNG sibling name (`searxng` rather than `research-searxng`),
+different network configuration, and different env vars.
+
+Re-testing post-dedup with `HTTP_PROXY=http://{bridge_ip}:8888` set on
+`research-vane` showed queries succeeding end-to-end. Squid's `access.log`
+confirmed scrape CONNECTs from Vane's IP (80+ entries across Springer, Wikipedia,
+Substack, and others) plus `TCP_DENIED/403` hits for denylist-matched ad/tracking
+domains (`pagead2.googlesyndication.com`, `stats.g.doubleclick.net`,
+`securepubads.g.doubleclick.net`, `analytics.google.com`). The regression
+described in ADR-027 does not reproduce against `research-vane` post-dedup.
+
+### Decision
+
+`ensure_vane_container` passes all three proxy env vars on `docker run`:
+
+```
+HTTP_PROXY=http://{bridge_ip}:{SQUID_PORT}
+HTTPS_PROXY=http://{bridge_ip}:{SQUID_PORT}
+NO_PROXY={CONTAINER_SEARXNG},host.docker.internal,localhost,127.0.0.1
+```
+
+The structural justification is unchanged from what ADR-027 intended: the
+`RESEARCH` iptables chain (`research.py:486`) REJECTs all
+`research-net→external` traffic, so any scrape (HTTP or HTTPS) needs a proxy
+path out. `NO_PROXY` exempts `research-searxng` and `host.docker.internal` so
+Vane's SearXNG calls and LLM calls go direct over the bridge as intended.
+
+### Consequences
+
+- Both HTTP and HTTPS scrape targets are routed through Squid; the denylist
+  applies uniformly to all of Vane's outbound web traffic.
+- `tests/probe-vane-egress.sh` is updated to assert `HTTP_PROXY`, `HTTPS_PROXY`,
+  and `NO_PROXY` are all present and well-formed on the running container.
+- ADR-027 is marked Superseded. Its historical record of the wrong-Vane confusion
+  is preserved as institutional knowledge.
+- The deeper "why did the original observation look like Vane swallowing `fetch()`"
+  question is not investigated further. The most likely explanation per ADR-028 is
+  that the `start-agent.sh` Vane could not resolve `research-searxng` after the
+  user mutated its UI URL field, but that is not load-bearing for the current
+  decision.
+- Existing installs need `docker rm -f research-vane && ./research.py` (or full
+  `--rebuild`) to pick up the corrected env vars.

@@ -1,11 +1,9 @@
 #!/usr/bin/env bash
-# Probe that the research-vane container is wired through Squid for HTTPS egress.
+# Probe that the research-vane container is wired through Squid for full egress.
 # Three checks:
-#   1. HTTPS_PROXY and NO_PROXY are present on the running container,
-#      well-formed, and cover the in-network hostnames we depend on.
-#   2. HTTP_PROXY is NOT set — see ADR-027. Setting both broke Vane's
-#      fetch() to http://research-searxng:8080.
-#   3. A sidecar curl on research-net, configured with the same HTTPS_PROXY,
+#   1. HTTP_PROXY, HTTPS_PROXY, and NO_PROXY are all present on the running
+#      container, well-formed, and cover the in-network hostnames we depend on.
+#   2. A sidecar curl on research-net, configured with the same HTTPS_PROXY,
 #      can reach an HTTPS host through Squid.
 # Exit 0 if all pass, non-zero with diagnostics otherwise.
 #
@@ -30,11 +28,14 @@ HTTP_PROXY_VAL=$(env_get HTTP_PROXY)
 HTTPS_PROXY_VAL=$(env_get HTTPS_PROXY)
 NO_PROXY_VAL=$(env_get NO_PROXY)
 
-if [[ -n "$HTTP_PROXY_VAL" ]]; then
-  echo "FAIL: HTTP_PROXY is set (${HTTP_PROXY_VAL}) — must be unset (see ADR-027)"
+if [[ -z "$HTTP_PROXY_VAL" ]]; then
+  echo "FAIL: HTTP_PROXY is not set on research-vane"
+  fail=1
+elif [[ "$HTTP_PROXY_VAL" != http://*:* ]]; then
+  echo "FAIL: HTTP_PROXY=${HTTP_PROXY_VAL} is not a well-formed http://host:port URL"
   fail=1
 else
-  echo "ok   HTTP_PROXY=<unset>"
+  echo "ok   HTTP_PROXY=${HTTP_PROXY_VAL}"
 fi
 
 if [[ -z "$HTTPS_PROXY_VAL" ]]; then
