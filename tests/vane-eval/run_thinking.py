@@ -1,11 +1,12 @@
 """Interactive thinking-axis sweep against omlx.
 
 omlx exposes no per-request thinking toggle; thinking is a server-side
-per-loaded-model setting. Each (model, thinking-state) combination requires
-a manual omlx reload. This script structures the sweep to minimize reloads
-(2 × N_models total) and runs a full prompt × temperature × query grid
-within each phase so prompt×thinking and temperature×thinking interactions
-are observable.
+per-loaded-model setting. Toggling it requires the human to update each
+model's omlx configuration. This script asks the human exactly twice — once
+before the thinking=OFF phase (set every listed model to thinking off) and
+once before the thinking=ON phase — and then sweeps model × prompt ×
+temperature × query within each phase. omlx will swap models in and out of
+RAM automatically as requests come in; the human's time is what we minimize.
 
 Usage:
     uv run python tests/vane-eval/run_thinking.py [options]
@@ -42,12 +43,17 @@ _TEMPERATURES = [0.0, 0.3, 0.7]
 _MAX_CELLS_DEFAULT = 400
 
 
-def _prompt_user(model: str, thinking: bool) -> bool:
-    """Block until the human confirms omlx is configured. Returns False to skip."""
+def _prompt_user(thinking: bool, models: list[str]) -> bool:
+    """Block until the human confirms omlx is configured for the whole phase.
+
+    Returns False to skip the entire phase.
+    """
     state = "ON" if thinking else "OFF"
     print()
-    print(f"━━ {model} · thinking={state} ━━")
-    print(f"  Configure omlx so model {model!r} has thinking {state}.")
+    print(f"━━ thinking={state} phase ━━")
+    print(f"  Configure omlx so thinking is {state} for ALL of these models:")
+    for m in models:
+        print(f"    - {m}")
     print(f"  Then press Enter to continue, or type 'skip' to skip this phase.")
     answer = input("> ").strip().lower()
     return answer != "skip"
@@ -268,19 +274,18 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Temperatures: {active_temps}")
     print(f"Queries ({len(active_queries)}): {[q.id for q in active_queries]}")
     print(f"Phases per model: {['ON' if p else 'OFF' for p in phases]}")
-    print(f"Total cells: {total_cells}  (manual reloads: {len(active_models) * len(phases)})")
+    print(f"Total cells: {total_cells}  (human prompts: {len(phases)})")
 
     rows: list[dict] = []
     t_start = time.monotonic()
     done = 0
 
-    for model in active_models:
-        for thinking in phases:
-            if not _prompt_user(model, thinking):
-                print("  (skipped by user)")
-                # advance counter so progress numbers stay accurate
-                done += cells_per_phase
-                continue
+    for thinking in phases:
+        if not _prompt_user(thinking, active_models):
+            print("  (phase skipped by user)")
+            done += len(active_models) * cells_per_phase
+            continue
+        for model in active_models:
             phase_rows, done = _run_phase(
                 base_url=args.base_url,
                 model=model,
