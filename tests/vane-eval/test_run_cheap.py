@@ -38,22 +38,22 @@ skip_if_missing = pytest.mark.skipif(
 
 @skip_if_missing
 def test_ofat_cell_count_three_models():
-    """M=3 → M+5 = 8 unique cells (plan formula has -3 dedup, not -4)."""
+    """M=3 → 1 default + 2 extra models + 2 extra prompts + 2 extra temps = 7 unique cells."""
     cells = build_ofat_cells(
         models=["m1", "m2", "m3"],
         default_model="m1",
     )
-    assert len(cells) == 8, f"expected 8, got {len(cells)}: {[c.label for c in cells]}"
+    assert len(cells) == 7, f"expected 7, got {len(cells)}: {[c.label for c in cells]}"
 
 
 @skip_if_missing
 def test_ofat_cell_count_one_model():
-    """M=1 → M+5 = 6 unique cells."""
+    """M=1 → 1 default + 0 extra models + 2 extra prompts + 2 extra temps = 5 unique cells."""
     cells = build_ofat_cells(
         models=["m1"],
         default_model="m1",
     )
-    assert len(cells) == 6, f"expected 6, got {len(cells)}: {[c.label for c in cells]}"
+    assert len(cells) == 5, f"expected 5, got {len(cells)}: {[c.label for c in cells]}"
 
 
 @skip_if_missing
@@ -64,14 +64,12 @@ def test_ofat_no_duplicate_default():
         default_model="m1",
         default_prompt_style="structured",
         default_temperature=0.3,
-        default_thinking=False,
     )
     default_hits = [
         c for c in cells
         if c.model == "m1"
         and c.prompt_style == "structured"
         and c.temperature == 0.3
-        and c.thinking is False
     ]
     assert len(default_hits) == 1, (
         f"default cell appears {len(default_hits)} times (expected 1)"
@@ -106,11 +104,12 @@ def test_ofat_all_temperatures_covered():
 
 
 @skip_if_missing
-def test_ofat_both_thinking_values_covered():
-    """Both thinking=True and thinking=False appear in cells."""
-    cells = build_ofat_cells(models=["m1"], default_model="m1")
-    thinking_vals = {c.thinking for c in cells}
-    assert thinking_vals == {True, False}, f"thinking values: {thinking_vals}"
+def test_ofat_thinking_axis_omitted():
+    """Thinking axis is not swept — every cheap cell records thinking=False."""
+    cells = build_ofat_cells(models=["m1", "m2"], default_model="m1")
+    assert all(c.thinking is False for c in cells), (
+        f"thinking values: {[c.thinking for c in cells]}"
+    )
 
 
 @skip_if_missing

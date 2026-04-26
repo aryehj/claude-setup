@@ -30,7 +30,6 @@ from lib.queries import load as load_queries
 _DEFAULT_BASE_URL = "http://0.0.0.0:8000/v1"
 _PROMPT_STYLES = ["bare", "structured", "research_system"]
 _TEMPERATURES = [0.0, 0.3, 0.7]
-_THINKING_VALUES = [False, True]
 _MAX_CELLS_DEFAULT = 90
 
 
@@ -62,7 +61,6 @@ def build_ofat_cells(
     default_model: str,
     default_prompt_style: str = "structured",
     default_temperature: float = 0.3,
-    default_thinking: bool = False,
 ) -> list[Cell]:
     """Return the deduplicated OFAT cell list (query_id left blank; caller fills in).
 
@@ -70,13 +68,16 @@ def build_ofat_cells(
       - model axis:       every model in `models`
       - prompt axis:      bare / structured / research_system
       - temperature axis: 0.0 / 0.3 / 0.7
-      - thinking axis:    False / True
+
+    The thinking axis is intentionally omitted: omlx exposes no per-request
+    thinking toggle, so it cannot be swept programmatically. See run_thinking.py
+    for the interactive thinking comparison.
     """
     seen: set[tuple] = set()
     cells: list[Cell] = []
 
-    def _add(model: str, prompt_style: str, temperature: float, thinking: bool) -> None:
-        key = (model, prompt_style, temperature, thinking)
+    def _add(model: str, prompt_style: str, temperature: float) -> None:
+        key = (model, prompt_style, temperature)
         if key in seen:
             return
         seen.add(key)
@@ -85,31 +86,24 @@ def build_ofat_cells(
             model=model,
             prompt_style=prompt_style,
             temperature=temperature,
-            thinking=thinking,
-            label=(
-                f"{model} · {prompt_style} · t={temperature} · "
-                f"think={'on' if thinking else 'off'}"
-            ),
+            thinking=False,
+            label=f"{model} · {prompt_style} · t={temperature}",
         ))
 
     # Default cell first (so it is always index 0)
-    _add(default_model, default_prompt_style, default_temperature, default_thinking)
+    _add(default_model, default_prompt_style, default_temperature)
 
     # Model axis
     for m in models:
-        _add(m, default_prompt_style, default_temperature, default_thinking)
+        _add(m, default_prompt_style, default_temperature)
 
     # Prompt axis
     for ps in _PROMPT_STYLES:
-        _add(default_model, ps, default_temperature, default_thinking)
+        _add(default_model, ps, default_temperature)
 
     # Temperature axis
     for t in _TEMPERATURES:
-        _add(default_model, default_prompt_style, t, default_thinking)
-
-    # Thinking axis
-    for tk in _THINKING_VALUES:
-        _add(default_model, default_prompt_style, default_temperature, tk)
+        _add(default_model, default_prompt_style, t)
 
     return cells
 
@@ -123,7 +117,7 @@ def _print_plan(cells: list[Cell], queries: list, models: list[str]) -> None:
     print(f"  model axis    : {models}")
     print(f"  prompt axis   : {_PROMPT_STYLES}")
     print(f"  temperature   : {_TEMPERATURES}")
-    print(f"  thinking axis : {_THINKING_VALUES}")
+    print(f"  thinking axis : (handled separately — see run_thinking.py)")
     print()
 
 
@@ -145,7 +139,7 @@ def _write_manifest(
         f"- **omlx base URL:** `{base_url}`",
         f"- **models:** {models}",
         f"- **default:** model=`{cells[0].model if cells else 'n/a'}`, "
-        f"prompt=`structured`, temperature=`0.3`, thinking=`false`",
+        f"prompt=`structured`, temperature=`0.3` (thinking axis: see run_thinking.py)",
         f"- **total wall-clock:** {wall_s:.1f}s",
         "",
         "## Cells",
@@ -210,11 +204,18 @@ def main(argv: list[str] | None = None) -> int:
 
     default_model = active_models[0]
 
-    # Build OFAT cell list
+    # Build OFAT cell list, then group by model so all variants of one model
+    # run consecutively — omlx caches the active model in RAM, so each model
+    # switch is expensive. Stable sort preserves within-model axis order.
     cells = build_ofat_cells(
         models=active_models,
         default_model=default_model,
     )
+    model_order: dict[str, int] = {}
+    for c in cells:
+        if c.model not in model_order:
+            model_order[c.model] = len(model_order)
+    cells.sort(key=lambda c: model_order[c.model])
 
     # Load queries
     queries_path = _HERE / "queries.md"

@@ -21,7 +21,8 @@ tests/                       — unit tests and eval harness
   probe-vane-egress.sh                 — smoke test for research-vane egress env vars
   vane-eval/                           — Vane research-quality eval harness (OFAT sweep)
     queries.md                         — six research queries with reference answers
-    run_cheap.py                       — cheap phase: OFAT sweep against omlx directly
+    run_cheap.py                       — cheap phase: OFAT sweep against omlx directly (model/prompt/temperature axes)
+    run_thinking.py                    — interactive thinking on/off comparison (human reloads omlx model between phases)
     select_winners.py                  — pick winner + ablations from a graded cheap run
     run_vane.py                        — Vane confirm phase: replay winner through full pipeline
     lib/                               — shared helpers (cells.py, queries.py)
