@@ -402,6 +402,7 @@ http_port {bridge_ip}:{squid_port}
 visible_hostname research-squid
 
 acl denylist dstdomain "/etc/squid/denylist.txt"
+acl CONNECT method CONNECT
 acl SSL_ports port 443
 acl Safe_ports port 80 443
 
@@ -749,7 +750,17 @@ def apply_firewall(config: VmConfig, paths: Paths) -> None:
         vm_put_file(acl_file, "/etc/squid/denylist.txt")
 
         vm_sh("sudo systemctl enable --now squid >/dev/null 2>&1 || true")
-        vm_sh("sudo systemctl restart squid")
+        result = vm_sh("sudo systemctl restart squid", check=False)
+        if result.returncode != 0:
+            logs = vm_sh(
+                "sudo journalctl -u squid --no-pager -n 30 2>/dev/null || true",
+                check=False,
+            ).stdout
+            raise RuntimeError(
+                f"squid failed to start (exit {result.returncode}).\n"
+                f"stderr: {result.stderr.strip()}\n"
+                f"journalctl:\n{logs}"
+            )
 
         fw_content = fw_file.read_bytes()
         subprocess.run(
