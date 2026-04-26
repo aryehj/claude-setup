@@ -514,12 +514,35 @@ framing.
 
 | Feed | Purpose | Refresh cadence |
 |------|---------|-----------------|
-| `multi.pro` | Broad coverage — malware, tracking, content farms, AI slop | Monthly |
-| `fake` | Misinformation and propaganda sites | Monthly |
-| `tif` | Active threat intel — entries rotate as threats are taken down | Daily or weekly |
+| `pro-onlydomains` | Broad coverage — malware, tracking, content farms, AI slop | Monthly |
+| `fake-onlydomains` | Misinformation and propaganda sites | Monthly |
+| `tif-onlydomains` | Active threat intel — entries rotate as threats are taken down | Daily or weekly |
+
+All three are hagezi's `wildcard/<list>-onlydomains.txt` variants — one
+apex/registrable domain per line, with subdomain hierarchies pre-rolled-up.
+research.py prepends `.` at compose time so a single `.foo.com` entry covers
+the apex *and* all subdomains via Squid's `dstdomain` suffix-match. The
+older `domains/<list>.txt` form lists subdomains exhaustively but omits the
+apex, leaking `https://foo.com/` while blocking `https://www.foo.com/`. See
+ADR-025.
+
+A handful of canonical Google ad apexes (`doubleclick.net`,
+`googleadservices.com`, etc.) are deliberately omitted by hagezi to avoid
+breaking legitimate Google services. They're added back in
+`templates/research-denylist-additions.txt`.
 
 The `tif` feed degrades fastest when stale. Run `--refresh-denylist` weekly at
 minimum; daily is ideal if you use research.py regularly.
+
+### Cache hygiene
+
+`refresh_denylist_cache()` and `reload_denylist_fast_path()` both call
+`prune_orphan_cache_files()`, which deletes any `.txt` in
+`~/.research/denylist-cache/` whose basename doesn't match a current URL in
+`denylist-sources.txt`. Editing `sources.txt` (a template SHA bump, switching
+feed paths, or commenting out a feed) and running `--reload-denylist` or
+`--refresh-denylist` is therefore self-healing — no manual `rm` needed. Pruned
+filenames print as `==> Pruned orphan cache file: <name>`. See ADR-026.
 
 ### Editing the denylist
 

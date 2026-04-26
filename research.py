@@ -321,6 +321,30 @@ def _read_source_urls(sources_file: Path) -> List[str]:
     return urls
 
 
+def _expected_cache_basenames(urls: List[str]) -> set[str]:
+    """Map source URLs to the basenames refresh_denylist_cache writes."""
+    return {(url.rsplit("/", 1)[-1] or "feed.txt") for url in urls}
+
+
+def prune_orphan_cache_files(paths: Paths) -> List[str]:
+    """Delete cached feeds whose source URL is no longer in sources.txt.
+
+    Returns the list of removed basenames. Self-healing for the common case
+    where a template SHA bump or feed-path change leaves stale `.txt` files
+    in denylist_cache_dir — without this, compose_denylist's `*.txt` glob
+    would silently merge orphans alongside the new feeds.
+    """
+    if not paths.denylist_cache_dir.is_dir():
+        return []
+    expected = _expected_cache_basenames(_read_source_urls(paths.denylist_sources_file))
+    removed: List[str] = []
+    for cached in sorted(paths.denylist_cache_dir.glob("*.txt")):
+        if cached.name not in expected:
+            cached.unlink()
+            removed.append(cached.name)
+    return removed
+
+
 def refresh_denylist_cache(paths: Paths, *, abort_on_any_failure: bool = False) -> None:
     """Download each URL in denylist-sources.txt into denylist_cache_dir.
 
@@ -328,8 +352,14 @@ def refresh_denylist_cache(paths: Paths, *, abort_on_any_failure: bool = False) 
     the existing cached copy is left in place and the next URL is attempted.
     If abort_on_any_failure=True (first-run bootstrap with no cache), any
     failure raises RuntimeError so we don't start a VM with a partial denylist.
+
+    Orphaned cache files (URLs no longer in sources.txt) are pruned first so
+    they aren't merged into the next compose pass.
     """
     paths.denylist_cache_dir.mkdir(parents=True, exist_ok=True)
+    removed = prune_orphan_cache_files(paths)
+    for name in removed:
+        print(f"==> Pruned orphan cache file: {name}")
     urls = _read_source_urls(paths.denylist_sources_file)
     if not urls:
         print(f"==> No upstream denylist sources configured in {paths.denylist_sources_file}")
@@ -952,6 +982,9 @@ def reload_denylist_fast_path(paths: Paths, config: VmConfig) -> None:
     """Recompose denylist from local files, push ACL file, reconfigure Squid. No container restart."""
     assert config.bridge_ip and config.research_net_cidr
 
+    removed = prune_orphan_cache_files(paths)
+    for name in removed:
+        print(f"==> Pruned orphan cache file: {name}")
     denylist_domains = compose_denylist(paths)
     acl_body = denylist_to_squid_acl(denylist_domains)
 

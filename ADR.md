@@ -1345,3 +1345,122 @@ consumers and is deleted from the repo.
 - Write-capable hosts (github.com, gitlab.com, huggingface.co, etc.) remain
   absent from the default seed. Users who need them add them manually and accept
   the residual write-path risk explicitly (same as before).
+
+## ADR-025: Use hagezi `wildcard/<list>-onlydomains.txt` instead of `domains/<list>.txt`
+
+**Date:** 2026-04-26
+**Status:** Accepted
+
+### Context
+
+After the Squid migration (ADR-021), the research VM was loading hagezi's
+`domains/pro.txt`, `wildcard/fake.txt`, and `domains/tif.txt`. End-to-end
+testing through the proxy revealed that requests to *apex* domains of well-
+known ad/tracking families were leaking through. For example,
+`https://doubleclick.net/` returned 200 while `https://accounts.doubleclick.net/`
+correctly returned 403.
+
+Root cause: hagezi's `domains/` files target DNS resolvers (where a wildcard
+match on `*.foo.com` covers `foo.com` itself by virtue of how DNS lookups
+work). They list 4,000+ subdomains under `doubleclick.net` but never the
+apex `doubleclick.net`. Squid's `dstdomain` ACL doesn't share that semantic
+— `.accounts.doubleclick.net` matches `accounts.doubleclick.net` and its
+subdomains, but not `doubleclick.net` itself.
+
+This is a structural mismatch between DNS-blocker feed shape and HTTP-proxy
+ACL shape, not a code bug.
+
+### Decision
+
+Switch all upstream feeds in `templates/research-denylist-sources.txt` to
+hagezi's `wildcard/<list>-onlydomains.txt` variants. These list one
+registrable/apex domain per line with subdomain hierarchies pre-rolled-up.
+`denylist_to_squid_acl()` prefixes each entry with `.`, so a single
+`.foo.com` line covers the apex *and* every subdomain via Squid's
+suffix-match.
+
+A small set of canonical Google ad apexes that hagezi deliberately omits
+(`doubleclick.net`, `googleadservices.com`, `googletagmanager.com`,
+`googletagservices.com`, `google-analytics.com`, `adservice.google.com`)
+is appended to `templates/research-denylist-additions.txt`. Hagezi omits
+these intentionally because they're load-bearing for legitimate Google
+services on the open internet; for an isolated research VM the trade-off
+is reversed.
+
+`_prune_subdomains()` is retained as a safety net for `additions` and
+`overrides` overlaps but becomes a near-no-op for upstream feeds (already
+pruned upstream).
+
+### Consequences
+
+- Apex domains of every blocked family are now correctly blocked by
+  construction. The probe `tests/probe-denylist.sh` confirms
+  `googlesyndication.com` (in pro) returns 403; `doubleclick.net` and
+  `googleadservices.com` (omitted by hagezi) return 403 once the
+  additions block is applied.
+- Feed sizes drop ~50% (e.g. `pro` went from ~395k to ~183k entries).
+  Squid worker RSS dropped from observed ~99 MB at full coverage to a
+  smaller footprint.
+- TIF can be enabled by default at the standard 2 GiB VM size: combined
+  feeds total ~800k apex entries with comfortable headroom.
+- The decision is portable: any future migration to a different proxy
+  daemon that uses hostname-suffix ACLs (3proxy, h2o, custom) inherits
+  the correct semantics. A move to a regex- or DNS-based filter would
+  need to revisit feed format.
+- The hagezi-omitted-apex list is small but evergreen. New entries will
+  be discovered during normal use and added to the additions template
+  over time.
+
+## ADR-026: Auto-prune orphan files in `~/.research/denylist-cache/`
+
+**Date:** 2026-04-26
+**Status:** Accepted
+
+### Context
+
+`compose_denylist()` reads `~/.research/denylist-cache/*.txt` via a glob
+and unions every entry into the final denylist. When `denylist-sources.txt`
+changes — a template SHA bump, switching feed paths (e.g. `pro.txt` →
+`pro-onlydomains.txt`), or commenting out a feed — the previously-cached
+files remain on disk. They were silently merged into the next compose,
+producing a denylist that was the *union* of the old and new feeds rather
+than just the current ones.
+
+This came up directly during the ADR-025 migration: after switching to
+onlydomains feeds, the old `pro.txt` and `tif.txt` cache files were still
+present and inflating the composed denylist by ~500k stale entries. The
+fix at the time was a manual `rm` step in the migration instructions.
+Every future feed-path change would re-introduce the same trap.
+
+### Decision
+
+Add `prune_orphan_cache_files(paths) -> List[str]` that deletes any `.txt`
+in the cache dir whose basename isn't produced by a current URL in
+`denylist-sources.txt`. Call it at the start of both:
+
+- `refresh_denylist_cache()` — before fetching, so newly-fetched files
+  aren't accidentally pruned by a race
+- `reload_denylist_fast_path()` — so users who edit `sources.txt` and
+  reload (without refreshing) also get cleanup
+
+Pruned filenames print as `==> Pruned orphan cache file: <name>` so the
+behavior is visible.
+
+Source URLs that are commented out are treated as removed for prune
+purposes — uncommenting one will re-fetch on the next refresh.
+
+### Consequences
+
+- Editing `sources.txt` and running `--reload-denylist` or
+  `--refresh-denylist` is self-healing: no manual `rm`, no migration
+  instructions.
+- Future template SHA bumps that change feed basenames don't require
+  any user action beyond `--reseed-denylist && --reload-denylist`.
+- The behavior is destructive: a user who manually drops a `.txt` into
+  `denylist-cache/` outside of the refresh path will see it deleted on
+  the next run. Accepted: that directory is a managed cache, not a
+  user-edit surface — `denylist-additions.txt` and `denylist-overrides.txt`
+  exist for user-curated entries.
+- Five new unit tests in `tests/test_research.py` cover the helper:
+  happy path, no-op, all-sources-removed, missing cache dir, and
+  commented-out-URL handling.

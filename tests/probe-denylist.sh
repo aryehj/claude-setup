@@ -10,8 +10,9 @@ o = urllib.request.build_opener(urllib.request.ProxyHandler({"https": p, "http":
 urls = [
     ("allow", "https://example.com/"),
     ("allow", "https://api.github.com/zen"),
-    ("deny",  "https://doubleclick.net/"),
-    ("deny",  "https://googleadservices.com/"),
+    ("deny",  "https://googlesyndication.com/"),  # in hagezi pro
+    ("deny",  "https://doubleclick.net/"),         # hagezi omits — needs additions
+    ("deny",  "https://googleadservices.com/"),    # hagezi omits — needs additions
 ]
 for kind, u in urls:
     try:

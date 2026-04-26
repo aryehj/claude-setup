@@ -131,6 +131,26 @@ feeds are URL-pinned downloads cached in `~/.research/denylist-cache/`. On-disk
 files are never silently overwritten — use `--reseed-denylist` to pick up template
 updates. See ADR-023.
 
+**Hagezi feeds use the `wildcard/<list>-onlydomains.txt` format, not `domains/<list>.txt`.**
+The onlydomains files list one apex/registrable domain per line with subdomain
+hierarchies pre-rolled-up. `denylist_to_squid_acl()` prefixes each entry with
+`.` so a single `.foo.com` covers the apex and every subdomain via Squid's
+`dstdomain` suffix-match. The older `domains/` files list subdomains
+exhaustively but omit the apex, which causes Squid to leak `https://foo.com/`
+while blocking `https://www.foo.com/`. Onlydomains feeds are also ~50% smaller.
+Hagezi deliberately omits a handful of canonical Google ad apexes
+(`doubleclick.net`, `googleadservices.com`, etc.) — those are added back in
+`templates/research-denylist-additions.txt`. See ADR-025.
+
+**`research.py` auto-prunes orphan files in `denylist-cache/` on every refresh and reload.**
+`prune_orphan_cache_files()` deletes any `.txt` in the cache dir whose basename
+isn't produced by a current URL in `denylist-sources.txt`. Without this, a
+template SHA bump or feed-path change leaves stale `.txt` files that
+`compose_denylist`'s `*.txt` glob silently merges in alongside new feeds.
+Called from both `refresh_denylist_cache()` and `reload_denylist_fast_path()`,
+so editing `sources.txt` and running either is self-healing. Pruned filenames
+are echoed to stdout. See ADR-026.
+
 **`research.py` hard-exits if `~/.research/allowlist.txt` is detected.**
 Installations predating the denylist migration have this file. `research.py`
 prints the two manual steps required (`rm -rf ~/.research/`, then `--rebuild`)

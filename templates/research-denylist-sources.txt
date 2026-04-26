@@ -13,14 +13,24 @@
 # upstream changes, edit this file (or run --reseed-denylist after the repo
 # template is updated) and then run --refresh-denylist.
 #
-# hagezi/dns-blocklists, pinned 2026-04-25
-#   pro      ~395k entries  Ads / tracking / scam / malware / fake (broad)
-#   fake     ~14k entries   Fake stores, scam streaming, rip-offs (wildcard format)
-#   tif      ~1.15M entries Threat intel feed (rotates frequently)
+# Feed format: `wildcard/<list>-onlydomains.txt` — one apex/registrable domain
+# per line, with subdomain hierarchies pre-rolled-up by hagezi. This is the
+# right shape for Squid `dstdomain`: research.py prefixes each entry with `.`
+# at compose time, so a single `.foo.com` entry covers the apex AND every
+# subdomain. The older `domains/<list>.txt` files list subdomains exhaustively
+# but omit the apex, which causes Squid to leak `https://foo.com/` while
+# blocking `https://www.foo.com/`. The onlydomains variants are also ~50%
+# smaller.
 #
-# tif is commented out by default: the combined ~1.5M-entry filter OOM-kills
-# tinyproxy at the default 2 GiB VM size. Uncomment only if you also bump the
-# VM with `./research.py --rebuild --memory=4` (or larger).
-https://raw.githubusercontent.com/hagezi/dns-blocklists/b3c6077683c41884beff8b1a7678d09a9c5e9e00/domains/pro.txt
-https://raw.githubusercontent.com/hagezi/dns-blocklists/b3c6077683c41884beff8b1a7678d09a9c5e9e00/wildcard/fake.txt
-https://raw.githubusercontent.com/hagezi/dns-blocklists/b3c6077683c41884beff8b1a7678d09a9c5e9e00/domains/tif.txt
+# hagezi/dns-blocklists, pinned 2026-04-25
+#   pro-onlydomains      ~183k entries  Ads / tracking / scam / malware / fake (broad)
+#   fake-onlydomains     ~14k entries   Fake stores, scam streaming, rip-offs
+#   tif-onlydomains      ~600k entries  Threat intel feed (rotates frequently)
+#
+# All three feeds are enabled by default. Verified at the default VM size:
+# combined ~800k apex entries, Squid worker RSS ~100 MB, parse ~5 s. If you
+# add further feeds, re-check headroom with `ps -eo pid,rss,cmd | grep [s]quid`
+# and bump `./research.py --rebuild --memory=4` (or larger) if needed.
+https://raw.githubusercontent.com/hagezi/dns-blocklists/b3c6077683c41884beff8b1a7678d09a9c5e9e00/wildcard/pro-onlydomains.txt
+https://raw.githubusercontent.com/hagezi/dns-blocklists/b3c6077683c41884beff8b1a7678d09a9c5e9e00/wildcard/fake-onlydomains.txt
+https://raw.githubusercontent.com/hagezi/dns-blocklists/b3c6077683c41884beff8b1a7678d09a9c5e9e00/wildcard/tif-onlydomains.txt

@@ -69,3 +69,16 @@ figshare.com
 osf.io
 datadryad.org
 kaggle.com
+
+# === Hagezi-omitted ad/tracking apexes ===
+# Hagezi's lists block every TLD variant (.de, .net, .ws, etc.) but
+# deliberately skip these production Google apexes to avoid breaking
+# legitimate Google services (mobile-app inventory, Workspace, search-result
+# ads). For a Squid `dstdomain` deployment we want them blocked explicitly.
+# Verified missing from hagezi pro/fake/tif as of 2026-04-25.
+doubleclick.net
+googleadservices.com
+googletagmanager.com
+googletagservices.com
+google-analytics.com
+adservice.google.com

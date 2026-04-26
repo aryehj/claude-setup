@@ -8,6 +8,7 @@ from research import (
     _prune_subdomains,
     compose_denylist,
     denylist_to_squid_acl,
+    prune_orphan_cache_files,
     render_iptables_apply_script,
     render_searxng_settings,
     Paths,
@@ -309,6 +310,58 @@ def test_compose_denylist_set_algebra_invariant(tmp_path):
     result = set(compose_denylist(p))
     expected = (cache | additions) - overrides
     assert result == expected
+
+
+# ── prune_orphan_cache_files ─────────────────────────────────────────────────
+
+def test_prune_orphan_cache_files_removes_stale(tmp_path):
+    p = _make_paths(tmp_path)
+    (p.denylist_cache_dir / "pro.txt").write_text("old.example\n")
+    (p.denylist_cache_dir / "pro-onlydomains.txt").write_text("new.example\n")
+    p.denylist_sources_file.write_text(
+        "https://example.test/wildcard/pro-onlydomains.txt\n"
+    )
+    removed = prune_orphan_cache_files(p)
+    assert removed == ["pro.txt"]
+    assert not (p.denylist_cache_dir / "pro.txt").exists()
+    assert (p.denylist_cache_dir / "pro-onlydomains.txt").exists()
+
+
+def test_prune_orphan_cache_files_keeps_all_when_sources_match(tmp_path):
+    p = _make_paths(tmp_path)
+    (p.denylist_cache_dir / "a.txt").write_text("a.example\n")
+    (p.denylist_cache_dir / "b.txt").write_text("b.example\n")
+    p.denylist_sources_file.write_text(
+        "https://example.test/a.txt\nhttps://example.test/b.txt\n"
+    )
+    assert prune_orphan_cache_files(p) == []
+    assert (p.denylist_cache_dir / "a.txt").exists()
+    assert (p.denylist_cache_dir / "b.txt").exists()
+
+
+def test_prune_orphan_cache_files_no_sources_removes_everything(tmp_path):
+    p = _make_paths(tmp_path)
+    (p.denylist_cache_dir / "stale.txt").write_text("x.example\n")
+    p.denylist_sources_file.write_text("# all commented\n")
+    removed = prune_orphan_cache_files(p)
+    assert removed == ["stale.txt"]
+
+
+def test_prune_orphan_cache_files_handles_missing_cache_dir(tmp_path):
+    p = Paths(base=tmp_path)  # no cache dir created
+    p.denylist_sources_file.write_text("https://example.test/feed.txt\n")
+    assert prune_orphan_cache_files(p) == []
+
+
+def test_prune_orphan_cache_files_ignores_comments_in_sources(tmp_path):
+    p = _make_paths(tmp_path)
+    (p.denylist_cache_dir / "active.txt").write_text("ok.example\n")
+    (p.denylist_cache_dir / "disabled.txt").write_text("stale.example\n")
+    p.denylist_sources_file.write_text(
+        "https://example.test/active.txt\n# https://example.test/disabled.txt\n"
+    )
+    removed = prune_orphan_cache_files(p)
+    assert removed == ["disabled.txt"]
 
 
 if __name__ == "__main__":
