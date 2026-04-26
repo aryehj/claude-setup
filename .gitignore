@@ -27,3 +27,6 @@ config
 hooks
 objects
 refs
+
+# testing things temporarily
+.temp
