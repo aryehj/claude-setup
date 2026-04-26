@@ -3,7 +3,7 @@
 ## Status
 
 - [x] Phase 1: Create research script with isolated Colima VM (implemented as `research.py`)
-- [ ] Phase 2: Remove Vane from start-agent.sh (keep SearXNG)
+- [x] Phase 2: Remove Vane from start-agent.sh (keep SearXNG)
 - [ ] Phase 3: Update documentation
 
 ## Context

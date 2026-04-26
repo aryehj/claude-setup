@@ -343,20 +343,7 @@ which SearXNG silently ignores due to an explicit `transport=` in its httpx
 client (see ADR-014). The allowlist therefore governs all SearXNG egress,
 same as the rest of the stack. `NO_PROXY=searxng` is added to `claude-agent`
 so the MCP shim's direct container-to-container HTTP call bypasses tinyproxy.
-Pass `--disable-search` (env: `CLAUDE_AGENT_DISABLE_SEARCH=1`) to skip both
-SearXNG and Vane. The `--enable-local-search` flag is deprecated (no-op with
-a warning).
-
-**Vane runs alongside SearXNG by default.** Vane (formerly Perplexica) is an
-AI-powered research interface exposed on port 3000. It uses SearXNG as its
-search backend (`SEARXNG_API_URL=http://searxng:8080`) and the configured local
-LLM (Ollama/omlx) for AI features — configure the LLM URL via the web UI at
-`http://localhost:3000` on first access. Use `http://host.docker.internal:11434`
-(Ollama) or `http://host.docker.internal:8000/v1` (omlx) as the endpoint; the
-Vane container receives `--add-host=host.docker.internal:host-gateway` so that
-hostname resolves to the macOS host. LLM settings persist in
-`~/.claude-agent/vane-data/` and survive `--rebuild`. `--disable-search` turns
-off both SearXNG and Vane.
+Pass `--disable-search` to skip SearXNG (which also disables OpenCode websearch).
 
 **`host.docker.internal:host-gateway` is set belt-and-suspenders** on
 `docker run` so tools that hard-code the name resolve to the host even on
