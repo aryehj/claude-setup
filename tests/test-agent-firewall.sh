@@ -119,11 +119,46 @@ test_env_wiring() {
   fi
 }
 
+# ── 6. Inter-container port isolation ────────────────────────────────────────
+# The iptables CLAUDE_AGENT chain allows inter-container traffic within
+# claude-agent-net only on port 8080 (SearXNG MCP path). All other ports must
+# be rejected. Tests both sides: 8080 reachable, 9000 blocked.
+# Skip if searxng is not running (--disable-search).
+test_searxng_port_isolation() {
+  if ! getent hosts searxng >/dev/null 2>&1; then
+    skip "inter-container-port-isolation" "searxng not in DNS (--disable-search?)"
+    return
+  fi
+
+  # Port 8080: must be reachable. curl 0 (ok), 22 (HTTP error ≥400), or 52
+  # (empty reply) all confirm the TCP connection was allowed through.
+  local rc
+  curl --noproxy searxng -sS --max-time 5 http://searxng:8080/ >/dev/null 2>&1
+  rc=$?
+  if (( rc == 0 || rc == 22 || rc == 52 )); then
+    pass "inter-container-port-isolation: searxng:8080 reachable (curl exit $rc)"
+  else
+    fail "inter-container-port-isolation" "searxng:8080 blocked (curl exit $rc); iptables AGENT_NET:8080 RETURN rule may be missing"
+  fi
+
+  # Port 9000: must be blocked. With --reject-with icmp-admin-prohibited, curl
+  # sees the ICMP response immediately and exits non-zero (typically exit 7).
+  local out
+  out=$(curl --noproxy searxng -sS --max-time 3 http://searxng:9000/ 2>&1)
+  rc=$?
+  if (( rc != 0 )); then
+    pass "inter-container-port-isolation: searxng:9000 blocked (curl exit $rc)"
+  else
+    fail "inter-container-port-isolation" "searxng:9000 reachable — iptables CLAUDE_AGENT REJECT not firing on inter-container traffic"
+  fi
+}
+
 test_default_deny
 test_allowed_via_proxy
 test_denied_via_proxy
 test_ollama_carveout
 test_env_wiring
+test_searxng_port_isolation
 
 echo
 printf '==> %s%d passed%s, %s%d failed%s, %s%d skipped%s\n' \
