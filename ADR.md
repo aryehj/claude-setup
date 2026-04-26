@@ -803,7 +803,9 @@ static content, one source of truth, consequences below.
 ## ADR-016: start-agent: Vane as default-on AI research UI; SearXNG + Vane default-on
 
 **Date:** 2026-04-22
-**Status:** Accepted
+**Status:** Partially superseded — see ADR-028. The default-on SearXNG decision
+still stands for OpenCode's websearch backend. The Vane portion is superseded: Vane
+was extracted from `start-agent.sh` into the standalone `research.py` script.
 
 ### Context
 
@@ -1562,3 +1564,67 @@ an existing install requires `docker rm -f research-vane && ./research.py`
   That container shares a bridge with `claude-agent`, which is a
   different threat model (search-result-borne prompt injection reaching
   the coding agent). Tracked separately.
+
+## ADR-028: Extract Vane from start-agent.sh into standalone research.py
+
+**Date:** 2026-04-26
+**Status:** Accepted (supersedes Vane portion of ADR-016)
+
+### Context
+
+ADR-016 made Vane default-on in `start-agent.sh`, running alongside
+`claude-agent` and `searxng` on the `claude-agent-net` docker network. Vane was
+always browser-only: no container-to-agent API, no MCP integration. It was an
+incidental co-resident of the agent environment, sharing SearXNG with OpenCode
+but otherwise independent. Its presence added complexity to `start-agent.sh`:
+a third container lifecycle, a second data volume, port 3000 host binding, and
+the `--disable-search` flag that was required to opt out of both Vane *and* the
+SearXNG MCP stack (a coarse knob).
+
+Meanwhile, `research.py` (ADR-018) was implemented as a dedicated Python
+orchestrator for exactly the use-case Vane serves: an isolated, browser-facing
+research UI with its own egress proxy. The key insight: Vane's threat model
+differs from the coding agent's. In `start-agent.sh`, egress is allowlist-based
+to prevent the coding agent from exfiltrating via write-capable hosts. For Vane,
+egress must be permissive enough to scrape arbitrary search results — a denylist
+model (ADR-023) is the correct fit. Running Vane inside `start-agent.sh`'s
+allowlist-constrained VM was architecturally wrong: it either over-constrained
+Vane (can't reach scrape targets not on the allowlist) or required loosening the
+allowlist in ways that weakened the coding agent's posture.
+
+### Decision
+
+Remove Vane (and only Vane) from `start-agent.sh`. SearXNG, the
+`claude-agent-net` user-defined network, the SearXNG MCP shim in
+`claude-agent.Dockerfile`, and OpenCode's `mcp.searxng` + `websearch=allow`
+config all remain unchanged — OpenCode's websearch tool is not affected.
+
+Specific removals from `start-agent.sh`:
+
+- `VANE_CONTAINER`, `VANE_DATA_DIR`, `VANE_PORT` variables
+- The Vane container lifecycle block (`ensure_vane_container`)
+- The Vane container rm in `--rebuild` cleanup
+- The Vane startup echo line
+
+`--disable-search` is retained but now controls only SearXNG (and therefore
+OpenCode websearch). Its description is updated accordingly.
+
+Users who want Vane run `research.py` instead, which provides VM-level isolation,
+a denylist-based egress model appropriate for scraping, and its own SearXNG
+instance. The two SearXNG instances are independent by design (see Notes in
+`plans/research-vm-isolation.md`).
+
+### Consequences
+
+- `start-agent.sh` no longer binds port 3000. `research.py` and `start-agent.sh`
+  can run simultaneously without port conflicts.
+- OpenCode websearch is unaffected: the SearXNG MCP path was never routed through
+  Vane.
+- Users who accessed Vane at `localhost:3000` via `start-agent.sh` must switch to
+  `./research.py`. First-time setup: run `research.py`, open `localhost:3000`,
+  configure the LLM endpoint once. State persists in `~/.research/vane-data/`.
+- `start-agent.sh` is simpler: one less container, one less data volume, one less
+  port. The `--disable-search` semantics narrow from "skip SearXNG + Vane" to
+  "skip SearXNG (disables OpenCode websearch)".
+- The `start-agent.sh` allowlist no longer needs to accommodate Vane's scrape
+  targets. Scrape-range decisions are `research.py`'s concern alone.

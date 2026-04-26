@@ -124,64 +124,6 @@ In `start-agent.sh` the same template is also seeded into
 `awk` since those bubblewrap/`$TMPDIR` facts only apply inside
 `start-claude.sh`. `--reseed-global-claudemd` reseeds both copies.
 
-**`research.py` denylist seeds live in `templates/research-denylist-sources.txt` and `templates/research-denylist-additions.txt`.**
-On first run both files are seeded to `~/.research/`. The composed denylist is
-`(cached-upstream ∪ denylist-additions.txt) − denylist-overrides.txt`. Upstream
-feeds are URL-pinned downloads cached in `~/.research/denylist-cache/`. On-disk
-files are never silently overwritten — use `--reseed-denylist` to pick up template
-updates. See ADR-023.
-
-**Hagezi feeds use the `wildcard/<list>-onlydomains.txt` format, not `domains/<list>.txt`.**
-The onlydomains files list one apex/registrable domain per line with subdomain
-hierarchies pre-rolled-up. `denylist_to_squid_acl()` prefixes each entry with
-`.` so a single `.foo.com` covers the apex and every subdomain via Squid's
-`dstdomain` suffix-match. The older `domains/` files list subdomains
-exhaustively but omit the apex, which causes Squid to leak `https://foo.com/`
-while blocking `https://www.foo.com/`. Onlydomains feeds are also ~50% smaller.
-Hagezi deliberately omits a handful of canonical Google ad apexes
-(`doubleclick.net`, `googleadservices.com`, etc.) — those are added back in
-`templates/research-denylist-additions.txt`. See ADR-025.
-
-**`research.py` auto-prunes orphan files in `denylist-cache/` on every refresh and reload.**
-`prune_orphan_cache_files()` deletes any `.txt` in the cache dir whose basename
-isn't produced by a current URL in `denylist-sources.txt`. Without this, a
-template SHA bump or feed-path change leaves stale `.txt` files that
-`compose_denylist`'s `*.txt` glob silently merges in alongside new feeds.
-Called from both `refresh_denylist_cache()` and `reload_denylist_fast_path()`,
-so editing `sources.txt` and running either is self-healing. Pruned filenames
-are echoed to stdout. See ADR-026.
-
-**`research.py` hard-exits if `~/.research/allowlist.txt` is detected.**
-Installations predating the denylist migration have this file. `research.py`
-prints the two manual steps required (`rm -rf ~/.research/`, then `--rebuild`)
-and exits non-zero. No automatic migration — the user must take the explicit
-action. See ADR-022.
-
-**`research.py` uses Squid (not tinyproxy) as the in-VM filtering proxy.**
-Squid's `dstdomain` ACL performs O(1) hash-table lookups, supporting million-entry
-denylists where tinyproxy's regex-NFA approach OOMs. Port 8888 is kept, so the
-iptables RESEARCH chain and SearXNG's `outgoing.proxies` config are unchanged.
-Squid 6 rejects ACL files that contain both a domain and one of its subdomains —
-`_prune_subdomains()` strips redundant entries before writing the file.
-`start-agent.sh` stays on tinyproxy (~280-entry allowlist, regex fine at that
-scale). See ADR-021.
-
-**`research.py` Vane container is wired through Squid via `HTTPS_PROXY` only.**
-`ensure_vane_container` passes `HTTPS_PROXY=http://{bridge_ip}:8888` plus
-`NO_PROXY=research-searxng,host.docker.internal,localhost,127.0.0.1`.
-**Setting `HTTP_PROXY` is deliberately avoided** — when both were set, Vane's
-HTTP client silently swallowed the `fetch()` to `http://research-searxng:8080`
-(SearXNG) even though `NO_PROXY` should have exempted it; queries hung at the
-"searching" UI state with no further events. A sidecar curl with the same env
-worked fine, so the regression was specifically Vane's HTTP-client interaction
-with `HTTP_PROXY`. The HTTPS-only configuration leaves http:// targets
-(SearXNG, host LLM) on the direct bridge path and routes https:// scrapes
-through Squid where the denylist applies. Cost: HTTP-only scrape targets
-(small slice of the web) hit the L3 REJECT and aren't fetchable. Existing
-installs need `docker rm -f research-vane && ./research.py` (or full
-`--rebuild`) to pick up the env vars. `tests/probe-vane-egress.sh` checks the
-env vars and a sidecar HTTPS round-trip. See ADR-027.
-
 **Git identity is set via both `~/.gitconfig` and environment variables.**
 `git config --global` is run during image build so `/root/.gitconfig` exists in
 the image. However, Claude Code's bubblewrap sandbox may not expose
@@ -365,6 +307,106 @@ wiring, and allowlist hot-reload. Re-run them after any change to the
 `DOCKER-USER` rule insertion, the tinyproxy config generator, or the
 allowlist-reload fast path.
 
+## research.py key decisions
+
+`research.py` is a Python (stdlib-only) orchestrator for a dedicated Colima VM
+(`research` profile) hosting Vane (AI research UI) and its own SearXNG instance,
+network-isolated from `claude-agent`. Its design goal is to let Vane scrape the
+long tail of search-result URLs while filtering known-bad content — a default-allow
+denylist model, contrasting with `start-agent.sh`'s default-deny allowlist.
+See ADR-018 for the language choice rationale.
+
+**Separate Colima profile (`research`) for VM-level isolation.** `start-agent.sh`
+(`claude-agent` profile) and `research.py` (`research` profile) use independent
+Colima VMs with separate iptables chains, docker bridges, and container namespaces.
+Both can run simultaneously. Docker networks (`claude-agent-net` and `research-net`)
+do not bridge between VMs. The only potential host-level conflict is port 3000 —
+avoid running both if another service already occupies it.
+
+**Dedicated SearXNG instance, not shared with `claude-agent`.** `research.py` starts
+its own `research-searxng` container on `research-net`, routing fan-out through the
+`research` VM's Squid denylist proxy. The `searxng` container in `start-agent.sh`
+(OpenCode's MCP websearch backend) is a separate instance with an allowlist-based
+egress model. The two instances never interact.
+
+**Denylist (default-allow + blocked domains) rather than allowlist.** Unlike
+`start-agent.sh`'s tinyproxy allowlist, `research.py` uses Squid with a composed
+denylist so Vane can reach arbitrary search-result URLs without pre-approving every
+destination. The denylist is composed from hagezi upstream feeds (quality and threat
+filtering) plus `denylist-additions.txt` for exfil-capable services upstream feeds
+won't cover. See ADR-021 and ADR-023.
+
+**Port 3000 on the macOS host for Vane.** `research-vane` is started with
+`-p 3000:3000` so the UI is accessible at `http://localhost:3000`. `start-agent.sh`
+does not bind port 3000 (Vane was extracted from it — see ADR-028), so both scripts
+can run simultaneously without port conflict.
+
+**LLM inference via `host.docker.internal`.** Vane's LLM endpoint is configured once
+via the UI at `http://localhost:3000`. Use `http://host.docker.internal:11434` for
+Ollama or `http://host.docker.internal:8000/v1` for omlx. The hostname is wired via
+`--add-host=host.docker.internal:host-gateway` on `docker run`, and the iptables
+`RESEARCH` chain has a dedicated RETURN rule for `$HOST_IP:$INFERENCE_PORT`. LLM
+traffic goes direct (not through Squid), same pattern as `start-agent.sh`.
+Configuration persists in `~/.research/vane-data/` across `--rebuild`.
+
+**`research.py` denylist seeds live in `templates/research-denylist-sources.txt` and `templates/research-denylist-additions.txt`.**
+On first run both files are seeded to `~/.research/`. The composed denylist is
+`(cached-upstream ∪ denylist-additions.txt) − denylist-overrides.txt`. Upstream
+feeds are URL-pinned downloads cached in `~/.research/denylist-cache/`. On-disk
+files are never silently overwritten — use `--reseed-denylist` to pick up template
+updates. See ADR-023.
+
+**Hagezi feeds use the `wildcard/<list>-onlydomains.txt` format, not `domains/<list>.txt`.**
+The onlydomains files list one apex/registrable domain per line with subdomain
+hierarchies pre-rolled-up. `denylist_to_squid_acl()` prefixes each entry with
+`.` so a single `.foo.com` covers the apex and every subdomain via Squid's
+`dstdomain` suffix-match. The older `domains/` files list subdomains
+exhaustively but omit the apex, which causes Squid to leak `https://foo.com/`
+while blocking `https://www.foo.com/`. Onlydomains feeds are also ~50% smaller.
+Hagezi deliberately omits a handful of canonical Google ad apexes
+(`doubleclick.net`, `googleadservices.com`, etc.) — those are added back in
+`templates/research-denylist-additions.txt`. See ADR-025.
+
+**`research.py` auto-prunes orphan files in `denylist-cache/` on every refresh and reload.**
+`prune_orphan_cache_files()` deletes any `.txt` in the cache dir whose basename
+isn't produced by a current URL in `denylist-sources.txt`. Without this, a
+template SHA bump or feed-path change leaves stale `.txt` files that
+`compose_denylist`'s `*.txt` glob silently merges in alongside new feeds.
+Called from both `refresh_denylist_cache()` and `reload_denylist_fast_path()`,
+so editing `sources.txt` and running either is self-healing. Pruned filenames
+are echoed to stdout. See ADR-026.
+
+**`research.py` hard-exits if `~/.research/allowlist.txt` is detected.**
+Installations predating the denylist migration have this file. `research.py`
+prints the two manual steps required (`rm -rf ~/.research/`, then `--rebuild`)
+and exits non-zero. No automatic migration — the user must take the explicit
+action. See ADR-022.
+
+**`research.py` uses Squid (not tinyproxy) as the in-VM filtering proxy.**
+Squid's `dstdomain` ACL performs O(1) hash-table lookups, supporting million-entry
+denylists where tinyproxy's regex-NFA approach OOMs. Port 8888 is kept, so the
+iptables RESEARCH chain and SearXNG's `outgoing.proxies` config are unchanged.
+Squid 6 rejects ACL files that contain both a domain and one of its subdomains —
+`_prune_subdomains()` strips redundant entries before writing the file.
+`start-agent.sh` stays on tinyproxy (~280-entry allowlist, regex fine at that
+scale). See ADR-021.
+
+**`research.py` Vane container is wired through Squid via `HTTPS_PROXY` only.**
+`ensure_vane_container` passes `HTTPS_PROXY=http://{bridge_ip}:8888` plus
+`NO_PROXY=research-searxng,host.docker.internal,localhost,127.0.0.1`.
+**Setting `HTTP_PROXY` is deliberately avoided** — when both were set, Vane's
+HTTP client silently swallowed the `fetch()` to `http://research-searxng:8080`
+(SearXNG) even though `NO_PROXY` should have exempted it; queries hung at the
+"searching" UI state with no further events. A sidecar curl with the same env
+worked fine, so the regression was specifically Vane's HTTP-client interaction
+with `HTTP_PROXY`. The HTTPS-only configuration leaves http:// targets
+(SearXNG, host LLM) on the direct bridge path and routes https:// scrapes
+through Squid where the denylist applies. Cost: HTTP-only scrape targets
+(small slice of the web) hit the L3 REJECT and aren't fetchable. Existing
+installs need `docker rm -f research-vane && ./research.py` (or full
+`--rebuild`) to pick up the env vars. `tests/probe-vane-egress.sh` checks the
+env vars and a sidecar HTTPS round-trip. See ADR-027.
+
 ## Commit style
 
 Do NOT include `Co-Authored-By` lines in commit messages.
@@ -395,3 +437,14 @@ which removes `claude-agent:latest` and the container, then rebuilds. An
 additional confirmation prompt offers to delete the Colima VM too — only
 say yes if you want to start over from a clean VM (loses everything else
 inside the VM's docker runtime).
+
+For `research.py`, the script is a single Python file at the repo root. Edit it
+directly. After changing it:
+
+```bash
+./research.py --rebuild
+```
+
+This removes the `research-vane` and `research-searxng` containers and recreates
+them. An additional confirmation prompt offers to delete the `research` Colima VM
+too — only say yes if you want to start from a completely clean state.
