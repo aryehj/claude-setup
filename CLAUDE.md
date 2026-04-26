@@ -123,15 +123,21 @@ In `start-agent.sh` the same template is also seeded into
 `awk` since those bubblewrap/`$TMPDIR` facts only apply inside
 `start-claude.sh`. `--reseed-global-claudemd` reseeds both copies.
 
-**`research.py` allowlist seed lives in `templates/research-allowlist.txt`.**
-On first run, `seed_allowlist()` reads the template and writes it to
-`~/.research/allowlist.txt`. If the template file is missing (broken checkout),
-it raises a clear `FileNotFoundError`. Existing on-disk allowlists are never
-silently overwritten — use `--reseed-allowlist` to pick up template updates.
-This mirrors the `templates/global-claude.md` → `~/.claude-containers/shared/CLAUDE.md`
-pattern. The template is plain text, one domain per line, organized into a
-READ-ONLY tier (active) and a commented-out UPLOAD-CAPABLE tier (user opts in
-per host). See ADR-019 and ADR-020.
+**`research.py` denylist seeds live in `templates/research-denylist-sources.txt` and `templates/research-denylist-additions.txt`.**
+On first run both files are seeded to `~/.research/`. The composed denylist is
+`(cached-upstream ∪ denylist-additions.txt) − denylist-overrides.txt`. Upstream
+feeds are URL-pinned downloads cached in `~/.research/denylist-cache/`. On-disk
+files are never silently overwritten — use `--reseed-denylist` to pick up template
+updates. See ADR-019 and ADR-020.
+
+**`research.py` uses Squid (not tinyproxy) as the in-VM filtering proxy.**
+Squid's `dstdomain` ACL performs O(1) hash-table lookups, supporting million-entry
+denylists where tinyproxy's regex-NFA approach OOMs. Port 8888 is kept, so the
+iptables RESEARCH chain and SearXNG's `outgoing.proxies` config are unchanged.
+Squid 6 rejects ACL files that contain both a domain and one of its subdomains —
+`_prune_subdomains()` strips redundant entries before writing the file.
+`start-agent.sh` stays on tinyproxy (~280-entry allowlist, regex fine at that
+scale). See ADR-021.
 
 **Git identity is set via both `~/.gitconfig` and environment variables.**
 `git config --global` is run during image build so `/root/.gitconfig` exists in

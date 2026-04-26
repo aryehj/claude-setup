@@ -459,40 +459,58 @@ research UI at `http://localhost:3000`). State lives in `~/.research/`.
 
 ```bash
 ./research.py                          # bring up the environment
-./research.py --reload-allowlist       # update tinyproxy filter without restart
-./research.py --reseed-allowlist       # overwrite ~/.research/allowlist.txt with current template
+./research.py --reload-denylist        # recompose denylist from local files (no network)
+./research.py --refresh-denylist       # re-fetch upstream feeds, then reload
+./research.py --reseed-denylist        # overwrite sources/additions templates from repo
 ./research.py --rebuild                # recreate containers (prompts for VM deletion)
-./research.py --backend=omlx          # use omlx instead of Ollama
+./research.py --backend=omlx           # use omlx instead of Ollama
 ```
 
-On first run, seeds `~/.research/allowlist.txt` from `templates/research-allowlist.txt`.
-Edit the on-disk file and run `--reload-allowlist` to apply changes. To pick up
-upstream template updates, run `--reseed-allowlist` (overwrites the on-disk file).
+On first run, seeds `~/.research/denylist-sources.txt` and `denylist-additions.txt`
+from `templates/`. Edit the on-disk files and run `--reload-denylist` to apply
+changes. To pick up upstream template updates, run `--reseed-denylist`.
 
-## Egress allowlist
+## Egress denylist
 
-Same model as `start-agent.sh`: in-VM tinyproxy + iptables RESEARCH chain.
-The on-disk allowlist (`~/.research/allowlist.txt`) is seeded from
-`templates/research-allowlist.txt` on first run. Edit it with:
+research.py uses a **denylist** (default-allow) so Vane can scrape arbitrary
+search-result URLs. The composed denylist is:
+
+    (cached upstream feeds ∪ denylist-additions.txt) − denylist-overrides.txt
+
+All three files live in `~/.research/` on the macOS host. Egress is enforced by
+**Squid** + the iptables RESEARCH chain inside the Colima VM. Squid listens on
+port 8888 and performs O(1) hash-table domain lookups — supporting million-entry
+denylists without OOM. (start-agent.sh uses tinyproxy for its ~280-entry allowlist;
+the asymmetry is intentional — see ADR-021.)
+
+To update the denylist without restarting containers:
 
 ```bash
-$EDITOR ~/.research/allowlist.txt
-./research.py --reload-allowlist
+$EDITOR ~/.research/denylist-additions.txt   # add domains to block
+$EDITOR ~/.research/denylist-overrides.txt   # or remove false positives
+./research.py --reload-denylist
 ```
 
-To pick up template updates after a `git pull`, run:
+To refresh upstream feeds and reload:
 
 ```bash
-./research.py --reseed-allowlist --reload-allowlist
+./research.py --refresh-denylist
+```
+
+To pick up template updates after `git pull`:
+
+```bash
+./research.py --reseed-denylist --reload-denylist
 ```
 
 ## Environment variable reference (research.py)
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `CLAUDE_AGENT_BACKEND` | `ollama` | Inference backend: `ollama` or `omlx` (overridden by `--backend`) |
+| `RESEARCH_BACKEND` | `ollama` | Inference backend: `ollama` or `omlx` (overridden by `--backend`) |
+| `RESEARCH_MEMORY` | `2` | VM memory in GiB (overridden by `--memory`) |
+| `RESEARCH_CPUS` | `2` | VM CPU count (overridden by `--cpus`) |
 | `OMLX_API_KEY` | *(unset)* | API key for omlx |
-| `OLLAMA_HOST` | `0.0.0.0:11434` | Ollama bind address (host-side) |
 
 ---
 

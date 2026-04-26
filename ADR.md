@@ -1107,3 +1107,76 @@ technical enforcement.
 - `gitlab.com` and `huggingface.co` are no longer active by default; users who
   relied on them must uncomment. This is an intentional breaking change for
   a security reason.
+
+## ADR-021: research.py uses Squid for domain filtering; start-agent.sh stays on tinyproxy
+
+**Date:** 2026-04-26
+**Status:** Accepted
+
+### Context
+
+research.py's layered denylist grew large enough to break tinyproxy. With
+`FilterExtended Yes`, tinyproxy compiles every denylist entry into a single POSIX
+extended regex NFA. Memory scales superlinearly with entry count:
+
+| Filter shape | Behavior |
+|---|---|
+| Empty | Starts, serves requests |
+| ~14k entries (`fake` list only) | Starts, serves requests |
+| ~409k entries (`pro` + `fake`) | Starts; OOM-killed on first non-matching CONNECT |
+| ~1.56M entries (`pro` + `fake` + `tif`) | OOM-kills at startup |
+
+The failure is per-request, not just startup: even with more RAM, every
+non-matching CONNECT walks the entire NFA, so memory headroom degrades under
+concurrent requests. Intermittent failure is worse than a hard startup failure.
+
+Squid's `acl ... dstdomain "/path/to/list"` uses a hash table: O(1) lookup per
+request, O(n) memory — routinely used for million-entry lists in corporate proxies.
+
+Alternatives rejected:
+- **3proxy**: lighter, but ACL syntax for giant external lists is less documented;
+  thinner operational track record at this scale.
+- **DNS-level filtering** (dnsmasq/unbound): faster lookups, but clients see
+  NXDOMAIN-shaped failures instead of HTTP 403 — harder to diagnose and
+  inconsistent with the proxy model the rest of the stack uses.
+
+start-agent.sh's allowlist has ~280 entries. The regex NFA is fine at that scale,
+and pulling Squid into the agent path adds a dependency for no benefit.
+
+### Decision
+
+Replace tinyproxy with Squid in research.py. Clean cut — no `--proxy=` toggle,
+no fallback paths, no migration-period bilingualism. start-agent.sh is unchanged.
+
+Key implementation details:
+
+- **Port 8888 is kept.** Squid listens on the same port, so the iptables RESEARCH
+  chain and SearXNG's `outgoing.proxies` config require no changes.
+- **Minimal `squid.conf`.** ~15 directives: `http_port`, `dstdomain` ACL,
+  `http_access` rules, `cache deny all`. `cache deny all` is load-bearing —
+  this is a pure filtering proxy; disabling the cache also avoids sizing
+  `cache_dir`.
+- **`acl CONNECT method CONNECT` must be declared** before use in `http_access`
+  rules. Squid 6 rejects configs that reference undefined ACL names, causing a
+  fatal startup failure.
+- **`_prune_subdomains()` is required.** Squid 6 rejects a `dstdomain` ACL file
+  that contains both a domain and any of its subdomains (e.g. `.sub.example.com`
+  alongside `.example.com`). The helper removes any domain whose ancestor is
+  already present before the ACL file is written. Coverage is not reduced —
+  the parent already covers the subdomain via Squid's suffix matching.
+- **`squid -k reconfigure`** is the fast-reload mechanism. It rotates the ACL
+  table in-place without dropping in-flight CONNECT tunnels.
+
+### Consequences
+
+- research.py can load the full hagezi denylist (~1.56M entries once `tif` is
+  re-enabled in Phase 2) without OOM on the default 2 GiB VM.
+- Reload of 409k entries takes ~6s wall time (Python computation + SSH transfer +
+  squid reconfigure). At 1.56M entries this may reach ~24s; a compressed SSH
+  transfer (`gzip | tee | gunzip`) would significantly reduce the transfer
+  portion if that becomes unacceptable.
+- start-agent.sh keeps tinyproxy. The two scripts now use different proxy
+  backends, intentionally. New host-side scripts with large filter lists should
+  default to Squid; small allowlists are fine with tinyproxy.
+- Squid is an additional VM-level dependency for the `research` Colima profile,
+  installed idempotently via `apt-get install squid` on first bring-up.
