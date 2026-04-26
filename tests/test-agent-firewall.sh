@@ -143,8 +143,7 @@ test_searxng_port_isolation() {
 
   # Port 9000: must be blocked. With --reject-with icmp-admin-prohibited, curl
   # sees the ICMP response immediately and exits non-zero (typically exit 7).
-  local out
-  out=$(curl --noproxy searxng -sS --max-time 3 http://searxng:9000/ 2>&1)
+  curl --noproxy searxng -sS --max-time 3 http://searxng:9000/ >/dev/null 2>&1
   rc=$?
   if (( rc != 0 )); then
     pass "inter-container-port-isolation: searxng:9000 blocked (curl exit $rc)"
