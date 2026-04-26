@@ -354,11 +354,13 @@ def _prune_subdomains(domains: List[str]) -> List[str]:
     domain_set = set(domains)
     result: List[str] = []
     for domain in domains:
-        parts = domain.split(".")
-        covered = any(
-            ".".join(parts[i:]) in domain_set
-            for i in range(1, len(parts))
-        )
+        pos = domain.find(".")
+        covered = False
+        while pos != -1:
+            if domain[pos + 1:] in domain_set:
+                covered = True
+                break
+            pos = domain.find(".", pos + 1)
         if not covered:
             result.append(domain)
     return result
@@ -367,18 +369,11 @@ def _prune_subdomains(domains: List[str]) -> List[str]:
 def denylist_to_squid_acl(domains: List[str]) -> str:
     """Convert bare domain names to a Squid dstdomain ACL file body.
 
-    Each entry becomes .example.com (dotted-suffix form). Squid matches this
-    as example.com itself plus any subdomain — O(1) hash lookup, no regex NFA.
-
-    Subdomains of entries already present in the list are pruned first;
-    Squid 6 treats redundant subdomain entries as a fatal config error.
+    Expects clean bare-domain strings as returned by compose_denylist().
+    Each entry becomes .example.com (dotted-suffix form). Subdomains of
+    entries already present are pruned — Squid 6 rejects redundant ones.
     """
-    clean: List[str] = []
-    for domain in domains:
-        domain = domain.split("#", 1)[0].strip()
-        if domain:
-            clean.append(domain)
-    pruned = _prune_subdomains(clean)
+    pruned = _prune_subdomains([d for d in domains if d])
     return "\n".join(f".{d}" for d in pruned) + "\n" if pruned else ""
 
 
@@ -774,16 +769,16 @@ def apply_firewall(config: VmConfig, paths: Paths) -> None:
         vm_put_file(acl_file, "/etc/squid/denylist.txt")
 
         vm_sh("sudo systemctl enable --now squid >/dev/null 2>&1 || true")
-        result = vm_sh("sudo systemctl restart squid", check=False)
+        result = vm_sh(
+            "sudo systemctl restart squid 2>&1; RC=$?;"
+            " [ $RC -ne 0 ] && sudo journalctl -u squid --no-pager -n 30 2>/dev/null || true;"
+            " exit $RC",
+            check=False,
+        )
         if result.returncode != 0:
-            logs = vm_sh(
-                "sudo journalctl -u squid --no-pager -n 30 2>/dev/null || true",
-                check=False,
-            ).stdout
             raise RuntimeError(
                 f"squid failed to start (exit {result.returncode}).\n"
-                f"stderr: {result.stderr.strip()}\n"
-                f"journalctl:\n{logs}"
+                f"{result.stdout.strip()}"
             )
 
         fw_content = fw_file.read_bytes()

@@ -31,16 +31,15 @@ def test_denylist_squid_acl_multiple_domains():
     assert ".beta.com" in lines
 
 
-def test_denylist_squid_acl_skips_blank_lines():
-    result = denylist_to_squid_acl(["", "   ", "google.com", ""])
+def test_denylist_squid_acl_skips_empty_strings():
+    result = denylist_to_squid_acl(["", "google.com", ""])
     lines = [l for l in result.splitlines() if l.strip()]
     assert len(lines) == 1
 
 
-def test_denylist_squid_acl_inline_comment_stripped():
-    result = denylist_to_squid_acl(["google.com  # search engine"])
-    assert "search engine" not in result
-    assert ".google.com" in result
+def test_denylist_squid_acl_single_entry_has_newline():
+    result = denylist_to_squid_acl(["google.com"])
+    assert result.endswith("\n")
 
 
 def test_denylist_squid_acl_no_regex_escaping():
@@ -51,7 +50,7 @@ def test_denylist_squid_acl_no_regex_escaping():
 
 def test_denylist_squid_acl_empty_input():
     assert denylist_to_squid_acl([]) == ""
-    assert denylist_to_squid_acl(["# only comments"]) == ""
+    assert denylist_to_squid_acl(["", ""]) == ""
 
 
 # ── _prune_subdomains ────────────────────────────────────────────────────────
