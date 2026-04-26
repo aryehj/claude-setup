@@ -1,21 +1,25 @@
-"""Interactive thinking-axis comparison against omlx.
+"""Interactive thinking-axis sweep against omlx.
 
-omlx exposes no per-request thinking toggle; thinking is a server-side per-loaded-
-model setting. To compare thinking on/off for the same logical model, the human
-must reload the model in omlx between phases. This script pauses for that.
+omlx exposes no per-request thinking toggle; thinking is a server-side
+per-loaded-model setting. Each (model, thinking-state) combination requires
+a manual omlx reload. This script structures the sweep to minimize reloads
+(2 × N_models total) and runs a full prompt × temperature × query grid
+within each phase so prompt×thinking and temperature×thinking interactions
+are observable.
 
 Usage:
     uv run python tests/vane-eval/run_thinking.py [options]
 
 Options:
-    --base-url URL       omlx base URL (default: http://0.0.0.0:8000/v1)
-    --model NAME         model id as exposed by /v1/models (required)
-    --queries q1,q3      comma-separated query subset (default: all six)
-    --prompt-style S     bare | structured | research_system (default: structured)
-    --temperature F      sampling temperature (default: 0.3)
-    --out PATH           output directory (default: results/thinking-<UTC-ts>)
-    --skip-off           skip the thinking=off phase
-    --skip-on            skip the thinking=on phase
+    --base-url URL         omlx base URL (default: http://0.0.0.0:8000/v1)
+    --models a,b,c         comma-separated model shortlist (default: all discovered)
+    --prompt-styles s1,s2  subset of bare,structured,research_system (default: all)
+    --temperatures 0,0.3   comma-separated temperatures (default: 0.0,0.3,0.7)
+    --queries q1,q3        comma-separated query subset (default: all six)
+    --out PATH             output directory (default: results/thinking-<UTC-ts>)
+    --skip-off             skip every thinking=off phase
+    --skip-on              skip every thinking=on phase
+    --force                bypass the cell-count guard
 """
 from __future__ import annotations
 
@@ -33,13 +37,16 @@ from lib.cells import Cell, call_omlx, discover_omlx_models, write_cell_output
 from lib.queries import load as load_queries
 
 _DEFAULT_BASE_URL = "http://0.0.0.0:8000/v1"
+_PROMPT_STYLES = ["bare", "structured", "research_system"]
+_TEMPERATURES = [0.0, 0.3, 0.7]
+_MAX_CELLS_DEFAULT = 400
 
 
 def _prompt_user(model: str, thinking: bool) -> bool:
     """Block until the human confirms omlx is configured. Returns False to skip."""
     state = "ON" if thinking else "OFF"
     print()
-    print(f"━━ thinking={state} phase ━━")
+    print(f"━━ {model} · thinking={state} ━━")
     print(f"  Configure omlx so model {model!r} has thinking {state}.")
     print(f"  Then press Enter to continue, or type 'skip' to skip this phase.")
     answer = input("> ").strip().lower()
@@ -49,58 +56,75 @@ def _prompt_user(model: str, thinking: bool) -> bool:
 def _run_phase(
     base_url: str,
     model: str,
-    prompt_style: str,
-    temperature: float,
     thinking: bool,
+    prompt_styles: list[str],
+    temperatures: list[float],
     queries: list,
     run_dir: Path,
-) -> list[dict]:
+    counter_start: int,
+    counter_total: int,
+) -> tuple[list[dict], int]:
+    """Run a full prompt × temperature × query grid for one (model, thinking) phase.
+
+    Inner loop order is (prompt, temperature, query) so that consecutive cells
+    share the system-prompt prefix and benefit from omlx's KV cache.
+    """
     rows: list[dict] = []
-    for i, query in enumerate(queries, start=1):
-        cell = Cell(
-            query_id=query.id,
-            model=model,
-            prompt_style=prompt_style,
-            temperature=temperature,
-            thinking=thinking,
-            label=(
-                f"{model} · {prompt_style} · t={temperature} · "
-                f"think={'on' if thinking else 'off'}"
-            ),
-        )
-        print(f"  [{i}/{len(queries)}] {query.id}", end=" … ", flush=True)
-        result = call_omlx(base_url=base_url, cell=cell, query=query.query)
-        out_path = write_cell_output(
-            run_dir=run_dir,
-            cell=cell,
-            query_id=query.id,
-            query_text=query.query,
-            reference_text=query.reference,
-            result=result,
-        )
-        if result["error"]:
-            status = "error"
-        elif thinking and result["reasoning"] is None:
-            status = "skip:no-thinking-support"
-        elif (not thinking) and result["reasoning"] is not None:
-            status = "warn:reasoning-leaked"
-        else:
-            status = "ok"
-        rows.append({
-            "file": str(out_path.relative_to(run_dir)),
-            "label": cell.label,
-            "status": status,
-        })
-        print(status)
-    return rows
+    done = counter_start
+    for prompt_style in prompt_styles:
+        for temperature in temperatures:
+            for query in queries:
+                done += 1
+                cell = Cell(
+                    query_id=query.id,
+                    model=model,
+                    prompt_style=prompt_style,
+                    temperature=temperature,
+                    thinking=thinking,
+                    label=(
+                        f"{model} · {prompt_style} · t={temperature} · "
+                        f"think={'on' if thinking else 'off'}"
+                    ),
+                )
+                print(
+                    f"  [{done}/{counter_total}] {query.id}  "
+                    f"{prompt_style} t={temperature}",
+                    end=" … ",
+                    flush=True,
+                )
+                result = call_omlx(base_url=base_url, cell=cell, query=query.query)
+                out_path = write_cell_output(
+                    run_dir=run_dir,
+                    cell=cell,
+                    query_id=query.id,
+                    query_text=query.query,
+                    reference_text=query.reference,
+                    result=result,
+                )
+                if result["error"]:
+                    status = "error"
+                elif thinking and result["reasoning"] is None:
+                    status = "skip:no-thinking-support"
+                elif (not thinking) and result["reasoning"] is not None:
+                    status = "warn:reasoning-leaked"
+                else:
+                    status = "ok"
+                rows.append({
+                    "file": str(out_path.relative_to(run_dir)),
+                    "label": cell.label,
+                    "status": status,
+                })
+                print(status)
+    return rows, done
 
 
 def _write_manifest(
     run_dir: Path,
-    model: str,
-    prompt_style: str,
-    temperature: float,
     base_url: str,
+    models: list[str],
+    prompt_styles: list[str],
+    temperatures: list[float],
+    query_ids: list[str],
     rows: list[dict],
     wall_s: float,
 ) -> Path:
@@ -110,9 +134,10 @@ def _write_manifest(
         "## Run configuration",
         "",
         f"- **omlx base URL:** `{base_url}`",
-        f"- **model:** `{model}`",
-        f"- **prompt style:** `{prompt_style}`",
-        f"- **temperature:** `{temperature}`",
+        f"- **models:** {models}",
+        f"- **prompt styles:** {prompt_styles}",
+        f"- **temperatures:** {temperatures}",
+        f"- **queries:** {query_ids}",
         f"- **total wall-clock:** {wall_s:.1f}s",
         "",
         "Reasoning-leak status (`warn:reasoning-leaked`) means the human said "
@@ -131,40 +156,75 @@ def _write_manifest(
     return manifest_path
 
 
+def _parse_csv(value: str) -> list[str]:
+    return [v.strip() for v in value.split(",") if v.strip()]
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Interactive thinking on/off comparison against omlx"
+        description="Interactive thinking-axis sweep across models against omlx"
     )
     parser.add_argument("--base-url", default=_DEFAULT_BASE_URL)
-    parser.add_argument("--model", required=True, help="model id (must match /v1/models)")
-    parser.add_argument("--queries", default="", help="comma-separated query subset")
+    parser.add_argument("--models", default="", help="comma-separated model shortlist")
     parser.add_argument(
-        "--prompt-style", default="structured",
-        choices=["bare", "structured", "research_system"],
+        "--prompt-styles", default="",
+        help=f"comma-separated subset of {_PROMPT_STYLES} (default: all)",
     )
-    parser.add_argument("--temperature", type=float, default=0.3)
+    parser.add_argument(
+        "--temperatures", default="",
+        help=f"comma-separated temperatures (default: {_TEMPERATURES})",
+    )
+    parser.add_argument("--queries", default="", help="comma-separated query subset")
     parser.add_argument("--out", default="")
     parser.add_argument("--skip-off", action="store_true")
     parser.add_argument("--skip-on", action="store_true")
+    parser.add_argument(
+        "--force", action="store_true",
+        help=f"bypass the {_MAX_CELLS_DEFAULT}-cell guard",
+    )
     args = parser.parse_args(argv)
 
     if not args.base_url.startswith(("http://", "https://")):
         sys.exit(f"--base-url must start with http:// or https://; got: {args.base_url!r}")
 
-    # Discover models — validates connectivity and confirms the named model exists
+    # Discover models
     print(f"Discovering models at {args.base_url} …")
     try:
         discovered = discover_omlx_models(args.base_url)
     except RuntimeError as exc:
         sys.exit(str(exc))
-    if args.model not in discovered:
-        sys.exit(f"Model {args.model!r} not found in /v1/models. Available: {discovered}")
+    if not discovered:
+        sys.exit("No models returned by /v1/models. Is omlx running?")
 
-    # Load queries
+    # Resolve axes
+    if args.models:
+        active_models = _parse_csv(args.models)
+        missing = [m for m in active_models if m not in discovered]
+        if missing:
+            sys.exit(f"Model(s) not found in /v1/models: {', '.join(missing)}")
+    else:
+        active_models = discovered
+
+    if args.prompt_styles:
+        active_prompts = _parse_csv(args.prompt_styles)
+        bad = [p for p in active_prompts if p not in _PROMPT_STYLES]
+        if bad:
+            sys.exit(f"Unknown prompt style(s): {', '.join(bad)} (allowed: {_PROMPT_STYLES})")
+    else:
+        active_prompts = list(_PROMPT_STYLES)
+
+    if args.temperatures:
+        try:
+            active_temps = [float(t) for t in _parse_csv(args.temperatures)]
+        except ValueError as exc:
+            sys.exit(f"--temperatures parse error: {exc}")
+    else:
+        active_temps = list(_TEMPERATURES)
+
     queries_path = _HERE / "queries.md"
     all_queries = load_queries(queries_path)
     if args.queries:
-        requested = {q.strip() for q in args.queries.split(",") if q.strip()}
+        requested = set(_parse_csv(args.queries))
         active_queries = [q for q in all_queries if q.id in requested]
         missing_qs = requested - {q.id for q in active_queries}
         if missing_qs:
@@ -174,6 +234,26 @@ def main(argv: list[str] | None = None) -> int:
     if not active_queries:
         sys.exit("No queries selected.")
 
+    # Phase list (off, then on, honoring skip flags)
+    phases: list[bool] = []
+    if not args.skip_off:
+        phases.append(False)
+    if not args.skip_on:
+        phases.append(True)
+    if not phases:
+        sys.exit("Both --skip-off and --skip-on were passed; nothing to do.")
+
+    # Cell-count guard
+    cells_per_phase = len(active_prompts) * len(active_temps) * len(active_queries)
+    total_cells = len(active_models) * len(phases) * cells_per_phase
+    if total_cells > _MAX_CELLS_DEFAULT and not args.force:
+        sys.exit(
+            f"Cell count {total_cells} exceeds the {_MAX_CELLS_DEFAULT}-cell guard "
+            f"({len(active_models)} models × {len(phases)} phases × "
+            f"{len(active_prompts)} prompts × {len(active_temps)} temps × "
+            f"{len(active_queries)} queries). Pass --force to override."
+        )
+
     # Output dir
     if args.out:
         run_dir = Path(args.out)
@@ -181,43 +261,49 @@ def main(argv: list[str] | None = None) -> int:
         ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         run_dir = _HERE / "results" / f"thinking-{ts}"
     run_dir.mkdir(parents=True, exist_ok=True)
+
     print(f"Output → {run_dir}")
-    print(f"Model: {args.model} · prompt={args.prompt_style} · t={args.temperature}")
+    print(f"Models ({len(active_models)}): {active_models}")
+    print(f"Prompt styles: {active_prompts}")
+    print(f"Temperatures: {active_temps}")
     print(f"Queries ({len(active_queries)}): {[q.id for q in active_queries]}")
+    print(f"Phases per model: {['ON' if p else 'OFF' for p in phases]}")
+    print(f"Total cells: {total_cells}  (manual reloads: {len(active_models) * len(phases)})")
 
     rows: list[dict] = []
     t_start = time.monotonic()
+    done = 0
 
-    phases: list[tuple[bool, bool]] = [
-        (False, args.skip_off),
-        (True, args.skip_on),
-    ]
-    for thinking, skip_flag in phases:
-        if skip_flag:
-            print(f"\n(skipping thinking={'ON' if thinking else 'OFF'} phase via --skip flag)")
-            continue
-        if not _prompt_user(args.model, thinking):
-            print("  (skipped by user)")
-            continue
-        rows.extend(_run_phase(
-            base_url=args.base_url,
-            model=args.model,
-            prompt_style=args.prompt_style,
-            temperature=args.temperature,
-            thinking=thinking,
-            queries=active_queries,
-            run_dir=run_dir,
-        ))
+    for model in active_models:
+        for thinking in phases:
+            if not _prompt_user(model, thinking):
+                print("  (skipped by user)")
+                # advance counter so progress numbers stay accurate
+                done += cells_per_phase
+                continue
+            phase_rows, done = _run_phase(
+                base_url=args.base_url,
+                model=model,
+                thinking=thinking,
+                prompt_styles=active_prompts,
+                temperatures=active_temps,
+                queries=active_queries,
+                run_dir=run_dir,
+                counter_start=done,
+                counter_total=total_cells,
+            )
+            rows.extend(phase_rows)
 
     wall_s = time.monotonic() - t_start
     print(f"\nDone in {wall_s:.1f}s")
 
     manifest = _write_manifest(
         run_dir=run_dir,
-        model=args.model,
-        prompt_style=args.prompt_style,
-        temperature=args.temperature,
         base_url=args.base_url,
+        models=active_models,
+        prompt_styles=active_prompts,
+        temperatures=active_temps,
+        query_ids=[q.id for q in active_queries],
         rows=rows,
         wall_s=wall_s,
     )
