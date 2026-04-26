@@ -178,6 +178,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--force", action="store_true", help="bypass the 90-call guard")
     args = parser.parse_args(argv)
 
+    if not args.base_url.startswith(("http://", "https://")):
+        sys.exit(
+            f"--base-url must start with http:// or https://; got: {args.base_url!r}\n"
+            "Hint: set OMLX_HOST (e.g. export OMLX_HOST=http://192.168.5.2:8000) "
+            "then run: uv run python tests/vane-eval/run_cheap.py --base-url \"$OMLX_HOST/v1\""
+        )
+
     # Discover models
     print(f"Discovering models at {args.base_url} …")
     try:
