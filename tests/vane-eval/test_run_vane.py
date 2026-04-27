@@ -106,6 +106,78 @@ def test_winners_template_shape():
     assert tpl["ablations"] == []
 
 
+# ── select_winners.aggregate_cells ─────────────────────────────────────────────
+
+_MULTI_QUERY_SCORES = textwrap.dedent("""\
+    | file | label | model | prompt_style | temperature | thinking | total |
+    |------|-------|-------|--------------|-------------|----------|-------|
+    | q1_a.md | A | m1 | structured | 0.3 | false | 10 |
+    | q2_a.md | A | m1 | structured | 0.3 | false | 12 |
+    | q1_b.md | B | m2 | bare       | 0.0 | false | 14 |
+""")
+
+
+@skip_if_no_sw
+def test_aggregate_cells_sums_across_queries():
+    rows = _sw.parse_scores_md(_MULTI_QUERY_SCORES)
+    cells = _sw.aggregate_cells(rows)
+    assert len(cells) == 2
+    # m1/structured aggregate 10+12=22 outranks m2/bare's 14.
+    assert cells[0]["model"] == "m1"
+    assert cells[0]["total"] == 22
+    assert cells[0]["n"] == 2
+    assert cells[1]["model"] == "m2"
+    assert cells[1]["total"] == 14
+    assert cells[1]["n"] == 1
+
+
+@skip_if_no_sw
+def test_build_winners_json_picks_aggregate_winner_not_per_query_max():
+    """A single-query row with a high total must NOT win if its cell's
+    sweep-wide aggregate is below another cell's aggregate. This is the
+    bug that put a q4-only winner in the thinking sweep's winners.json.
+    """
+    rows = _sw.parse_scores_md(textwrap.dedent("""\
+        | file | label | model | prompt_style | temperature | thinking | total |
+        |------|-------|-------|--------------|-------------|----------|-------|
+        | q1_b.md | B | m2 | bare       | 0.0 | false | 15 |
+        | q2_b.md | B | m2 | bare       | 0.0 | false |  5 |
+        | q1_a.md | A | m1 | structured | 0.3 | false | 12 |
+        | q2_a.md | A | m1 | structured | 0.3 | false | 12 |
+    """))
+    winners = _sw.build_winners_json(rows)
+    # m1/structured aggregate=24 beats m2/bare aggregate=20, even though
+    # m2/bare has the single highest per-query row (15).
+    assert winners["winner"]["model"] == "m1"
+    assert winners["winner"]["prompt_style"] == "structured"
+
+
+@skip_if_no_sw
+def test_aggregate_cells_tiebreak_prefers_no_thinking():
+    rows = _sw.parse_scores_md(textwrap.dedent("""\
+        | file | label | model | prompt_style | temperature | thinking | total |
+        |------|-------|-------|--------------|-------------|----------|-------|
+        | q1_a.md | A | m1 | structured | 0.3 | true  | 14 |
+        | q1_b.md | B | m1 | structured | 0.3 | false | 14 |
+    """))
+    cells = _sw.aggregate_cells(rows)
+    assert cells[0]["thinking"] is False
+    assert cells[1]["thinking"] is True
+
+
+@skip_if_no_sw
+def test_aggregate_cells_tiebreak_prefers_lower_temperature_when_thinking_matches():
+    rows = _sw.parse_scores_md(textwrap.dedent("""\
+        | file | label | model | prompt_style | temperature | thinking | total |
+        |------|-------|-------|--------------|-------------|----------|-------|
+        | q1_a.md | A | m1 | structured | 1.0 | true | 14 |
+        | q1_b.md | B | m1 | structured | 0.2 | true | 14 |
+        | q1_c.md | C | m1 | structured | 0.6 | true | 14 |
+    """))
+    cells = _sw.aggregate_cells(rows)
+    assert [c["temperature"] for c in cells] == [0.2, 0.6, 1.0]
+
+
 # ── run_vane helpers ───────────────────────────────────────────────────────────
 
 PROVIDERS_RESP = {
