@@ -7,9 +7,8 @@ no Vane in the loop, no citations.
 
 The grading itself is done by Claude inside a Claude Code session: open this
 file, copy the **GRADING PROMPT** below, paste it into the chat, and Claude
-reads the cells against the references in `queries.md` and writes
-`SCORES.md` next to the cell files. From there, `select_winners.py` picks the
-winner.
+dispatches a fan-out of grading subagents that produce `SCORES.md` next to
+the cell files. From there, `select_winners.py` picks the winner.
 
 > **Phase 4b** will extend this rubric with citation grading for Vane-phase
 > runs (`results/vane-<UTC-ts>/`). For now, ignore Vane runs even if
@@ -17,24 +16,58 @@ winner.
 
 ---
 
+## Why this prompt fans out instead of grading inline
+
+A typical run is 6 queries × 3 models × 3 prompt styles × 3 temperatures × 2
+thinking states = **324 cell files**, each ~12 KB. Reading all of them in
+one agent costs ~950K tokens of input — well over a single Sonnet/Opus
+session's context, even before the rubric work. A previous attempt by Sonnet
+that improvised mid-run partitions ran out of context twice (subagent
+overflows, then dispatcher overflow from verbose subagent returns).
+
+The prompt below pre-bakes the partition and the I/O contract so the
+dispatcher never reads cells, and so subagent returns stay one line each:
+
+- **Partition** by `(query, model)` → 18 slices of ~18 cells (~55K tokens
+  each), well within budget.
+- **Subagents write rows directly to disk** as `SCORES-<query>-<model>.md`
+  partials — they do NOT return the rows in their reply.
+- **Subagents return a single status line** ("done: N rows written" or
+  "blocked: ..."). Nothing else.
+- **Main agent assembles** the partials with a Bash `cat` + `sort`, then
+  reads only the small final `SCORES.md` to write the wash-up.
+
+This keeps the dispatcher's working set tiny (MANIFEST + queries.md +
+final assembled table) regardless of run size.
+
+---
+
 ## How to use
 
-1. Open this file (`tests/vane-eval/JUDGE.md`) in a Claude Code session at the
-   repo root. No other priming context is needed.
-2. Copy everything inside the **GRADING PROMPT** fenced block below and paste
-   it into the chat. Claude will locate the most recent run dir, read every
-   cell file, read the references in `queries.md`, and write `SCORES.md` in
-   the same run dir.
-3. After grading, run `uv run python tests/vane-eval/select_winners.py
+1. Open this file (`tests/vane-eval/JUDGE.md`) in a Claude Code session at
+   the repo root. Sonnet 4.6 is sufficient; Opus is fine too. No other
+   priming context is needed.
+2. Copy everything inside the **GRADING PROMPT** fenced block below and
+   paste it into the chat.
+3. Claude will: locate the latest run dir, read `MANIFEST.md` and
+   `queries.md`, dispatch ~18 parallel subagents (one per query × model),
+   wait for partials, assemble `SCORES.md`, and append a wash-up.
+4. After grading, run `uv run python tests/vane-eval/select_winners.py
    --from tests/vane-eval/results/<run-dir>` to produce `winners.json`.
+
+Expected wall time: a few minutes once subagents start; throttled mostly
+by parallel-agent fan-out, not by Read calls.
 
 ---
 
 ## GRADING PROMPT
 
 ```
-You are grading a research-quality eval run. Your output goes to a
-SCORES.md file that will be parsed by select_winners.py.
+You are grading a research-quality eval run. Your output is a SCORES.md
+file (Markdown table + wash-up) that select_winners.py will parse. There
+are ~324 cell files in the run; reading them all in this main agent will
+exhaust context. The plan below partitions cell reading into parallel
+subagents so the dispatcher never reads cells. Follow it as written.
 
 STEP 1 — Locate the run.
 
@@ -45,92 +78,173 @@ Glob the most recent non-Vane run directory under
     tests/vane-eval/results/cheap-*/MANIFEST.md
 
 Pick the lexicographically latest one (timestamps in the dir name sort
-correctly). Read its `MANIFEST.md` to enumerate every cell file in the
-run.
+correctly). Record its absolute path; you will pass it to subagents.
 
-STEP 2 — Read references.
+STEP 2 — Load references and the sweep dimensions.
 
-Read `tests/vane-eval/queries.md` in full. Each query has a one-paragraph
-**Reference** answer plus a bulleted **Key facts** list. Use these as the
-floor of correctness, not a ceiling — see the rubric note about
-correct-but-unanticipated answers below.
+Read:
+  - `tests/vane-eval/queries.md` (full file — small).
+  - `<run_dir>/MANIFEST.md` to learn the swept models, prompt styles,
+    temperatures, query slugs, and total cell count.
 
-STEP 3 — Read every cell.
+Do NOT read individual cell files in this main agent. Cells average
+~12 KB each; reading more than a few dozen will eat your context. Cell
+reading is exclusively delegated to subagents in STEP 3.
 
-For each cell file the manifest lists, read the file. The relevant
-sections are `## Query`, `## Reference` (already in the file for
-convenience), `## Response`, and the YAML frontmatter (model,
-prompt_style, temperature, thinking, latency_s, status, finish_reason,
-output_tokens). Skip cells whose status starts with `error`.
+STEP 3 — Dispatch grader subagents (parallel, partition by query × model).
 
-STEP 4 — Score each cell on three axes (1–5 each).
+For every (query_id, model) pair in the sweep — typically 6 queries ×
+3 models = 18 pairs — spawn ONE Agent (subagent_type=general-purpose).
+Send all 18 in a SINGLE message so they run concurrently. Use the
+SUBAGENT PROMPT template below; substitute the per-slice values.
 
-  • coverage:     how many of the query's Key facts the response hits,
-                  and whether it covers the territory the reference
-                  paragraph implies.
-                  5 = hits ≥90% of key facts plus relevant adjacent
-                      material.
-                  3 = hits the obvious half but misses subtler points.
+Each slice has prompt_styles × temperatures × thinking_states cells
+(typically 3 × 3 × 2 = 18 cells, ~55K tokens of cell content). That fits
+comfortably in a subagent's context.
+
+If MANIFEST shows a different sweep shape (e.g. 4 models, 4 temperatures),
+keep the same partition rule — one subagent per (query, model) — and let
+the per-slice cell count grow or shrink. If a single slice would still be
+> ~80 cells, partition further by (query, model, prompt_style); otherwise
+do not subdivide.
+
+────────────── SUBAGENT PROMPT (template — substitute every <…>) ─────
+Grade Vane-eval cell files for query "<query_id>" against model
+"<model>". Score using the rubric below; write rows to a file; return
+only a single-line ack.
+
+Run dir (absolute): <run_dir>
+Cells to grade: every file matching this glob, no exceptions —
+    <run_dir>/<query_id>_<model>_-_*.md
+You can enumerate them with `ls <run_dir>/<query_id>_<model>_-_*.md`.
+Expect ~<expected_count> files.
+
+REFERENCE for <query_id>:
+
+  Query:
+    <verbatim Query text from queries.md>
+
+  Reference paragraph:
+    <verbatim Reference paragraph>
+
+  Key facts:
+    - <fact 1>
+    - <fact 2>
+    ...
+
+The reference is a FLOOR, not a ceiling. Credit correct-and-relevant
+material that goes beyond the listed key facts. Penalise wrongness, not
+unanticipated correctness.
+
+RUBRIC (each axis 1–5; no citation column for cheap/thinking phase):
+
+  • coverage:     how many of the query's key facts the response hits,
+                  plus relevant adjacent material the reference implies.
+                  5 = ≥90% of key facts plus relevant adjacent material.
+                  3 = obvious half but misses subtler points.
                   1 = mostly off-topic or obviously incomplete.
 
-  • accuracy:     factual correctness of the claims that ARE made.
-                  5 = no detectable factual errors.
-                  3 = one or two minor slips (off-by-one dates, swapped
-                      units, etc.).
+  • accuracy:     factual correctness of claims actually made.
+                  5 = no detectable errors.
+                  3 = one or two minor slips (off-by-one date, swapped
+                      unit, etc.).
                   1 = central claim is wrong.
 
-  • succinctness: signal density — does the response say it once,
-                  clearly, without padding or self-narration?
-                  5 = tight, no filler, no "as an AI…".
-                  3 = noticeable padding but still readable.
-                  1 = wall of restated questions, hedges, or list-of-
-                      lists scaffolding.
+  • succinctness: signal density.
+                  5 = tight, no filler, no self-narration.
+                  3 = noticeable padding but readable.
+                  1 = wall of restated questions, hedges, list-of-lists
+                      scaffolding.
 
-The cheap/thinking phase has no citations, so there is NO citation
-column in this rubric. Total is /15.
+PROCESS for each cell file:
+  1. Read it.
+  2. Skip cells whose `status:` frontmatter starts with "error" — emit
+     no row for them.
+  3. Read the YAML frontmatter and the `## Response` section. Ignore
+     `## Query` and `## Reference` (they're echoed for convenience).
+  4. Score coverage / accuracy / succinctness as integers 1–5.
+  5. total = coverage + accuracy + succinctness  (max 15).
+  6. Build ONE Markdown table row in this exact column order:
 
-IMPORTANT — credit correct-but-unanticipated answers.
+     | <file> | <label> | <model> | <prompt_style> | <temperature> | <thinking> | <coverage> | <accuracy> | <succinctness> | <total> |
 
-The reference paragraph reflects the eval author's prior knowledge. If a
-response gives correct-and-relevant material the reference does not
-mention, count that toward coverage. The reference is a floor, not a
-ceiling. Penalise only when the response is wrong, not when it goes
-beyond what was anticipated.
+     - file: cell .md filename only — no leading slash, no run-dir
+       prefix, no surrounding whitespace beyond a single space.
+     - label: copy the frontmatter `label:` field verbatim.
+     - model, prompt_style, temperature: from frontmatter.
+     - thinking: lowercase string "true" or "false".
+     - coverage, accuracy, succinctness, total: integers.
 
-STEP 5 — Emit SCORES.md.
+OUTPUT (write a file, then return one line):
 
-Write `SCORES.md` to the same run dir you read MANIFEST from. The body
-must be a single Markdown table sorted by total descending. Use exactly
-these column names (case-insensitive but spelled this way):
+  Write all rows — concatenated with newlines, NO header, NO separator,
+  NO surrounding prose, NO commentary, NO wash-up — to:
 
-| file | label | model | prompt_style | temperature | thinking | coverage | accuracy | succinctness | total |
+      <run_dir>/SCORES-<query_id>-<model_slug>.md
 
-Where:
-  - file: the cell .md filename, relative to the run dir, no leading slash.
-  - label: copy the `label:` field from the cell's frontmatter.
-  - model, prompt_style, temperature, thinking: from frontmatter.
-  - coverage, accuracy, succinctness: integers 1–5 from your scoring.
-  - total: integer sum of the three (max 15).
+  where <model_slug> is the model name with every "/" replaced by "_".
+  The file must contain ONLY table rows, one per non-error cell.
 
-Do NOT include an extra "citation" column for cheap-phase rows.
+  Then return EXACTLY one line of text and stop:
 
-STEP 6 — Wash-up.
+      done: <N> rows written to SCORES-<query_id>-<model_slug>.md
 
-After the table, write a `## Wash-up` section with short paragraphs:
+  …or, if you couldn't complete:
+
+      blocked: <one-sentence reason>
+
+  Do NOT include the rows in your reply. Do NOT include any analysis,
+  per-cell notes, or wash-up. The dispatcher will assemble the final
+  SCORES.md from the partial files.
+────────────────────────────────────────────────────────────────────
+
+After dispatch, wait for all subagent acks. If any return `blocked:` or
+write fewer rows than expected, re-dispatch ONLY those slices with a
+clarification — never re-grade slices that already succeeded.
+
+STEP 4 — Reconcile partials into SCORES.md.
+
+From the run dir, run a Bash one-liner to assemble the partials. The
+header line below is what `select_winners.py` parses; do not change
+column names or order.
+
+    cd <run_dir> && {
+      printf '| file | label | model | prompt_style | temperature | thinking | coverage | accuracy | succinctness | total |\n'
+      printf '|------|-------|-------|--------------|-------------|----------|----------|----------|--------------|-------|\n'
+      cat SCORES-q*-*.md | sort -t'|' -k11,11 -b -nr
+    } > SCORES.md
+
+Verify:
+  - `wc -l <run_dir>/SCORES.md` should be 2 (header + separator) +
+    (total cells from MANIFEST minus any `status:error` cells).
+  - The first data row's `total` should be the largest in the table.
+
+If verification fails, do NOT silently continue — print which subagent
+file looks malformed and re-dispatch just that slice.
+
+Once verified, delete the partials so the run dir stays clean:
+
+    rm <run_dir>/SCORES-q*-*.md
+
+STEP 5 — Wash-up.
+
+Read the assembled `SCORES.md` (now small enough to fit — ~50 KB at
+324 rows). Append a `## Wash-up` section with short paragraphs, 2–4
+sentences each:
 
   - Which axis dominated the ranking — model, prompt_style, temperature,
     or thinking?
   - Which model won, and was the win clean across queries or noisy?
   - Did prompt_style and temperature interact (e.g. structured + low
     temp clearly best, but research_system flipped at high temp)?
-  - Did thinking=on help, or just spend latency without measurable
-    quality gain?
+  - Did thinking=on help measurably, or just spend latency?
+  - Note any cells whose status is `warn:reasoning-leaked` so the human
+    can re-check the omlx model load. Do not score them differently.
 
-Keep each paragraph 2–4 sentences. This section is for the human; it is
-not parsed.
+This section is for the human; it is not parsed.
 
-OUTPUT — write SCORES.md and stop. Do not also produce winners.json
-(that's select_winners.py's job).
+OUTPUT — write SCORES.md (table + wash-up) and stop. Do NOT also produce
+winners.json — that is select_winners.py's job.
 ```
 
 ---
@@ -190,3 +304,11 @@ self-narration, or stacks of bulleted scaffolding around a thin core?
 - The `warn:reasoning-leaked` status means the human said thinking was OFF
   but `reasoning_content` came back populated — flag those in the wash-up so
   the human can re-check the omlx model load. Do not score them differently.
+- If the `(query, model)` partition still overflows a subagent (e.g. the
+  sweep grew to 5 prompt styles × 5 temps × 2 thinking = 50 cells per
+  slice), subdivide further by `(query, model, prompt_style)`. Don't
+  improvise mid-run — partition before dispatching, so every subagent gets
+  a slice it can fit in one shot.
+- If a subagent returns `blocked: …`, re-dispatch only that slice. Never
+  re-grade slices that already produced a partial — duplicates will break
+  the assembled table.
