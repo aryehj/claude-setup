@@ -593,7 +593,37 @@ Output: `tests/vane-eval/results/cheap-<UTC-ts>/` — one `.md` per cell plus
 `MANIFEST.md`. Grade the results using `tests/vane-eval/JUDGE.md` (added in
 Phase 4). A `SCORES.md` is written into the run dir by the grader.
 
-**Phase 2 — Pick winners and confirm through Vane** (run from the macOS host
+**Phase 2 — Thinking-axis sweep** (interactive; one human reload per phase):
+
+Before running, configure each omlx model with thinking OFF (Phase 1 of the
+sweep), then with thinking ON at a **4000-token reasoning budget** (Phase 2).
+The script pauses at each phase boundary and waits for Enter.
+
+```bash
+export OMLX_API_KEY=your-key
+OMLX_BASE="http://0.0.0.0:8000/v1"
+
+# Full 3-model × 3-prompt × 3-temperature × 6-query × 2-phase sweep (324 cells)
+uv run python tests/vane-eval/run_thinking.py --base-url "$OMLX_BASE" --force
+
+# Subset: two models, one query, skip the thinking=OFF phase
+uv run python tests/vane-eval/run_thinking.py \
+  --base-url "$OMLX_BASE" \
+  --models "gemma-4-26b-a4b-it-8bit,gemma-4-31b-it-6bit" \
+  --queries q1 --skip-off
+```
+
+Defaults: temperatures `0.2, 0.6, 1.0` (bracketing Google's Gemma recommendation
+of `t=1.0`), `max_tokens=8192` (4000 reasoning + ≥4192 content), `timeout=1200s`.
+Each cell file gets `finish_reason` and `output_tokens` in its YAML frontmatter.
+`MANIFEST.md` opens with a status-summary block (counts by `error`, `error:no-content`,
+`warn:truncated`, `warn:reasoning-leaked`, `ok`). The sweep fail-fasts if the first
+successful cell in a `thinking=ON` phase returns no `reasoning_content` — this
+catches a stale omlx model load before it corrupts the entire phase.
+
+Output: `tests/vane-eval/results/thinking-<UTC-ts>/` — one `.md` per cell plus `MANIFEST.md`.
+
+**Phase 3 — Pick winners and confirm through Vane** (run from the macOS host
 where `localhost:3000` resolves to Vane and `docker` is reachable):
 
 ```bash

@@ -1753,3 +1753,71 @@ running a single-cell smoke test where temperature is known to be already correc
 - `run_vane.py` is designed to run on the macOS host, not from inside the
   `start-claude.sh` microVM — the dev container has no route to `localhost:3000`
   and no `docker` binary for the research VM.
+
+---
+
+## ADR-031: run_thinking.py revision — status taxonomy, fail-fast, and uniform thinking budget
+
+**Date:** 2026-04-27
+**Status:** Accepted
+
+### Context
+
+The first thinking-axis sweep (324 cells, 4.18 hr wall) produced corrupted data:
+122/324 cells (38%) hit `finish_reason="length"` at `max_tokens=1024`, cutting
+output mid-sentence. Six cells had empty `content` because the model never emerged
+from `reasoning_content` before hitting the cap. The manifest labelled all six
+`ok`. Additionally, per-model thinking budgets differed (E4B=4000, MoE=8000,
+31b=12000), confounding model-size effects with reasoning-token budget effects.
+The status logic was duplicated between `write_cell_output` and `_run_phase` and
+used a heuristic (`thinking=True and reasoning=None → skip:no-thinking-support`)
+that misfired on cells that produced full responses without entering the reasoning
+channel.
+
+### Decision
+
+**Status taxonomy.** A single `classify_status(cell, result)` helper in
+`lib/cells.py` defines a worst-wins precedence ladder and is called from both
+`write_cell_output` (per-cell frontmatter) and `_run_phase` (manifest row).
+The ladder: `error > error:no-content > warn:truncated > warn:reasoning-leaked > ok`.
+`skip:no-thinking-support` is removed — per-cell absence of `reasoning_content`
+on a `thinking=True` cell is a data point, not a failure; the phase-level human
+prompt asserts the model configuration.
+
+**Fail-fast assertion.** `_run_phase` checks the first successful cell of each
+`(model, thinking=ON)` phase. If `reasoning_content` is absent and there was no
+transport error, it raises `RuntimeError` immediately rather than running 50+
+cells against a misconfigured model.
+
+**Uniform 4000-token thinking budget.** All three Gemma 4 models are configured
+at 4000 reasoning tokens (via the omlx server-side setting, applied during the
+human-prompted reload). `max_tokens=8192` (up from 1024) ensures `max_tokens`
+always exceeds the reasoning budget, making empty-content pathology impossible.
+`timeout_s` raised from 600 to 1200 to accommodate worst-case 31b·think=on cells.
+
+**Temperature axis.** Default temperatures changed from `[0.0, 0.3, 0.7]` to
+`[0.2, 0.6, 1.0]` to bracket Google's published Gemma recommendation (`t=1.0,
+top_k=64, top_p=0.95`). The prior axis sampled only below the recommended regime.
+
+**Frontmatter.** `finish_reason` and `output_tokens` are now written to each cell
+file's YAML frontmatter, pulled from `result["raw"]["choices"][0]["finish_reason"]`
+and `result["raw"]["usage"]["completion_tokens"]`. Previously these required
+grepping the embedded JSON blob.
+
+**Manifest summary.** `MANIFEST.md` now opens with a `## Status summary` block
+listing non-zero status counts in precedence order, making run health an
+at-a-glance check rather than a 324-row scroll.
+
+### Consequences
+
+- `classify_status` is the single source of truth for status classification.
+  Any new status values must be added there and added to `_STATUS_ORDER` in
+  `run_thinking.py` for correct manifest ordering.
+- The fail-fast fires on misconfiguration before files are written for corrupt
+  cells, but does not fire if the very first cell fails with a transport error
+  (the check gates on `not result["error"]`).
+- Uniform 4000-token budget means findings about 31b are findings about
+  "31b at 4k reasoning tokens", not native-capability claims.
+- `finish_reason` and `output_tokens` in frontmatter are parsed from `result["raw"]`
+  and default to `"unknown"` / `0` if the response shape is missing those fields
+  (e.g. on transport error).

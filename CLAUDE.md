@@ -22,10 +22,10 @@ tests/                       — unit tests and eval harness
   vane-eval/                           — Vane research-quality eval harness (OFAT sweep)
     queries.md                         — six research queries with reference answers
     run_cheap.py                       — cheap phase: OFAT sweep against omlx directly (model/prompt/temperature axes)
-    run_thinking.py                    — interactive thinking on/off comparison (human reloads omlx model between phases)
+    run_thinking.py                    — thinking on/off sweep: two human-prompted phases, classify_status taxonomy, finish_reason+output_tokens in frontmatter, status-summary in MANIFEST
     select_winners.py                  — pick winner + ablations from a graded cheap run
     run_vane.py                        — Vane confirm phase: replay winner through full pipeline
-    lib/                               — shared helpers (cells.py, queries.py)
+    lib/                               — shared helpers (cells.py: Cell, call_omlx, classify_status, write_cell_output; queries.py: load)
     test_lib.py, test_run_cheap.py     — pytest suites for lib + run_cheap
     test_run_vane.py                   — pytest suite for select_winners + run_vane helpers
 ROADMAP.md                   — planned work

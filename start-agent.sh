@@ -186,7 +186,6 @@ fi
 COLIMA_PROFILE="claude-agent"
 CONTAINER_NAME="claude-agent"
 IMAGE_TAG="claude-agent:latest"
-IMAGE_STAMP="$HOME/.claude-agent-image-built"
 DOCKERFILE_PATH="$(cd "$(dirname "$0")" && pwd)/dockerfiles/claude-agent.Dockerfile"
 DOCKERFILE_DIR="$(dirname "$DOCKERFILE_PATH")"
 CLAUDE_CONFIG_DIR="$HOME/.claude-containers/shared"
@@ -592,7 +591,6 @@ vm_put_file() {
 # actually has something to talk to; deleting the VM itself must happen BEFORE
 # `colima start` so the start-up path recreates a clean VM.
 if $REBUILD && ! $RELOAD_ALLOWLIST; then
-  rm -f "$IMAGE_STAMP"
   echo
   read -r -p "Also delete and recreate the Colima VM '$COLIMA_PROFILE'? This is NOT reversible. [y/N] " confirm
   if [[ "${confirm:-}" =~ ^[Yy]$ ]]; then
@@ -727,28 +725,6 @@ outgoing:
     all://: "http://$BRIDGE_IP:$TINYPROXY_PORT"
 SXNG
     echo "==> Seeded $SEARXNG_SETTINGS_FILE (secret_key generated, proxy=$BRIDGE_IP:$TINYPROXY_PORT)"
-  else
-    # Drift check: the seed block only writes when the file is missing, so a
-    # past run with a different proxy address (e.g. the old Squid port 3128)
-    # can leave a stale `outgoing.proxies.all://` value behind. Detect and
-    # rewrite just that one line; leave user customizations elsewhere alone.
-    EXPECTED_PROXY="http://$BRIDGE_IP:$TINYPROXY_PORT"
-    CURRENT_PROXY=$(awk '
-      /^outgoing:/ { in_out = 1; next }
-      in_out && /^[^[:space:]]/ { in_out = 0 }
-      in_out && /all:\/\/:/ {
-        match($0, /"[^"]+"/)
-        if (RSTART) print substr($0, RSTART+1, RLENGTH-2)
-        exit
-      }
-    ' "$SEARXNG_SETTINGS_FILE")
-    if [[ -n "$CURRENT_PROXY" && "$CURRENT_PROXY" != "$EXPECTED_PROXY" ]]; then
-      echo "==> SearXNG proxy drift: $CURRENT_PROXY → $EXPECTED_PROXY"
-      sed -i.bak -E "s|(all://:[[:space:]]*)\"[^\"]+\"|\1\"$EXPECTED_PROXY\"|" \
-        "$SEARXNG_SETTINGS_FILE"
-      rm -f "$SEARXNG_SETTINGS_FILE.bak"
-      SEARXNG_CONFIG_CHANGED=true
-    fi
   fi
 fi
 
@@ -904,14 +880,6 @@ if ! docker image inspect "$IMAGE_TAG" &>/dev/null; then
   # still attach to the bridge and are firewalled normally.
   docker build --network=host \
     -t "$IMAGE_TAG" -f "$DOCKERFILE_PATH" "$DOCKERFILE_DIR"
-  date +%s > "$IMAGE_STAMP"
-elif [[ -f "$IMAGE_STAMP" ]]; then
-  BUILD_TIME=$(cat "$IMAGE_STAMP")
-  NOW=$(date +%s)
-  AGE_DAYS=$(( (NOW - BUILD_TIME) / 86400 ))
-  if (( AGE_DAYS >= 30 )); then
-    echo "==> Warning: $IMAGE_TAG is ${AGE_DAYS} days old. Run with --rebuild to refresh."
-  fi
 fi
 
 # ── SearXNG container lifecycle ──────────────────────────────────────────────
@@ -924,9 +892,6 @@ if $LOCAL_SEARCH_ENABLED; then
       -v "$SEARXNG_SETTINGS_FILE:/etc/searxng/settings.yml:ro" \
       docker.io/searxng/searxng >/dev/null
     echo "    searxng: created"
-  elif [[ "${SEARXNG_CONFIG_CHANGED:-false}" == "true" ]]; then
-    docker restart "$SEARXNG_CONTAINER" >/dev/null || true
-    echo "    searxng: restarted (settings.yml drift fixed)"
   else
     docker start "$SEARXNG_CONTAINER" >/dev/null || true
     echo "    searxng: started (existing container)"
@@ -1148,10 +1113,6 @@ os.makedirs(os.path.dirname(path), exist_ok=True)
 with open(path, 'w') as f:
     json.dump(data, f, indent=2)
     f.write('\n')
-
-# Emit a machine-friendly summary line for the shell wrapper.
-count = len(providers.get(provider_key, {}).get('models', {})) if provider_key else 0
-print(f"MODEL_COUNT={count}", file=sys.stderr)
 PYEOF
 
 # ── skills sync (new-container path only) ────────────────────────────────────
@@ -1223,12 +1184,10 @@ if docker container inspect "$CONTAINER_NAME" &>/dev/null; then
   # Check that the existing mount matches $PROJECT_DIR. If not, recreate.
   existing_mount=$(docker container inspect -f '{{range .Mounts}}{{if eq .Destination "'"$PROJECT_DIR"'"}}{{.Source}}{{end}}{{end}}' "$CONTAINER_NAME" 2>/dev/null || true)
   if [[ "$existing_mount" == "$PROJECT_DIR" ]]; then
-    # In-use detection: if another interactive shell is already attached, refuse.
     running_state=$(docker container inspect -f '{{.State.Running}}' "$CONTAINER_NAME" 2>/dev/null || echo "false")
     if [[ "$running_state" == "true" ]]; then
       if docker top "$CONTAINER_NAME" 2>/dev/null | grep -q '/bin/bash'; then
-        existing_proj=$(docker container inspect -f '{{range .Mounts}}{{if ne .Destination "/root/.claude"}}{{if ne .Destination "/root/.claude.json"}}{{if ne .Destination "/root/.config/opencode"}}{{if ne .Destination "/root/.local/share/opencode"}}{{.Destination}} {{end}}{{end}}{{end}}{{end}}{{end}}' "$CONTAINER_NAME" 2>/dev/null | awk '{print $1}')
-        echo "warning: container '$CONTAINER_NAME' appears to already have an interactive session (project: $existing_proj). Attaching anyway; two shells sharing state may be confusing." >&2
+        echo "warning: container '$CONTAINER_NAME' already has an attached shell; attaching anyway. Two shells sharing state may be confusing." >&2
       fi
     fi
     attach_existing
