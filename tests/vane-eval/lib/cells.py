@@ -20,8 +20,16 @@ Unknown #3 — omlx thinking parameter:
   NOT toggle the server config at request time on Gemma models.
   For the OFAT thinking axis: cell.thinking=True means the caller should route
   to a model with thinking enabled; cell.thinking=False means a model without.
-  If reasoning_content is null on a cell where thinking=True, the cell records
-  status="skip:no-thinking-support" in the output.
+  Per-cell absence of reasoning_content on a thinking=True cell is a data point,
+  not a failure — the phase-level human prompt asserts the model configuration.
+
+## Status taxonomy (worst-wins precedence, top to bottom)
+
+  error              — HTTP/transport failure
+  error:no-content   — request succeeded but content is empty/whitespace
+  warn:truncated     — finish_reason="length" and content non-empty
+  warn:reasoning-leaked — thinking=False cell but reasoning_content populated
+  ok                 — none of the above
 """
 from __future__ import annotations
 
@@ -43,6 +51,32 @@ class Cell:
     temperature: float
     thinking: bool
     label: str
+
+
+def classify_status(cell: "Cell", result: "dict[str, Any]") -> str:
+    """Return the status string for a completed cell using worst-wins precedence.
+
+    Ladder (highest severity first):
+      error              — HTTP/transport failure
+      error:no-content   — request succeeded but content is empty/whitespace
+      warn:truncated     — finish_reason="length" and content non-empty
+      warn:reasoning-leaked — thinking=False cell but reasoning_content populated
+      ok                 — none of the above
+    """
+    if result["error"]:
+        return "error"
+    if not result["text"].strip():
+        return "error:no-content"
+    finish_reason = (
+        result.get("raw", {})
+        .get("choices", [{}])[0]
+        .get("finish_reason", "stop")
+    )
+    if finish_reason == "length":
+        return "warn:truncated"
+    if (not cell.thinking) and result["reasoning"] is not None:
+        return "warn:reasoning-leaked"
+    return "ok"
 
 
 def discover_omlx_models(base_url: str) -> list[str]:
@@ -101,7 +135,7 @@ def call_omlx(
     base_url: str,
     cell: Cell,
     query: str,
-    timeout_s: int = 120,
+    timeout_s: int = 600,
 ) -> dict[str, Any]:
     """POST to {base_url}/chat/completions and return a normalised result dict.
 
@@ -194,11 +228,7 @@ def write_cell_output(
     out_path = run_dir / filename
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    status = "ok"
-    if result["error"]:
-        status = "error"
-    elif cell.thinking and result["reasoning"] is None:
-        status = "skip:no-thinking-support"
+    status = classify_status(cell, result)
 
     # YAML frontmatter
     frontmatter_lines = [

@@ -10,8 +10,95 @@ _HERE = Path(__file__).parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
-from lib.cells import Cell, build_prompt
+from lib.cells import Cell, build_prompt, classify_status
 from lib.queries import Query, load as load_queries
+
+
+# ── classify_status ────────────────────────────────────────────────────────────
+
+def _cell(thinking: bool = False) -> Cell:
+    return Cell(
+        query_id="q1",
+        model="m1",
+        prompt_style="bare",
+        temperature=0.5,
+        thinking=thinking,
+        label="m1 · bare · t=0.5 · think=off",
+    )
+
+
+def _result(
+    error: str | None = None,
+    text: str = "some content",
+    reasoning: object = None,
+    finish_reason: str = "stop",
+    completion_tokens: int = 100,
+) -> dict:
+    return {
+        "error": error,
+        "text": text,
+        "reasoning": reasoning,
+        "raw": {
+            "choices": [{"finish_reason": finish_reason}],
+            "usage": {"completion_tokens": completion_tokens},
+        },
+        "latency_s": 1.0,
+    }
+
+
+def test_classify_status_ok():
+    assert classify_status(_cell(), _result()) == "ok"
+
+
+def test_classify_status_error_http():
+    assert classify_status(_cell(), _result(error="connection refused")) == "error"
+
+
+def test_classify_status_error_no_content_empty_text():
+    assert classify_status(_cell(), _result(text="")) == "error:no-content"
+
+
+def test_classify_status_error_no_content_whitespace_text():
+    assert classify_status(_cell(), _result(text="   \n  ")) == "error:no-content"
+
+
+def test_classify_status_warn_truncated():
+    assert classify_status(_cell(), _result(finish_reason="length")) == "warn:truncated"
+
+
+def test_classify_status_warn_reasoning_leaked():
+    assert (
+        classify_status(_cell(thinking=False), _result(reasoning="<think>stuff</think>"))
+        == "warn:reasoning-leaked"
+    )
+
+
+def test_classify_status_error_beats_no_content():
+    """error takes precedence over error:no-content."""
+    r = _result(error="timeout", text="")
+    assert classify_status(_cell(), r) == "error"
+
+
+def test_classify_status_no_content_beats_truncated():
+    """error:no-content takes precedence over warn:truncated."""
+    r = _result(text="", finish_reason="length")
+    assert classify_status(_cell(), r) == "error:no-content"
+
+
+def test_classify_status_truncated_beats_reasoning_leaked():
+    """warn:truncated takes precedence over warn:reasoning-leaked."""
+    r = _result(finish_reason="length", reasoning="<think>x</think>")
+    assert classify_status(_cell(thinking=False), r) == "warn:truncated"
+
+
+def test_classify_status_no_skip_when_think_on_but_no_reasoning():
+    """thinking=True with reasoning=None is just ok — no skip:no-thinking-support."""
+    assert classify_status(_cell(thinking=True), _result(reasoning=None)) == "ok"
+
+
+def test_classify_status_reasoning_leaked_only_when_thinking_false():
+    """reasoning_content present on a thinking=True cell is not a leak."""
+    assert classify_status(_cell(thinking=True), _result(reasoning="thoughts")) == "ok"
 
 # ── Cell dataclass ─────────────────────────────────────────────────────────────
 

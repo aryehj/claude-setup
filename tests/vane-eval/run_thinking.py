@@ -34,13 +34,14 @@ _HERE = Path(__file__).parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
-from lib.cells import Cell, call_omlx, discover_omlx_models, write_cell_output
+from lib.cells import Cell, call_omlx, classify_status, discover_omlx_models, write_cell_output
 from lib.queries import load as load_queries
 
 _DEFAULT_BASE_URL = "http://0.0.0.0:8000/v1"
 _PROMPT_STYLES = ["bare", "structured", "research_system"]
 _TEMPERATURES = [0.0, 0.3, 0.7]
 _MAX_CELLS_DEFAULT = 400
+_INTER_MODEL_PAUSE_S = 5
 
 
 def _prompt_user(thinking: bool, models: list[str]) -> bool:
@@ -107,14 +108,7 @@ def _run_phase(
                     reference_text=query.reference,
                     result=result,
                 )
-                if result["error"]:
-                    status = "error"
-                elif thinking and result["reasoning"] is None:
-                    status = "skip:no-thinking-support"
-                elif (not thinking) and result["reasoning"] is not None:
-                    status = "warn:reasoning-leaked"
-                else:
-                    status = "ok"
+                status = classify_status(cell, result)
                 rows.append({
                     "file": str(out_path.relative_to(run_dir)),
                     "label": cell.label,
@@ -285,7 +279,13 @@ def main(argv: list[str] | None = None) -> int:
             print("  (phase skipped by user)")
             done += len(active_models) * cells_per_phase
             continue
-        for model in active_models:
+        for model_idx, model in enumerate(active_models):
+            if model_idx > 0:
+                print(
+                    f"  (pausing {_INTER_MODEL_PAUSE_S}s to let omlx evict the "
+                    f"previous model)"
+                )
+                time.sleep(_INTER_MODEL_PAUSE_S)
             phase_rows, done = _run_phase(
                 base_url=args.base_url,
                 model=model,
