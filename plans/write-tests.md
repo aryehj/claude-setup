@@ -4,7 +4,7 @@
 
 - [x] Phase 1: In-container firewall smoke tests (5 of 6 README cases, plus inter-container port isolation)
 - [x] Phase 2: Pure-helper unit tests for `research.py` (denylist composition, Squid ACL, iptables script rendering)
-- [ ] Phase 3: Cross-VM isolation test (claude-agent ↔ research)
+- [x] Phase 3: Cross-VM isolation test (claude-agent ↔ research)
 - [ ] Phase 4: Allowlist hot-reload test (the 6th README case)
 - [ ] Phase 5: Lifecycle + idempotency tests
 - [ ] Phase 6: Settings/config-file injection tests for `start-agent.sh`
