@@ -15,7 +15,7 @@ Options:
     --base-url URL         omlx base URL (default: http://0.0.0.0:8000/v1)
     --models a,b,c         comma-separated model shortlist (default: all discovered)
     --prompt-styles s1,s2  subset of bare,structured,research_system (default: all)
-    --temperatures 0,0.3   comma-separated temperatures (default: 0.0,0.3,0.7)
+    --temperatures 0,0.3   comma-separated temperatures (default: 0.2,0.6,1.0)
     --queries q1,q3        comma-separated query subset (default: all six)
     --out PATH             output directory (default: results/thinking-<UTC-ts>)
     --skip-off             skip every thinking=off phase
@@ -39,7 +39,7 @@ from lib.queries import load as load_queries
 
 _DEFAULT_BASE_URL = "http://0.0.0.0:8000/v1"
 _PROMPT_STYLES = ["bare", "structured", "research_system"]
-_TEMPERATURES = [0.0, 0.3, 0.7]
+_TEMPERATURES = [0.2, 0.6, 1.0]
 _MAX_CELLS_DEFAULT = 400
 _INTER_MODEL_PAUSE_S = 5
 
@@ -78,6 +78,7 @@ def _run_phase(
     """
     rows: list[dict] = []
     done = counter_start
+    first_cell_done = False
     for prompt_style in prompt_styles:
         for temperature in temperatures:
             for query in queries:
@@ -100,6 +101,14 @@ def _run_phase(
                     flush=True,
                 )
                 result = call_omlx(base_url=base_url, cell=cell, query=query.query)
+                if not first_cell_done and not result["error"]:
+                    first_cell_done = True
+                    if thinking and result["reasoning"] is None:
+                        raise RuntimeError(
+                            f"omlx misconfiguration: thinking=ON phase for {model!r} "
+                            f"but first cell returned no reasoning_content. "
+                            f"Reload the model with thinking enabled and retry."
+                        )
                 out_path = write_cell_output(
                     run_dir=run_dir,
                     cell=cell,
@@ -118,6 +127,15 @@ def _run_phase(
     return rows, done
 
 
+_STATUS_ORDER = [
+    "error",
+    "error:no-content",
+    "warn:truncated",
+    "warn:reasoning-leaked",
+    "ok",
+]
+
+
 def _write_manifest(
     run_dir: Path,
     base_url: str,
@@ -128,6 +146,9 @@ def _write_manifest(
     rows: list[dict],
     wall_s: float,
 ) -> Path:
+    from collections import Counter
+    counts = Counter(r["status"] for r in rows)
+
     lines = [
         "# MANIFEST (run_thinking)",
         "",
@@ -143,6 +164,17 @@ def _write_manifest(
         "Reasoning-leak status (`warn:reasoning-leaked`) means the human said "
         "thinking was OFF but `reasoning_content` came back populated — re-check "
         "the omlx model load.",
+        "",
+        "## Status summary",
+        "",
+    ]
+    for status in _STATUS_ORDER:
+        if counts.get(status, 0):
+            lines.append(f"- {status}: {counts[status]}")
+    for status in sorted(counts):
+        if status not in _STATUS_ORDER and counts[status]:
+            lines.append(f"- {status}: {counts[status]}")
+    lines += [
         "",
         "## Cells",
         "",

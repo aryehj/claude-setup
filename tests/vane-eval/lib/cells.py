@@ -135,9 +135,16 @@ def call_omlx(
     base_url: str,
     cell: Cell,
     query: str,
-    timeout_s: int = 600,
+    timeout_s: int = 1200,
 ) -> dict[str, Any]:
     """POST to {base_url}/chat/completions and return a normalised result dict.
+
+    max_tokens=8192: allows up to 4000 reasoning tokens + ≥4192 content tokens
+    at a uniform 4000-token thinking budget across all three Gemma 4 models,
+    making the thinking axis a fair comparison. Empty-content pathology is
+    impossible because max_tokens strictly exceeds the reasoning budget.
+
+    timeout_s=1200: worst-case cell is 31b·think=on running to cap (~14 min).
 
     Returns:
         {
@@ -158,7 +165,7 @@ def call_omlx(
         "model": cell.model,
         "messages": messages,
         "temperature": cell.temperature,
-        "max_tokens": 1024,
+        "max_tokens": 8192,
     }
     # cell.thinking is metadata — thinking is server-side config per model on omlx;
     # no per-request toggle is available for current Gemma 4 models.
@@ -230,6 +237,19 @@ def write_cell_output(
 
     status = classify_status(cell, result)
 
+    finish_reason = (
+        result.get("raw", {})
+        .get("choices", [{}])[0]
+        .get("finish_reason", "unknown")
+        or "unknown"
+    )
+    output_tokens = (
+        result.get("raw", {})
+        .get("usage", {})
+        .get("completion_tokens", 0)
+        or 0
+    )
+
     # YAML frontmatter
     frontmatter_lines = [
         "---",
@@ -241,6 +261,8 @@ def write_cell_output(
         f"label: {cell.label!r}",
         f"latency_s: {result['latency_s']:.2f}",
         f"status: {status}",
+        f"finish_reason: {finish_reason}",
+        f"output_tokens: {output_tokens}",
         f"run_dir: {run_dir.name}",
         "---",
     ]

@@ -10,7 +10,7 @@ _HERE = Path(__file__).parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
-from lib.cells import Cell, build_prompt, classify_status
+from lib.cells import Cell, build_prompt, classify_status, write_cell_output
 from lib.queries import Query, load as load_queries
 
 
@@ -221,6 +221,169 @@ def test_load_queries_inline_fixture(tmp_path):
     assert qs[1].id == "q2"
     assert "alpha" in qs[0].query.lower()
     assert len(qs[0].key_facts) == 2
+
+
+# ── write_cell_output frontmatter ─────────────────────────────────────────────
+
+def _write_result(tmp_path, result_overrides=None):
+    cell = _cell()
+    result = _result(**(result_overrides or {}))
+    path = write_cell_output(
+        run_dir=tmp_path,
+        cell=cell,
+        query_id="q1",
+        query_text="What is X?",
+        reference_text="X is Y.",
+        result=result,
+    )
+    return path.read_text()
+
+
+def test_frontmatter_finish_reason_stop(tmp_path):
+    text = _write_result(tmp_path)
+    assert "finish_reason: stop" in text
+
+
+def test_frontmatter_finish_reason_length(tmp_path):
+    text = _write_result(tmp_path, {"finish_reason": "length"})
+    assert "finish_reason: length" in text
+
+
+def test_frontmatter_output_tokens(tmp_path):
+    text = _write_result(tmp_path, {"completion_tokens": 512})
+    assert "output_tokens: 512" in text
+
+
+def test_frontmatter_finish_reason_missing_raw(tmp_path):
+    cell = _cell()
+    result = {
+        "error": None,
+        "text": "hello",
+        "reasoning": None,
+        "raw": {},
+        "latency_s": 1.0,
+    }
+    path = write_cell_output(
+        run_dir=tmp_path,
+        cell=cell,
+        query_id="q1",
+        query_text="Q",
+        reference_text="R",
+        result=result,
+    )
+    text = path.read_text()
+    assert "finish_reason: unknown" in text
+    assert "output_tokens: 0" in text
+
+
+# ── _write_manifest status summary ────────────────────────────────────────────
+
+def _import_run_thinking():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "run_thinking", _HERE / "run_thinking.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+try:
+    _rt = _import_run_thinking()
+    _MANIFEST_OK = True
+except Exception:
+    _MANIFEST_OK = False
+
+skip_if_no_rt = pytest.mark.skipif(
+    not _MANIFEST_OK, reason="run_thinking.py failed to import"
+)
+
+
+@skip_if_no_rt
+def test_manifest_summary_counts(tmp_path):
+    rows = [
+        {"file": "a.md", "label": "A", "status": "ok"},
+        {"file": "b.md", "label": "B", "status": "ok"},
+        {"file": "c.md", "label": "C", "status": "warn:truncated"},
+        {"file": "d.md", "label": "D", "status": "error"},
+    ]
+    _rt._write_manifest(
+        run_dir=tmp_path,
+        base_url="http://localhost/v1",
+        models=["m1"],
+        prompt_styles=["bare"],
+        temperatures=[0.5],
+        query_ids=["q1"],
+        rows=rows,
+        wall_s=10.0,
+    )
+    text = (tmp_path / "MANIFEST.md").read_text()
+    assert "## Status summary" in text
+    assert "- ok: 2" in text
+    assert "- warn:truncated: 1" in text
+    assert "- error: 1" in text
+
+
+@skip_if_no_rt
+def test_manifest_summary_omits_zero_counts(tmp_path):
+    rows = [{"file": "a.md", "label": "A", "status": "ok"}]
+    _rt._write_manifest(
+        run_dir=tmp_path,
+        base_url="http://localhost/v1",
+        models=["m1"],
+        prompt_styles=["bare"],
+        temperatures=[0.5],
+        query_ids=["q1"],
+        rows=rows,
+        wall_s=5.0,
+    )
+    text = (tmp_path / "MANIFEST.md").read_text()
+    # Only check for summary-line patterns; the explanatory prose mentions some names too.
+    assert "- error:no-content:" not in text
+    assert "- warn:truncated:" not in text
+    assert "- warn:reasoning-leaked:" not in text
+
+
+@skip_if_no_rt
+def test_manifest_summary_before_cells_section(tmp_path):
+    rows = [{"file": "a.md", "label": "A", "status": "ok"}]
+    _rt._write_manifest(
+        run_dir=tmp_path,
+        base_url="http://localhost/v1",
+        models=["m1"],
+        prompt_styles=["bare"],
+        temperatures=[0.5],
+        query_ids=["q1"],
+        rows=rows,
+        wall_s=5.0,
+    )
+    text = (tmp_path / "MANIFEST.md").read_text()
+    summary_pos = text.index("## Status summary")
+    cells_pos = text.index("## Cells")
+    assert summary_pos < cells_pos
+
+
+@skip_if_no_rt
+def test_manifest_summary_precedence_order(tmp_path):
+    """error appears before warn:truncated in the summary regardless of insertion order."""
+    rows = [
+        {"file": "a.md", "label": "A", "status": "warn:truncated"},
+        {"file": "b.md", "label": "B", "status": "error"},
+    ]
+    _rt._write_manifest(
+        run_dir=tmp_path,
+        base_url="http://localhost/v1",
+        models=["m1"],
+        prompt_styles=["bare"],
+        temperatures=[0.5],
+        query_ids=["q1"],
+        rows=rows,
+        wall_s=5.0,
+    )
+    text = (tmp_path / "MANIFEST.md").read_text()
+    error_pos = text.index("- error: 1")
+    truncated_pos = text.index("- warn:truncated: 1")
+    assert error_pos < truncated_pos
 
 
 # ── discover_omlx_models (live — skip unless env is set) ──────────────────────
