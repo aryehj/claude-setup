@@ -32,10 +32,15 @@ request body. Knobs map as follows:
                  `docker restart research-vane` and wait for /api 200.
                  Vane's openaiLLM falls back to this value when the agent
                  calls generateText without an explicit `options.temperature`.
-  thinking     → not exposed by the API or config. omlx wires thinking
-                 server-side per loaded model (cells.py docstring), so
-                 cell.thinking ⇒ which model is chosen, same as the cheap
-                 phase. We do not flip a runtime flag here.
+  thinking     → not exposed by the API or config, and a per-request
+                 `chat_template_kwargs: {enable_thinking: true}` is silently
+                 ignored by omlx for Gemma models (cells.py docstring).
+                 The only working knob is omlx's per-loaded-model server
+                 config. So we prompt the human before the sweep — exactly
+                 like run_thinking.py — to configure omlx so each winner
+                 model has its required thinking state. If the same model
+                 is required in both ON and OFF states across the winners
+                 we abort, because omlx cannot serve both simultaneously.
   prompt_style → research_system uses `systemInstructions`; structured
                  prepends a format hint to `query`; bare leaves both empty.
 
@@ -297,6 +302,48 @@ def wait_vane_healthy(base_url: str, timeout_s: int = _HEALTH_TIMEOUT_S) -> None
     raise TimeoutError(f"Vane did not become healthy at {base_url} ({last_err})")
 
 
+# ── Thinking-state prompt ──────────────────────────────────────────────────────
+
+
+def required_thinking_states(cells: list[Cell]) -> dict[str, str]:
+    """Return {model: 'ON'|'OFF'} for the thinking state each model must serve.
+
+    Raises ValueError if a model is required in both ON and OFF states — omlx
+    cannot serve both at once for the same loaded model.
+    """
+    needs: dict[str, str] = {}
+    for c in cells:
+        state = "ON" if c.thinking else "OFF"
+        existing = needs.get(c.model)
+        if existing is None:
+            needs[c.model] = state
+        elif existing != state:
+            raise ValueError(
+                f"Model {c.model!r} is required in both thinking ON and OFF "
+                f"across the winners. omlx serves one thinking state per "
+                f"loaded model; split the run."
+            )
+    return needs
+
+
+def prompt_thinking_config(needs: dict[str, str]) -> bool:
+    """Block until the human confirms omlx is configured. Returns False on 'skip'."""
+    print()
+    print("━━ omlx thinking configuration check ━━")
+    print("  Vane has no per-request thinking toggle and omlx ignores")
+    print("  `chat_template_kwargs.enable_thinking`. Configure omlx so each")
+    print("  model below is loaded with the indicated thinking state:")
+    for model, state in needs.items():
+        print(f"    - {model}: thinking {state}")
+    print("  Then press Enter to continue, or type 'skip' to abort.")
+    try:
+        answer = input("> ").strip().lower()
+    except EOFError:
+        print("  (no TTY; treating as skip — pass --assume-configured to bypass)")
+        return False
+    return answer != "skip"
+
+
 # ── Cell file writer ───────────────────────────────────────────────────────────
 
 
@@ -476,6 +523,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="skip docker restart between cells (assumes temperature=fixed)",
     )
+    parser.add_argument(
+        "--assume-configured",
+        action="store_true",
+        help="skip the interactive omlx-thinking-state prompt (CI/non-TTY use)",
+    )
     args = parser.parse_args(argv)
 
     if not args.base_url.startswith(("http://", "https://")):
@@ -521,6 +573,23 @@ def main(argv: list[str] | None = None) -> int:
     for c in cells:
         pid = find_provider_id(providers, c.model)
         cell_provider_ids.append(pid)
+
+    # Thinking-state attestation: omlx wires thinking server-side per loaded
+    # model and ignores per-request `chat_template_kwargs.enable_thinking`,
+    # so the human must configure omlx before the sweep starts. Otherwise
+    # cells with thinking=true silently produce non-thinking output while
+    # the manifest claims thinking was on.
+    try:
+        thinking_needs = required_thinking_states(cells)
+    except ValueError as exc:
+        sys.exit(str(exc))
+    if args.assume_configured:
+        print("Skipping thinking-config prompt (--assume-configured).")
+        for model, state in thinking_needs.items():
+            print(f"  · assuming {model} loaded with thinking {state}")
+    else:
+        if not prompt_thinking_config(thinking_needs):
+            sys.exit("Aborted: omlx thinking state not confirmed.")
 
     # Denylist for metrics
     denylist = load_denylist_domains(Path(args.research_dir))

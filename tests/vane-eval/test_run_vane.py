@@ -367,6 +367,45 @@ def test_mutate_temperature_unknown_provider_raises(tmp_path):
         _rv.mutate_temperature(cfg, provider_id="missing", temperature=0.3)
 
 
+# ── required_thinking_states ───────────────────────────────────────────────────
+
+
+def _cell(model: str, thinking: bool):
+    from lib.cells import Cell
+    return Cell(
+        query_id="",
+        model=model,
+        prompt_style="bare",
+        temperature=0.3,
+        thinking=thinking,
+        label=f"{model}/{thinking}",
+    )
+
+
+@skip_if_no_rv
+def test_required_thinking_states_single_model_off():
+    needs = _rv.required_thinking_states([_cell("m1", False)])
+    assert needs == {"m1": "OFF"}
+
+
+@skip_if_no_rv
+def test_required_thinking_states_mixed_models():
+    needs = _rv.required_thinking_states([
+        _cell("m1", False),
+        _cell("m2", True),
+    ])
+    assert needs == {"m1": "OFF", "m2": "ON"}
+
+
+@skip_if_no_rv
+def test_required_thinking_states_same_model_conflict_raises():
+    with pytest.raises(ValueError, match="both thinking ON and OFF"):
+        _rv.required_thinking_states([
+            _cell("m1", False),
+            _cell("m1", True),
+        ])
+
+
 # ── load_denylist_domains ──────────────────────────────────────────────────────
 
 @skip_if_no_rv
