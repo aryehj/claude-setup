@@ -5,7 +5,8 @@
 - [x] Phase 1: Query set, references, shared helpers
 - [x] Phase 2: Cheap-phase OFAT sweep against omlx
 - [x] Phase 3: Vane API confirm sweep
-- [ ] Phase 4: Grading harness for human-in-loop Claude Code judge
+- [x] Phase 4a: Grading harness for cheap/thinking-phase data (omlx-only)
+- [ ] Phase 4b: Extend grading harness for Vane-phase data (citation rubric)
 
 ## Context
 
@@ -129,28 +130,54 @@ These are factual unknowns the implementer must resolve in the listed phase befo
 
 ---
 
-## Phase 4: Grading harness for human-in-loop Claude Code judge
+## Phase 4a: Grading harness for cheap/thinking-phase data (omlx-only)
+
+The cheap phase was actually executed via `run_thinking.py` (omlx has no
+per-request thinking toggle), producing run dirs named `thinking-<UTC-ts>/`.
+Phase 4a builds the grading harness for that data. Vane-phase grading is
+deferred to 4b because no `run_vane.py` data has been produced yet.
 
 ### Steps
 
 1. Create `tests/vane-eval/JUDGE.md`. Sections in this order:
     - **How to use.** Two sentences: open this file in a Claude Code session at the repo root; paste the GRADING PROMPT below into the chat.
-    - **GRADING PROMPT.** Self-contained; includes (a) instruction to read `tests/vane-eval/queries.md`, (b) instruction to glob the latest `tests/vane-eval/results/*/MANIFEST.md` and read every cell file referenced, (c) the rubric (1–5 on coverage, accuracy, succinctness; for Vane runs only, 1–5 on citation quality — total /15 cheap, /20 Vane), (d) the output format (a single Markdown table sorted by total score, written to `SCORES.md` in the same run dir), (e) a wash-up section asking the judge for short paragraphs on: which axis dominated, which model won, whether prompt/temperature interact, whether thinking helped or just slowed things down.
+    - **GRADING PROMPT.** Self-contained; includes (a) instruction to read `tests/vane-eval/queries.md`, (b) instruction to glob the latest non-Vane MANIFEST (i.e. `results/{thinking,cheap}-*/MANIFEST.md`) and read every cell file referenced, (c) the rubric (1–5 on coverage, accuracy, succinctness — total /15), (d) the output format (a single Markdown table sorted by total score, written to `SCORES.md` in the same run dir, columns matching what `select_winners.py:parse_scores_md` consumes), (e) a wash-up section asking the judge for short paragraphs on: which axis dominated, which model won, whether prompt/temperature interact, whether thinking helped or just slowed things down.
     - **Rubric details.** One paragraph per axis, with a 1-line example of what "5" vs "1" looks like. Specifically tell the judge to credit *correct-but-unanticipated* answers — the reference is a floor, not a ceiling.
-    - **Coverage warning.** Tell the judge that citation quality only applies to Phase 3 (Vane) cells; cheap-phase cells have no citations and the citation column should be `n/a`.
-2. Update `select_winners.py` to read `SCORES.md` if present and pre-fill the winners.json template (top row → winner; rows 2–3 → ablations). User still hand-edits before saving.
-3. Create `tests/vane-eval/README.md` — five-line entrypoint listing the workflow: run cheap, grade, select winners, run vane, grade. Link to `JUDGE.md`.
+    - **Note on Vane phase.** A short pointer that the Vane rubric (/20, citation column) will be added in Phase 4b once Vane data exists.
+2. `select_winners.py` already reads `SCORES.md` (delivered in Phase 3). Confirm the columns the JUDGE prompt produces are the columns that helper expects: `file, label, model, prompt_style, temperature, thinking, total`.
+3. Create `tests/vane-eval/README.md` — short entrypoint listing the workflow: run thinking, grade with JUDGE, select winners, run vane (Phase 4b will cover Vane grading).
 
 ### Files
 
 - `tests/vane-eval/JUDGE.md` (new)
 - `tests/vane-eval/README.md` (new)
-- `tests/vane-eval/select_winners.py` (updated)
 
 ### Testing
 
-- End-to-end dry run, on a single tiny model and 2 queries: cheap → JUDGE → select_winners → vane → JUDGE. Confirm the user only had to: paste the grading prompt twice, hand-edit `winners.json` once.
-- Open `JUDGE.md` in a fresh Claude Code session at repo root (no other context). Paste the grading prompt. Confirm Claude can locate the run dir, read every cell file referenced in MANIFEST, read the references in `queries.md`, and produce a well-formed `SCORES.md`.
+- Add a `tests/vane-eval/test_judge.py` that asserts JUDGE.md exists, contains all required structural elements (run-glob path pattern, queries.md reference, the three rubric axes, SCORES.md output instruction with the column header expected by `select_winners.py`), and contains the `## GRADING PROMPT` section heading.
+- Open `JUDGE.md` in a fresh Claude Code session at repo root. Paste the GRADING PROMPT. Confirm Claude can locate `results/thinking-20260427T022932Z/`, read the MANIFEST, sample cell files, and the references in `queries.md`, and produce a well-formed `SCORES.md` whose top row parses through `select_winners.parse_scores_md`.
+
+---
+
+## Phase 4b: Extend grading harness for Vane-phase data (citation rubric)
+
+Prerequisite: a successful `run_vane.py` run producing `results/vane-<UTC-ts>/`
+with at least one cell file containing a `## Citations` block.
+
+### Steps
+
+1. Extend `JUDGE.md` with a Vane-specific rubric block: 1–5 on citation quality (in addition to coverage/accuracy/succinctness), total /20, citation column populated; cheap-phase cells leave the citation column as `n/a`.
+2. Update the GRADING PROMPT to auto-detect run type: if `MANIFEST.md` title matches `# MANIFEST (Vane phase)`, score /20 with citation; otherwise score /15.
+3. Add tests for the Vane rubric block (presence, /20 total, citation-column behaviour).
+
+### Files
+
+- `tests/vane-eval/JUDGE.md` (updated)
+- `tests/vane-eval/test_judge.py` (updated)
+
+### Testing
+
+- End-to-end dry run, on a single tiny model and 2 queries: thinking → JUDGE → select_winners → vane → JUDGE. Confirm the user only had to: paste the grading prompt twice, hand-edit `winners.json` once.
 
 ---
 
