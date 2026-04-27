@@ -651,6 +651,29 @@ Output: `tests/vane-eval/results/vane-<UTC-ts>/` — one `.md` per cell plus
 
 Tests: `uv run --with pytest pytest tests/vane-eval/`
 
+---
+
+# Infrastructure tests
+
+The `tests/` directory holds automated tests for the scripts themselves (separate
+from the research-quality eval harness above). All run from the macOS host unless
+noted.
+
+| Script | What it tests | How to run |
+|--------|--------------|------------|
+| `test-agent-firewall.sh` | Firewall smoke tests from inside `claude-agent` (default-deny, proxy allow/deny, Ollama carve-out, env wiring, inter-container port isolation) | Run from inside the container: `bash tests/test-agent-firewall.sh` |
+| `test-cross-vm-isolation.sh` | Cross-VM isolation: `claude-agent` and `research` containers cannot reach each other by name, port, or via `host.docker.internal:3000`. Positive test confirms inference carve-out still works. Skips if either VM is not running. | `./tests/test-cross-vm-isolation.sh` |
+| `test_agent_sh.py` | Static check: no `docker run` in `start-agent.sh` publishes a host port | `uv run --with pytest pytest tests/test_agent_sh.py` |
+| `test_research.py` | Unit tests for `research.py` pure helpers (`compose_denylist`, `denylist_to_squid_acl`, `_prune_subdomains`, etc.) | `uv run --with pytest pytest tests/test_research.py` |
+| `probe-denylist.sh` | End-to-end Squid denylist probe (allow and deny URLs) from inside `research-searxng` | `bash tests/probe-denylist.sh` |
+| `probe-vane-egress.sh` | Verifies `research-vane` has correct `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` env vars and that a sidecar HTTPS round-trip through Squid succeeds | `bash tests/probe-vane-egress.sh` |
+
+The pytest suites can be run together:
+
+```bash
+uv run --with pytest pytest tests/test_agent_sh.py tests/test_research.py
+```
+
 ## Environment variable reference (research.py)
 
 | Variable | Default | Description |
