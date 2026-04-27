@@ -367,7 +367,7 @@ def test_mutate_temperature_unknown_provider_raises(tmp_path):
         _rv.mutate_temperature(cfg, provider_id="missing", temperature=0.3)
 
 
-# ── required_thinking_states ───────────────────────────────────────────────────
+# ── split_phases / prompt_thinking_phase ───────────────────────────────────────
 
 
 def _cell(model: str, thinking: bool):
@@ -383,27 +383,71 @@ def _cell(model: str, thinking: bool):
 
 
 @skip_if_no_rv
-def test_required_thinking_states_single_model_off():
-    needs = _rv.required_thinking_states([_cell("m1", False)])
-    assert needs == {"m1": "OFF"}
+def test_split_phases_off_only():
+    phases = _rv.split_phases([(_cell("m1", False), "p1")])
+    assert len(phases) == 1
+    thinking, cells = phases[0]
+    assert thinking is False
+    assert [c.model for c, _ in cells] == ["m1"]
 
 
 @skip_if_no_rv
-def test_required_thinking_states_mixed_models():
-    needs = _rv.required_thinking_states([
-        _cell("m1", False),
-        _cell("m2", True),
+def test_split_phases_on_only():
+    phases = _rv.split_phases([(_cell("m1", True), "p1")])
+    assert len(phases) == 1
+    assert phases[0][0] is True
+
+
+@skip_if_no_rv
+def test_split_phases_off_then_on_order():
+    """OFF phase always comes first so a leftover-warm thinking model from a
+    previous run doesn't contaminate the OFF cells."""
+    phases = _rv.split_phases([
+        (_cell("m1", True), "p1"),
+        (_cell("m2", False), "p1"),
     ])
-    assert needs == {"m1": "OFF", "m2": "ON"}
+    assert [p[0] for p in phases] == [False, True]
 
 
 @skip_if_no_rv
-def test_required_thinking_states_same_model_conflict_raises():
-    with pytest.raises(ValueError, match="both thinking ON and OFF"):
-        _rv.required_thinking_states([
-            _cell("m1", False),
-            _cell("m1", True),
-        ])
+def test_split_phases_same_model_both_states_creates_two_phases():
+    """The legitimate case: cheap winner thinking=False + thinking-phase
+    ablation thinking=True on the same model. Must produce two phases,
+    not raise."""
+    phases = _rv.split_phases([
+        (_cell("m1", False), "p1"),
+        (_cell("m1", True), "p1"),
+    ])
+    assert len(phases) == 2
+    assert phases[0][0] is False
+    assert phases[1][0] is True
+    assert [c.model for c, _ in phases[0][1]] == ["m1"]
+    assert [c.model for c, _ in phases[1][1]] == ["m1"]
+
+
+@skip_if_no_rv
+def test_prompt_thinking_phase_returns_false_on_eof(monkeypatch, capsys):
+    """No-TTY environments should fall through cleanly so callers can suggest
+    --assume-configured."""
+    def _raise_eof(_prompt=""):
+        raise EOFError
+    monkeypatch.setattr("builtins.input", _raise_eof)
+    assert _rv.prompt_thinking_phase(False, ["m1"]) is False
+    out = capsys.readouterr().out
+    assert "thinking=OFF phase" in out
+    assert "--assume-configured" in out
+
+
+@skip_if_no_rv
+def test_prompt_thinking_phase_returns_true_on_enter(monkeypatch):
+    monkeypatch.setattr("builtins.input", lambda _="": "")
+    assert _rv.prompt_thinking_phase(True, ["m1"]) is True
+
+
+@skip_if_no_rv
+def test_prompt_thinking_phase_returns_false_on_skip(monkeypatch):
+    monkeypatch.setattr("builtins.input", lambda _="": "skip")
+    assert _rv.prompt_thinking_phase(True, ["m1"]) is False
 
 
 # ── load_denylist_domains ──────────────────────────────────────────────────────

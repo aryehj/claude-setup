@@ -36,11 +36,13 @@ request body. Knobs map as follows:
                  `chat_template_kwargs: {enable_thinking: true}` is silently
                  ignored by omlx for Gemma models (cells.py docstring).
                  The only working knob is omlx's per-loaded-model server
-                 config. So we prompt the human before the sweep — exactly
-                 like run_thinking.py — to configure omlx so each winner
-                 model has its required thinking state. If the same model
-                 is required in both ON and OFF states across the winners
-                 we abort, because omlx cannot serve both simultaneously.
+                 config. So we group cells by thinking state into phases
+                 (OFF, then ON) and prompt the human before each phase
+                 exactly like run_thinking.py, so they can flip omlx in
+                 between. The same model can appear in both phases
+                 (e.g. cheap winner thinking=False + thinking-phase
+                 ablation thinking=True on the same model) — we just
+                 prompt twice.
   prompt_style → research_system uses `systemInstructions`; structured
                  prepends a format hint to `query`; bare leaves both empty.
 
@@ -302,40 +304,45 @@ def wait_vane_healthy(base_url: str, timeout_s: int = _HEALTH_TIMEOUT_S) -> None
     raise TimeoutError(f"Vane did not become healthy at {base_url} ({last_err})")
 
 
-# ── Thinking-state prompt ──────────────────────────────────────────────────────
+# ── Thinking-state phases ──────────────────────────────────────────────────────
 
 
-def required_thinking_states(cells: list[Cell]) -> dict[str, str]:
-    """Return {model: 'ON'|'OFF'} for the thinking state each model must serve.
+def split_phases(
+    cells_with_pids: list[tuple[Cell, str]],
+) -> list[tuple[bool, list[tuple[Cell, str]]]]:
+    """Group cells by thinking state into ordered phases (OFF first, then ON).
 
-    Raises ValueError if a model is required in both ON and OFF states — omlx
-    cannot serve both at once for the same loaded model.
+    omlx wires thinking server-side per loaded model and silently ignores
+    `chat_template_kwargs.enable_thinking`. The same model with thinking ON
+    and OFF is therefore two distinct loaded configurations; the human must
+    flip omlx between phases. Returning OFF first matches run_thinking.py
+    and reduces the chance of leftover-warm-thinking contamination.
     """
-    needs: dict[str, str] = {}
-    for c in cells:
-        state = "ON" if c.thinking else "OFF"
-        existing = needs.get(c.model)
-        if existing is None:
-            needs[c.model] = state
-        elif existing != state:
-            raise ValueError(
-                f"Model {c.model!r} is required in both thinking ON and OFF "
-                f"across the winners. omlx serves one thinking state per "
-                f"loaded model; split the run."
-            )
-    return needs
+    off = [(c, p) for c, p in cells_with_pids if not c.thinking]
+    on = [(c, p) for c, p in cells_with_pids if c.thinking]
+    phases: list[tuple[bool, list[tuple[Cell, str]]]] = []
+    if off:
+        phases.append((False, off))
+    if on:
+        phases.append((True, on))
+    return phases
 
 
-def prompt_thinking_config(needs: dict[str, str]) -> bool:
-    """Block until the human confirms omlx is configured. Returns False on 'skip'."""
+def prompt_thinking_phase(thinking: bool, models: list[str]) -> bool:
+    """Block until the human confirms omlx is configured for this phase.
+
+    Returns False on 'skip' (skip this phase). Returns False on EOF (no TTY)
+    so the caller can fall back to --assume-configured guidance.
+    """
+    state = "ON" if thinking else "OFF"
     print()
-    print("━━ omlx thinking configuration check ━━")
+    print(f"━━ thinking={state} phase ━━")
     print("  Vane has no per-request thinking toggle and omlx ignores")
-    print("  `chat_template_kwargs.enable_thinking`. Configure omlx so each")
-    print("  model below is loaded with the indicated thinking state:")
-    for model, state in needs.items():
-        print(f"    - {model}: thinking {state}")
-    print("  Then press Enter to continue, or type 'skip' to abort.")
+    print("  `chat_template_kwargs.enable_thinking`, so configure omlx now")
+    print(f"  so thinking is {state} for ALL of these models:")
+    for m in models:
+        print(f"    - {m}")
+    print("  Then press Enter to continue, or type 'skip' to skip this phase.")
     try:
         answer = input("> ").strip().lower()
     except EOFError:
@@ -574,22 +581,12 @@ def main(argv: list[str] | None = None) -> int:
         pid = find_provider_id(providers, c.model)
         cell_provider_ids.append(pid)
 
-    # Thinking-state attestation: omlx wires thinking server-side per loaded
-    # model and ignores per-request `chat_template_kwargs.enable_thinking`,
-    # so the human must configure omlx before the sweep starts. Otherwise
-    # cells with thinking=true silently produce non-thinking output while
-    # the manifest claims thinking was on.
-    try:
-        thinking_needs = required_thinking_states(cells)
-    except ValueError as exc:
-        sys.exit(str(exc))
-    if args.assume_configured:
-        print("Skipping thinking-config prompt (--assume-configured).")
-        for model, state in thinking_needs.items():
-            print(f"  · assuming {model} loaded with thinking {state}")
-    else:
-        if not prompt_thinking_config(thinking_needs):
-            sys.exit("Aborted: omlx thinking state not confirmed.")
+    # Group cells by thinking state into phases. omlx wires thinking
+    # server-side per loaded model and silently ignores
+    # `chat_template_kwargs.enable_thinking`, so the human must flip omlx
+    # between phases. We prompt before each phase exactly like
+    # run_thinking.py.
+    phases = split_phases(list(zip(cells, cell_provider_ids)))
 
     # Denylist for metrics
     denylist = load_denylist_domains(Path(args.research_dir))
@@ -607,83 +604,97 @@ def main(argv: list[str] | None = None) -> int:
     total = len(cells) * len(active_queries)
     done = 0
 
-    for cell, provider_id in zip(cells, cell_provider_ids):
-        # Apply temperature for this cell's provider, restart if changed
-        if config_writable:
-            try:
-                changed = mutate_temperature(config_path, provider_id, cell.temperature)
-                if changed and last_temperature_for_provider.get(provider_id) is not None:
-                    print(f"  ↻ restart research-vane (temp → {cell.temperature})")
-                    restart_vane_container()
-                    wait_vane_healthy(args.base_url)
-                elif changed:
-                    print(f"  · temp set to {cell.temperature} (no restart needed; first cell)")
-                last_temperature_for_provider[provider_id] = cell.temperature
-            except Exception as exc:  # noqa: BLE001
-                print(f"  ! temperature mutation failed: {exc}", file=sys.stderr)
+    for thinking, phase_cells in phases:
+        phase_models = sorted({c.model for c, _ in phase_cells})
+        if args.assume_configured:
+            state = "ON" if thinking else "OFF"
+            print(f"Skipping thinking={state} prompt (--assume-configured).")
+            for m in phase_models:
+                print(f"  · assuming {m} loaded with thinking {state}")
+        else:
+            if not prompt_thinking_phase(thinking, phase_models):
+                state = "ON" if thinking else "OFF"
+                print(f"  (thinking={state} phase skipped)")
+                done += len(phase_cells) * len(active_queries)
+                continue
 
-        for query in active_queries:
-            done += 1
-            cell_with_q = copy.copy(cell)
-            cell_with_q.query_id = query.id
-            print(f"[{done}/{total}] {query.id}  {cell.label}", end=" … ", flush=True)
+        for cell, provider_id in phase_cells:
+            # Apply temperature for this cell's provider, restart if changed
+            if config_writable:
+                try:
+                    changed = mutate_temperature(config_path, provider_id, cell.temperature)
+                    if changed and last_temperature_for_provider.get(provider_id) is not None:
+                        print(f"  ↻ restart research-vane (temp → {cell.temperature})")
+                        restart_vane_container()
+                        wait_vane_healthy(args.base_url)
+                    elif changed:
+                        print(f"  · temp set to {cell.temperature} (no restart needed; first cell)")
+                    last_temperature_for_provider[provider_id] = cell.temperature
+                except Exception as exc:  # noqa: BLE001
+                    print(f"  ! temperature mutation failed: {exc}", file=sys.stderr)
 
-            body = build_vane_body(
-                cell={
-                    "model": cell.model,
-                    "prompt_style": cell.prompt_style,
-                    "temperature": cell.temperature,
-                    "thinking": cell.thinking,
-                },
-                query=query.query,
-                provider_id=provider_id,
-                embedding=embedding,
-            )
+            for query in active_queries:
+                done += 1
+                cell_with_q = copy.copy(cell)
+                cell_with_q.query_id = query.id
+                print(f"[{done}/{total}] {query.id}  {cell.label}", end=" … ", flush=True)
 
-            t0 = time.monotonic()
-            error: str | None = None
-            raw: dict = {}
-            text = ""
-            sources: list[dict] = []
-
-            try:
-                status, raw = _http_post_json(
-                    f"{args.base_url.rstrip('/')}/api/search",
-                    body=body,
+                body = build_vane_body(
+                    cell={
+                        "model": cell.model,
+                        "prompt_style": cell.prompt_style,
+                        "temperature": cell.temperature,
+                        "thinking": cell.thinking,
+                    },
+                    query=query.query,
+                    provider_id=provider_id,
+                    embedding=embedding,
                 )
-                if status != 200:
-                    error = f"HTTP {status}: {raw}"
-                else:
-                    text = raw.get("message") or ""
-                    sources = raw.get("sources") or []
-            except Exception as exc:  # noqa: BLE001
-                error = str(exc)
 
-            latency_s = time.monotonic() - t0
-            metrics = compute_metrics(sources, denylist)
+                t0 = time.monotonic()
+                error: str | None = None
+                raw: dict = {}
+                text = ""
+                sources: list[dict] = []
 
-            result = {
-                "text": text,
-                "raw": raw,
-                "latency_s": latency_s,
-                "error": error,
-            }
-            out_path = write_vane_cell_output(
-                run_dir=run_dir,
-                cell=cell_with_q,
-                query_id=query.id,
-                query_text=query.query,
-                reference_text=query.reference,
-                result=result,
-                sources=sources,
-                metrics=metrics,
-            )
-            cell_results.append({
-                "file": str(out_path.relative_to(run_dir)),
-                "label": cell.label,
-                "status": "error" if error else "ok",
-            })
-            print("error" if error else "ok")
+                try:
+                    status, raw = _http_post_json(
+                        f"{args.base_url.rstrip('/')}/api/search",
+                        body=body,
+                    )
+                    if status != 200:
+                        error = f"HTTP {status}: {raw}"
+                    else:
+                        text = raw.get("message") or ""
+                        sources = raw.get("sources") or []
+                except Exception as exc:  # noqa: BLE001
+                    error = str(exc)
+
+                latency_s = time.monotonic() - t0
+                metrics = compute_metrics(sources, denylist)
+
+                result = {
+                    "text": text,
+                    "raw": raw,
+                    "latency_s": latency_s,
+                    "error": error,
+                }
+                out_path = write_vane_cell_output(
+                    run_dir=run_dir,
+                    cell=cell_with_q,
+                    query_id=query.id,
+                    query_text=query.query,
+                    reference_text=query.reference,
+                    result=result,
+                    sources=sources,
+                    metrics=metrics,
+                )
+                cell_results.append({
+                    "file": str(out_path.relative_to(run_dir)),
+                    "label": cell.label,
+                    "status": "error" if error else "ok",
+                })
+                print("error" if error else "ok")
 
     wall_s = time.monotonic() - t_start
 
