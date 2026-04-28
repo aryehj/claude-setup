@@ -35,8 +35,17 @@ uv run python tests/vane-eval/select_winners.py \
 # → results/thinking-<UTC-ts>/winners.json (hand-edit if needed)
 
 # 4. Vane confirm phase
+#    Either replay a winner+ablations from select_winners …
 uv run python tests/vane-eval/run_vane.py \
     --winners tests/vane-eval/results/thinking-<UTC-ts>/winners.json
+#    … or pass a matrix directly (the cheap→Vane link is editorial,
+#    not code — you choose the axes from the wash-up):
+uv run python tests/vane-eval/run_vane.py \
+    --models a,b,c \
+    --prompt-styles structured,research_system \
+    --temperatures 0.2,1.0 \
+    --thinking off,on \
+    --queries q1,q3,q5
 # → tests/vane-eval/results/vane-<UTC-ts>/
 
 # 5. Grade Vane run — re-open JUDGE.md and paste the same GRADING PROMPT.

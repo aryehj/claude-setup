@@ -561,3 +561,86 @@ def test_compute_source_run_returns_none_for_unrelated_dir(tmp_path):
     winners.parent.mkdir(parents=True)
     winners.write_text("{}")
     assert _rv.compute_source_run(winners) is None
+
+
+# ── build_matrix_cells (CLI-driven cross-product) ─────────────────────────────
+
+
+@skip_if_no_rv
+def test_build_matrix_cells_cross_product_count():
+    cells = _rv.build_matrix_cells(
+        models=["m1", "m2"],
+        prompt_styles=["structured", "research_system"],
+        temperatures=[0.2, 1.0],
+        thinking_states=[False, True],
+    )
+    assert len(cells) == 2 * 2 * 2 * 2  # 16
+
+
+@skip_if_no_rv
+def test_build_matrix_cells_label_format_matches_existing_cells():
+    """Labels must match the format _winners_to_cells emits so JUDGE.md's
+    per-(query, model) partition + select_winners parsing keep working."""
+    cells = _rv.build_matrix_cells(
+        models=["m1"],
+        prompt_styles=["structured"],
+        temperatures=[0.3],
+        thinking_states=[False],
+    )
+    assert len(cells) == 1
+    c = cells[0]
+    assert c.model == "m1"
+    assert c.prompt_style == "structured"
+    assert c.temperature == 0.3
+    assert c.thinking is False
+    assert c.label == "m1 · structured · t=0.3 · think=off"
+
+
+@skip_if_no_rv
+def test_build_matrix_cells_thinking_on_label():
+    cells = _rv.build_matrix_cells(
+        models=["m1"], prompt_styles=["bare"], temperatures=[0.7],
+        thinking_states=[True],
+    )
+    assert cells[0].label.endswith("think=on")
+
+
+@skip_if_no_rv
+def test_build_matrix_cells_orders_thinking_off_then_on_per_model():
+    """Within a model, OFF cells come before ON cells so split_phases
+    preserves OFF→ON order without re-sorting."""
+    cells = _rv.build_matrix_cells(
+        models=["m1"], prompt_styles=["structured"], temperatures=[0.2],
+        thinking_states=[True, False],
+    )
+    assert [c.thinking for c in cells] == [False, True]
+
+
+# ── parse_thinking_arg ─────────────────────────────────────────────────────────
+
+
+@skip_if_no_rv
+def test_parse_thinking_arg_off_on():
+    assert _rv.parse_thinking_arg("off,on") == [False, True]
+
+
+@skip_if_no_rv
+def test_parse_thinking_arg_single():
+    assert _rv.parse_thinking_arg("on") == [True]
+    assert _rv.parse_thinking_arg("off") == [False]
+
+
+@skip_if_no_rv
+def test_parse_thinking_arg_rejects_garbage():
+    with pytest.raises(ValueError):
+        _rv.parse_thinking_arg("yes,no")
+
+
+# ── main() argument validation ─────────────────────────────────────────────────
+
+
+@skip_if_no_rv
+def test_main_errors_when_neither_winners_nor_matrix_given():
+    """SystemExit (argparse / sys.exit) when both inputs are absent."""
+    with pytest.raises(SystemExit):
+        _rv.main(["--queries", "q1"])

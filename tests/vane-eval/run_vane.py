@@ -519,6 +519,53 @@ def write_vane_manifest(
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 
+def parse_thinking_arg(value: str) -> list[bool]:
+    """Parse '--thinking off,on' (or 'on' / 'off') into a bool list."""
+    out: list[bool] = []
+    for tok in value.split(","):
+        t = tok.strip().lower()
+        if t == "off":
+            out.append(False)
+        elif t == "on":
+            out.append(True)
+        else:
+            raise ValueError(f"--thinking values must be 'off' or 'on', got {tok!r}")
+    return out
+
+
+def build_matrix_cells(
+    models: list[str],
+    prompt_styles: list[str],
+    temperatures: list[float],
+    thinking_states: list[bool],
+) -> list[Cell]:
+    """Cross-product matrix flags into Cells.
+
+    Order: model → prompt_style → temperature → thinking (OFF before ON within
+    a thinking pair). The thinking-OFF-first inner ordering keeps split_phases
+    happy without re-sorting and matches what run_thinking.py does.
+    """
+    sorted_thinking = sorted(set(thinking_states))  # False (0) before True (1)
+    cells: list[Cell] = []
+    for model in models:
+        for style in prompt_styles:
+            for temp in temperatures:
+                for thinking in sorted_thinking:
+                    label = (
+                        f"{model} · {style} · t={temp} · "
+                        f"think={'on' if thinking else 'off'}"
+                    )
+                    cells.append(Cell(
+                        query_id="",
+                        model=model,
+                        prompt_style=style,
+                        temperature=float(temp),
+                        thinking=bool(thinking),
+                        label=label,
+                    ))
+    return cells
+
+
 def _winners_to_cells(winners: dict) -> list[Cell]:
     out: list[Cell] = []
     for d in [winners["winner"]] + list(winners.get("ablations") or []):
@@ -539,7 +586,32 @@ def _winners_to_cells(winners: dict) -> list[Cell]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Vane confirm sweep")
-    parser.add_argument("--winners", required=True, help="path to winners.json")
+    parser.add_argument(
+        "--winners",
+        default=None,
+        help="path to winners.json (winner + ablations mode). Mutually "
+        "exclusive with the matrix flags below.",
+    )
+    parser.add_argument(
+        "--models",
+        default=None,
+        help="comma-separated model keys (matrix mode)",
+    )
+    parser.add_argument(
+        "--prompt-styles",
+        default=None,
+        help="comma-separated prompt styles: bare,structured,research_system",
+    )
+    parser.add_argument(
+        "--temperatures",
+        default=None,
+        help="comma-separated floats, e.g. 0.2,1.0",
+    )
+    parser.add_argument(
+        "--thinking",
+        default=None,
+        help="comma-separated thinking states: off,on (or just 'off' or 'on')",
+    )
     parser.add_argument(
         "--queries",
         default=",".join(_DEFAULT_QUERIES),
@@ -576,15 +648,47 @@ def main(argv: list[str] | None = None) -> int:
     if not args.base_url.startswith(("http://", "https://")):
         sys.exit(f"--base-url must be an http(s) URL: {args.base_url!r}")
 
-    # Load winners.json
-    winners_path = Path(args.winners)
-    if not winners_path.exists():
-        sys.exit(f"winners.json not found: {winners_path}")
-    winners = json.loads(winners_path.read_text())
-    cells = _winners_to_cells(winners)
-    if len(cells) > 3:
-        cells = cells[:3]
-        print(f"Capping to {len(cells)} cells (winner + ≤2 ablations).")
+    matrix_flags = [args.models, args.prompt_styles, args.temperatures, args.thinking]
+    matrix_mode = any(matrix_flags)
+    winners_path: Path | None = None
+
+    if matrix_mode and args.winners:
+        sys.exit("Pass --winners OR matrix flags (--models/--prompt-styles/"
+                 "--temperatures/--thinking), not both.")
+    if not matrix_mode and not args.winners:
+        sys.exit("One of --winners or the matrix flags "
+                 "(--models, --prompt-styles, --temperatures, --thinking) "
+                 "is required.")
+
+    if matrix_mode:
+        missing = [n for n, v in zip(
+            ("--models", "--prompt-styles", "--temperatures", "--thinking"),
+            matrix_flags,
+        ) if not v]
+        if missing:
+            sys.exit(f"Matrix mode requires all of: {', '.join(missing)} also set.")
+        try:
+            temps = [float(t.strip()) for t in args.temperatures.split(",") if t.strip()]
+            thinking_list = parse_thinking_arg(args.thinking)
+        except ValueError as exc:
+            sys.exit(str(exc))
+        cells = build_matrix_cells(
+            models=[m.strip() for m in args.models.split(",") if m.strip()],
+            prompt_styles=[s.strip() for s in args.prompt_styles.split(",") if s.strip()],
+            temperatures=temps,
+            thinking_states=thinking_list,
+        )
+        print(f"Matrix mode: {len(cells)} cells "
+              f"({len(cells) // max(len(thinking_list), 1)} per thinking state).")
+    else:
+        winners_path = Path(args.winners)
+        if not winners_path.exists():
+            sys.exit(f"winners.json not found: {winners_path}")
+        winners = json.loads(winners_path.read_text())
+        cells = _winners_to_cells(winners)
+        if len(cells) > 3:
+            cells = cells[:3]
+            print(f"Capping to {len(cells)} cells (winner + ≤2 ablations).")
 
     # Load queries
     queries_path = _HERE / "queries.md"
@@ -735,7 +839,7 @@ def main(argv: list[str] | None = None) -> int:
 
     wall_s = time.monotonic() - t_start
 
-    source_run = compute_source_run(winners_path)
+    source_run = compute_source_run(winners_path) if winners_path else None
 
     write_vane_manifest(
         run_dir=run_dir,
