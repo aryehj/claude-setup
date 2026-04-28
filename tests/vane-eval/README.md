@@ -15,7 +15,7 @@ needed.
 - `run_cheap.py` — earlier OFAT sweep variant (no human-in-loop). Still functional; use whichever fits your workflow.
 - `run_vane.py` — confirm phase: replays the cheap-phase winner + ablations through Vane (`POST /api/search`).
 - `select_winners.py` — pick winner + ≤2 ablations from a graded run's `SCORES.md`.
-- `JUDGE.md` — paste-into-Claude-Code grading prompt + rubric. Cheap-phase only; Vane-phase rubric arrives in Phase 4b.
+- `JUDGE.md` — paste-into-Claude-Code grading prompt + rubric. Auto-detects cheap/thinking (3 axes, /15) vs. Vane (4 axes, +citation, /20) from the run's MANIFEST title.
 - `results/<run-id>/` — per-run output. `MANIFEST.md` indexes the cell `.md` files; `SCORES.md` is the grader's output; `winners.json` feeds `run_vane.py`.
 
 ## Workflow
@@ -39,7 +39,9 @@ uv run python tests/vane-eval/run_vane.py \
     --winners tests/vane-eval/results/thinking-<UTC-ts>/winners.json
 # → tests/vane-eval/results/vane-<UTC-ts>/
 
-# 5. Grade Vane run — Phase 4b (deferred until Vane data exists).
+# 5. Grade Vane run — re-open JUDGE.md and paste the same GRADING PROMPT.
+#    The prompt switches to the Vane rubric (citation axis, /20) when it
+#    sees `# MANIFEST (Vane phase)` as the run's manifest title.
 ```
 
 See `plans/vane-research-eval.md` for design rationale and phase status.

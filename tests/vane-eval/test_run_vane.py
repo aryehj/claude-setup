@@ -472,3 +472,92 @@ def test_load_denylist_domains_reads_cache_and_additions(tmp_path):
 def test_load_denylist_domains_missing_dir_returns_empty(tmp_path):
     domains = _rv.load_denylist_domains(tmp_path / "absent")
     assert domains == set()
+
+
+# ── classify_vane_status (REVIEW blocker #2) ───────────────────────────────────
+
+
+@skip_if_no_rv
+def test_classify_vane_status_ok_when_text_and_sources():
+    result = {"text": "the answer is 42", "error": None}
+    sources = [{"metadata": {"url": "https://x.com"}}]
+    assert _rv.classify_vane_status(result, sources) == "ok"
+
+
+@skip_if_no_rv
+def test_classify_vane_status_error_on_transport_failure():
+    result = {"text": "", "error": "HTTP 500: boom"}
+    assert _rv.classify_vane_status(result, []) == "error"
+
+
+@skip_if_no_rv
+def test_classify_vane_status_no_content_when_text_empty():
+    result = {"text": "   \n  ", "error": None}
+    sources = [{"metadata": {"url": "https://x.com"}}]
+    assert _rv.classify_vane_status(result, sources) == "error:no-content"
+
+
+@skip_if_no_rv
+def test_classify_vane_status_no_content_when_sources_empty():
+    """The 'sorry I could not find any relevant information' fallback comes
+    back with text but zero sources. That's a Vane retrieval miss, not a
+    real attempt — must not be fed to the rubric."""
+    result = {
+        "text": "Hmm, sorry I could not find any relevant information on this topic.",
+        "error": None,
+    }
+    assert _rv.classify_vane_status(result, []) == "error:no-content"
+
+
+@skip_if_no_rv
+def test_write_vane_cell_output_writes_no_content_status(tmp_path):
+    """End-to-end: empty sources should land in the cell file's frontmatter
+    as status:error:no-content so the grader's PROCESS skip rule applies."""
+    cell = _cell("m1", False)
+    cell.query_id = "q1"
+    cell.label = "m1 · structured · t=0.3 · think=off"
+    result = {
+        "text": "Hmm, sorry I could not find any relevant information…",
+        "raw": {},
+        "latency_s": 110.0,
+        "error": None,
+    }
+    out = _rv.write_vane_cell_output(
+        run_dir=tmp_path,
+        cell=cell,
+        query_id="q1",
+        query_text="What is X?",
+        reference_text="X is …",
+        result=result,
+        sources=[],
+        metrics={"citation_count": 0, "edu_gov_wiki_share": 0.0, "denylist_hits": 0},
+    )
+    text = out.read_text()
+    assert "status: error:no-content" in text
+
+
+# ── compute_source_run (REVIEW issue #3) ───────────────────────────────────────
+
+
+@skip_if_no_rv
+def test_compute_source_run_recognises_thinking_prefix(tmp_path):
+    winners = tmp_path / "thinking-20260427T022932Z" / "winners.json"
+    winners.parent.mkdir(parents=True)
+    winners.write_text("{}")
+    assert _rv.compute_source_run(winners) == "../thinking-20260427T022932Z/"
+
+
+@skip_if_no_rv
+def test_compute_source_run_recognises_cheap_prefix(tmp_path):
+    winners = tmp_path / "cheap-20260427T022932Z" / "winners.json"
+    winners.parent.mkdir(parents=True)
+    winners.write_text("{}")
+    assert _rv.compute_source_run(winners) == "../cheap-20260427T022932Z/"
+
+
+@skip_if_no_rv
+def test_compute_source_run_returns_none_for_unrelated_dir(tmp_path):
+    winners = tmp_path / "scratch" / "winners.json"
+    winners.parent.mkdir(parents=True)
+    winners.write_text("{}")
+    assert _rv.compute_source_run(winners) is None

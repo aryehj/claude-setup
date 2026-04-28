@@ -351,6 +351,42 @@ def prompt_thinking_phase(thinking: bool, models: list[str]) -> bool:
     return answer != "skip"
 
 
+# ── Status classification ──────────────────────────────────────────────────────
+
+
+def classify_vane_status(result: dict[str, Any], sources: list[dict]) -> str:
+    """Worst-wins status for one Vane cell.
+
+      error             — HTTP/transport failure
+      error:no-content  — request succeeded but response is unusable for grading:
+                          empty text OR zero sources (Vane's "sorry I could not
+                          find any relevant information" fallback returns text
+                          with no sources, which the cheap-phase grader's
+                          PROCESS skip rule would otherwise score as a real
+                          attempt)
+      ok                — none of the above
+    """
+    if result.get("error"):
+        return "error"
+    text = result.get("text") or ""
+    if not text.strip() or not sources:
+        return "error:no-content"
+    return "ok"
+
+
+def compute_source_run(winners_path: Path) -> str | None:
+    """Return the MANIFEST `source:` link for a winners.json path.
+
+    Recognises both `cheap-` (run_cheap.py) and `thinking-` (run_thinking.py)
+    upstream run dirs. Returns None for unrelated dirs so MANIFEST omits
+    the line.
+    """
+    parent_name = winners_path.parent.name
+    if parent_name.startswith(("cheap-", "thinking-")):
+        return f"../{parent_name}/"
+    return None
+
+
 # ── Cell file writer ───────────────────────────────────────────────────────────
 
 
@@ -380,7 +416,7 @@ def write_vane_cell_output(
     out_path = run_dir / filename
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    status = "error" if result.get("error") else "ok"
+    status = classify_vane_status(result, sources)
 
     front = [
         "---",
@@ -689,18 +725,17 @@ def main(argv: list[str] | None = None) -> int:
                     sources=sources,
                     metrics=metrics,
                 )
+                status = classify_vane_status(result, sources)
                 cell_results.append({
                     "file": str(out_path.relative_to(run_dir)),
                     "label": cell.label,
-                    "status": "error" if error else "ok",
+                    "status": status,
                 })
-                print("error" if error else "ok")
+                print(status)
 
     wall_s = time.monotonic() - t_start
 
-    source_run: str | None = None
-    if winners_path.parent.name.startswith("cheap-"):
-        source_run = f"../{winners_path.parent.name}/"
+    source_run = compute_source_run(winners_path)
 
     write_vane_manifest(
         run_dir=run_dir,

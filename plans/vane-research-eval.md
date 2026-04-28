@@ -6,7 +6,7 @@
 - [x] Phase 2: Cheap-phase OFAT sweep against omlx
 - [x] Phase 3: Vane API confirm sweep
 - [x] Phase 4a: Grading harness for cheap/thinking-phase data (omlx-only)
-- [ ] Phase 4b: Extend grading harness for Vane-phase data (citation rubric)
+- [x] Phase 4b: Extend grading harness for Vane-phase data (citation rubric)
 
 ## Context
 

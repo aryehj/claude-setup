@@ -1,18 +1,16 @@
 # JUDGE — Vane Eval Grading Harness
 
-This file is the human entry point for grading a cheap-phase / thinking-phase
-eval run. The cells in `tests/vane-eval/results/{thinking,cheap}-<UTC-ts>/`
-were emitted by `run_thinking.py` (or `run_cheap.py`) hitting omlx directly —
-no Vane in the loop, no citations.
+This file is the human entry point for grading any eval run — cheap-phase
+(`run_cheap.py`), thinking-phase (`run_thinking.py`), or Vane-phase
+(`run_vane.py`). The first two hit omlx directly with no citations and use
+a **3-axis rubric (coverage, accuracy, succinctness) — total /15**. The
+Vane-phase adds a fourth axis (citation) — **total /20**. The GRADING PROMPT
+auto-detects which rubric to use from the run's `MANIFEST.md` title.
 
 The grading itself is done by Claude inside a Claude Code session: open this
 file, copy the **GRADING PROMPT** below, paste it into the chat, and Claude
 dispatches a fan-out of grading subagents that produce `SCORES.md` next to
 the cell files. From there, `select_winners.py` picks the winner.
-
-> **Phase 4b** will extend this rubric with citation grading for Vane-phase
-> runs (`results/vane-<UTC-ts>/`). For now, ignore Vane runs even if
-> present — they have no `SCORES.md` schema yet.
 
 ---
 
@@ -69,16 +67,27 @@ are ~324 cell files in the run; reading them all in this main agent will
 exhaust context. The plan below partitions cell reading into parallel
 subagents so the dispatcher never reads cells. Follow it as written.
 
-STEP 1 — Locate the run.
+STEP 1 — Locate the run and pick the rubric.
 
-Glob the most recent non-Vane run directory under
-`tests/vane-eval/results/`. Match either prefix:
+Glob the most recent run directory under `tests/vane-eval/results/`.
+Match any of these prefixes:
 
     tests/vane-eval/results/thinking-*/MANIFEST.md
     tests/vane-eval/results/cheap-*/MANIFEST.md
+    tests/vane-eval/results/vane-*/MANIFEST.md
 
 Pick the lexicographically latest one (timestamps in the dir name sort
 correctly). Record its absolute path; you will pass it to subagents.
+
+Open MANIFEST.md and read its title line:
+  • If the title is `# MANIFEST (Vane phase)` → use the **Vane rubric**:
+    4 axes (coverage, accuracy, succinctness, citation), total /20.
+  • Otherwise (cheap or thinking) → use the **cheap rubric**:
+    3 axes (coverage, accuracy, succinctness), total /15, citation column
+    written as `n/a`.
+
+Both rubrics share the same SCORES.md columns (citation included for
+schema consistency); only the citation values and the total cap change.
 
 STEP 2 — Load references and the sweep dimensions.
 
@@ -136,7 +145,7 @@ The reference is a FLOOR, not a ceiling. Credit correct-and-relevant
 material that goes beyond the listed key facts. Penalise wrongness, not
 unanticipated correctness.
 
-RUBRIC (each axis 1–5; no citation column for cheap/thinking phase):
+RUBRIC (each axis 1–5):
 
   • coverage:     how many of the query's key facts the response hits,
                   plus relevant adjacent material the reference implies.
@@ -156,6 +165,26 @@ RUBRIC (each axis 1–5; no citation column for cheap/thinking phase):
                   1 = wall of restated questions, hedges, list-of-lists
                       scaffolding.
 
+  • citation:     (Vane phase only — score 1–5; cheap/thinking phase
+                  writes `n/a`.) Quality of the inline citations and
+                  the source list in the `## Citations` section. Vane
+                  emits inline markers in two styles — `[1, 2, 3]` and
+                  `[1][2][3]`; treat both as valid. Score on:
+                    – Are the cited sources actually relevant to the
+                      adjacent claim, or just stuffed in?
+                    – Is the source list dominated by reputable hosts
+                      (.edu / .gov / wikipedia / primary sources) or by
+                      content farms / SEO mirrors?
+                    – Are obvious duplicates (same page differing only
+                      in trailing slash, PMC mirror of a NIST PDF, etc.)
+                      collapsed or counted independently? Heavy
+                      duplication → cap at 3.
+                  5 = every inline marker maps to a relevant, reputable,
+                      deduped source.
+                  3 = mostly relevant but with noise or one obvious
+                      duplicate cluster.
+                  1 = sources are off-topic, low-quality, or absent.
+
 PROCESS for each cell file:
   1. Read it.
   2. Skip cells whose `status:` frontmatter starts with "error" — emit
@@ -163,10 +192,15 @@ PROCESS for each cell file:
   3. Read the YAML frontmatter and the `## Response` section. Ignore
      `## Query` and `## Reference` (they're echoed for convenience).
   4. Score coverage / accuracy / succinctness as integers 1–5.
-  5. total = coverage + accuracy + succinctness  (max 15).
+     If this is a Vane-phase run, also score citation 1–5 by reading the
+     `## Citations` section of the cell file. Otherwise the citation
+     value is the literal string `n/a`.
+  5. total = coverage + accuracy + succinctness (+ citation, Vane phase only).
+       cheap/thinking rubric → max /15
+       Vane rubric           → max /20
   6. Build ONE Markdown table row in this exact column order:
 
-     | <file> | <label> | <model> | <prompt_style> | <temperature> | <thinking> | <coverage> | <accuracy> | <succinctness> | <total> |
+     | <file> | <label> | <model> | <prompt_style> | <temperature> | <thinking> | <coverage> | <accuracy> | <succinctness> | <citation> | <total> |
 
      - file: cell .md filename only — no leading slash, no run-dir
        prefix, no surrounding whitespace beyond a single space.
@@ -174,6 +208,7 @@ PROCESS for each cell file:
      - model, prompt_style, temperature: from frontmatter.
      - thinking: lowercase string "true" or "false".
      - coverage, accuracy, succinctness, total: integers.
+     - citation: integer 1–5 for Vane runs; literal `n/a` otherwise.
 
 OUTPUT (write a file, then return one line):
 
@@ -209,9 +244,9 @@ header line below is what `select_winners.py` parses; do not change
 column names or order.
 
     cd <run_dir> && {
-      printf '| file | label | model | prompt_style | temperature | thinking | coverage | accuracy | succinctness | total |\n'
-      printf '|------|-------|-------|--------------|-------------|----------|----------|----------|--------------|-------|\n'
-      cat SCORES-q*-*.md | sort -t'|' -k11,11 -b -nr
+      printf '| file | label | model | prompt_style | temperature | thinking | coverage | accuracy | succinctness | citation | total |\n'
+      printf '|------|-------|-------|--------------|-------------|----------|----------|----------|--------------|----------|-------|\n'
+      cat SCORES-q*-*.md | sort -t'|' -k12,12 -b -nr
     } > SCORES.md
 
 Verify:
@@ -230,8 +265,9 @@ STEP 5 — Wash-up.
 
 Read the assembled `SCORES.md` (now small enough to fit — ~50 KB at
 324 rows). Append a `## Wash-up` section with short paragraphs, 2–4
-sentences each:
+sentences each.
 
+For a cheap/thinking run:
   - Which axis dominated the ranking — model, prompt_style, temperature,
     or thinking?
   - Which model won, and was the win clean across queries or noisy?
@@ -240,6 +276,19 @@ sentences each:
   - Did thinking=on help measurably, or just spend latency?
   - Note any cells whose status is `warn:reasoning-leaked` so the human
     can re-check the omlx model load. Do not score them differently.
+
+For a Vane run (typically winner + ≤2 ablations on a 3-query subset —
+not a cross-model sweep):
+  - Did the cheap-phase winner survive once Vane was in the path? Any
+    rubric axis regress vs. the cheap-phase score for the same cell?
+  - Per-axis deltas vs. each ablation — what does the ablation buy or
+    cost?
+  - Citation quality: were the cited sources reputable, or did Vane
+    drag in low-quality hosts? Any obvious source-list duplication
+    (same page differing only in trailing slash, mirror domains)?
+  - Note any cells with status `error:no-content` (Vane retrieval miss
+    / fallback). Do not score them; flag them so the human knows whether
+    it was a Vane flake or a real low-temp failure mode.
 
 This section is for the human; it is not parsed.
 
@@ -293,11 +342,26 @@ self-narration, or stacks of bulleted scaffolding around a thin core?
 
 ---
 
+## Vane-phase rubric
+
+The Vane phase replays the cheap-phase winner + ≤2 ablations through Vane's
+full retrieval pipeline. Cells live under `results/vane-<UTC-ts>/` and have
+a `## Citations` section plus a `## Metrics` block in the cell file.
+
+The 3 cheap-phase axes (coverage / accuracy / succinctness) score the same
+way; the Vane rubric **adds** a citation axis (1–5) and the per-cell total
+becomes /20. The same SCORES.md schema is used so `select_winners.py`
+parses both phases without branching — the citation column is `n/a` for
+cheap rows and an integer for Vane rows.
+
+The wash-up should treat a Vane run as a "did the cheap winner survive
+Vane" check, not a cross-model ranking exercise. See STEP 5 in the
+GRADING PROMPT for the prompts.
+
 ## Notes for future you
 
-- The cheap/thinking phase has no citations. If you find yourself wanting to
-  judge "where did this fact come from", that's the Vane-phase rubric — see
-  Phase 4b in `plans/vane-research-eval.md`.
+- The cheap/thinking phase has no citations; the citation column is `n/a`.
+  Vane-phase cells get a 1–5 score per the rubric above.
 - Latency is recorded per cell but is **not** in the rubric. Treat it as
   context for the wash-up only ("model X won but cost 4× the latency"); do
   not deduct points for slow cells.

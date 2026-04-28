@@ -169,6 +169,68 @@ def test_judge_has_phase_4b_pointer_for_vane():
     )
 
 
+# ── Phase 4b: Vane-phase rubric extension ─────────────────────────────────────
+
+
+@skip_if_no_judge
+def test_judge_has_vane_rubric_section():
+    """A Vane-phase rubric block must exist as its own section so the grader
+    can find it without parsing the whole doc."""
+    text = _JUDGE.read_text()
+    assert re.search(
+        r"^##+\s+.*Vane.*[Rr]ubric|^##+\s+[Vv]ane[ -][Pp]hase",
+        text,
+        re.MULTILINE,
+    ), "Expected a Vane-phase rubric section heading."
+
+
+@skip_if_no_judge
+def test_judge_names_citation_axis():
+    text = _JUDGE.read_text().lower()
+    assert "citation" in text, "Vane rubric must add a citation axis."
+
+
+@skip_if_no_judge
+def test_judge_specifies_total_out_of_20_for_vane_phase():
+    """Four axes × 5 = 20 once citation joins coverage/accuracy/succinctness."""
+    text = _JUDGE.read_text()
+    assert "/20" in text or "out of 20" in text.lower()
+
+
+@skip_if_no_judge
+def test_judge_grading_prompt_globs_vane_runs():
+    """STEP 1 must also pick up vane-*/MANIFEST.md so a confirm run is graded
+    rather than silently skipped."""
+    text = _JUDGE.read_text()
+    assert "vane-" in text, (
+        "GRADING PROMPT must mention the vane-* run prefix so it can locate "
+        "Vane confirm-phase runs."
+    )
+
+
+@skip_if_no_judge
+def test_judge_grading_prompt_detects_run_type_from_manifest():
+    """Auto-detect: the cheap rubric is /15, the Vane rubric is /20. The
+    GRADING PROMPT must tell the grader how to pick which one applies — the
+    natural signal is MANIFEST.md's title (e.g. '# MANIFEST (Vane phase)').
+    """
+    text = _JUDGE.read_text()
+    assert "MANIFEST (Vane phase)" in text, (
+        "GRADING PROMPT must reference the Vane-phase MANIFEST title so it "
+        "can switch rubrics."
+    )
+
+
+@skip_if_no_judge
+def test_judge_cheap_phase_citation_column_is_na():
+    """Cheap-phase rows have no citations; spell out that the column is 'n/a'
+    so the assembled SCORES.md is self-consistent across phases."""
+    text = _JUDGE.read_text().lower()
+    assert "n/a" in text, (
+        "JUDGE.md should specify the cheap-phase citation column as 'n/a'."
+    )
+
+
 # Round-trip: a minimal SCORES.md following the JUDGE.md schema must parse.
 
 _SAMPLE_SCORES_TABLE = textwrap.dedent("""\
