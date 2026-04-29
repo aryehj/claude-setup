@@ -5,7 +5,7 @@
 - [x] Phase 1: CLAUDE.md — collapse Key decisions to one-liners + ADR pointers
 - [x] Phase 2: ADR.md — explicit Superseded headers and forward-pointers
 - [x] Phase 3: Delete ROADMAP.md and its references
-- [ ] Phase 4: README — replace the inline firewall smoke-test block with a pointer to `tests/test-agent-firewall.sh`
+- [x] Phase 4: README — replace the inline firewall smoke-test block with a pointer to `tests/test-agent-firewall.sh`
 
 ## Context
 
