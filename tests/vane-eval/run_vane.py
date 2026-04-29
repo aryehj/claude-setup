@@ -85,7 +85,7 @@ def _http_get_json(url: str, timeout_s: int = 15) -> Any:
         return json.loads(resp.read())
 
 
-def _http_post_json(url: str, body: dict, timeout_s: int = 300) -> tuple[int, Any]:
+def _http_post_json(url: str, body: dict, timeout_s: int = 1200) -> tuple[int, Any]:
     payload = json.dumps(body).encode()
     req = urllib.request.Request(
         url,
