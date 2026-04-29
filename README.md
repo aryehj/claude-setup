@@ -308,56 +308,18 @@ above (or delete the file to re-seed) and run
 
 ### Verifying the egress allowlist
 
-Six smoke tests exercise the full enforcement path. Run them from inside the
-container (the first five) plus one reload from the macOS host.
-
-**1. Bridge default-deny.** A direct request bypassing the proxy must be
-rejected by the `DOCKER-USER` REJECT rule.
+Run `tests/test-agent-firewall.sh` from inside the container to verify
+default-deny, allowlisted host, denied host, Ollama carve-out, env wiring,
+and inter-container port isolation:
 
 ```bash
-curl --noproxy '*' -sS --max-time 5 https://example.com
-# expected: curl: (7) Failed to connect … Couldn't connect to server (fails fast)
+bash tests/test-agent-firewall.sh
 ```
 
-**2. Allowlisted host via proxy.** A host in the allowlist must reach the
-internet through tinyproxy.
+Exit 0 means all tests passed (the Ollama carve-out test is skipped, not
+failed, when Ollama isn't running on the host).
 
-```bash
-curl -sS --max-time 10 https://api.github.com/zen
-# expected: a short aphorism string from GitHub
-```
-
-**3. Denied host via proxy.** A host *not* in the allowlist must be rejected
-by tinyproxy's filter with a 403 on the CONNECT tunnel.
-
-```bash
-curl -sS --max-time 10 https://example.com
-# expected: curl: (56) CONNECT tunnel failed, response 403
-```
-
-**4. Inference server carve-out.** The host's inference endpoint must be
-reachable via the dedicated iptables rule, bypassing the proxy.
-
-```bash
-# Ollama (default):
-curl -sS --max-time 5 "$OLLAMA_HOST/api/tags"
-# expected: JSON {"models":[…]}  (or a fast connection-refused if Ollama is stopped)
-
-# omlx (--backend=omlx):
-curl -sS --max-time 5 -H "Authorization: Bearer $OMLX_API_KEY" "$OMLX_HOST/v1/models"
-# expected: JSON {"data":[…]}  (or connection-refused if omlx is stopped)
-```
-
-**5. Runtime env sanity.** Proxy and inference vars must be wired into the
-container from process birth.
-
-```bash
-env | grep -iE 'proxy|ollama|omlx'
-# Ollama: HTTP_PROXY, HTTPS_PROXY, NO_PROXY, OLLAMA_HOST all set
-# omlx:   HTTP_PROXY, HTTPS_PROXY, NO_PROXY, OMLX_HOST, OMLX_API_KEY all set
-```
-
-**6. Allowlist hot-reload.** The host-side fast path must update the filter
+**Allowlist hot-reload.** The host-side fast path must update the filter
 without restarting the container. From the macOS host:
 
 ```bash
@@ -365,9 +327,9 @@ echo 'example.com' >> ~/.claude-agent/allowlist.txt
 start-agent.sh --reload-allowlist
 ```
 
-Then re-run test 3 in the container. `example.com` should now return
-`HTTP/1.0 200 Connection established` (tinyproxy's CONNECT ack). Remove the
-line and reload again to restore the default allowlist.
+Then verify in the container that `example.com` is now reachable via the
+proxy (`curl -sS --max-time 10 https://example.com` should succeed). Remove
+the line and reload again to restore the default allowlist.
 
 ## Using the local inference server from inside the container
 
