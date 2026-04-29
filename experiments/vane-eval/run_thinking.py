@@ -1,3 +1,9 @@
+# DEPRECATED / UNMAINTAINED. Archived from tests/vane-eval/ on the
+# test-vane-models branch wrap-up. Imports its `lib/` siblings, which
+# were deleted in the same commit; the script will not run as-is.
+# Kept for reference only — see git history before this commit for
+# the runnable form.
+
 """Interactive thinking-axis sweep against omlx.
 
 omlx exposes no per-request thinking toggle; thinking is a server-side

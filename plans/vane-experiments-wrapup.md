@@ -8,7 +8,7 @@ type: project
 
 ## Status
 
-- [ ] Phase 1: archive `run_thinking.py` + `queries.md` to `experiments/vane-eval/`; delete everything else under `tests/vane-eval/` (Haiku ok)
+- [x] Phase 1: archive `run_thinking.py` + `queries.md` + ZIP archives of the two subfolders in /results  to `experiments/vane-eval/`; delete everything else under `tests/vane-eval/` (Haiku ok)
 - [ ] Phase 2: prune scratch from `tests/` (Haiku ok)
 - [ ] Phase 3: update docs + rename implemented plans
 - [ ] Phase 4: verify & commit
@@ -29,7 +29,7 @@ State at planning time:
 ## Goals
 
 - `tests/` holds only product/infra tests.
-- `experiments/vane-eval/` holds two files: `run_thinking.py` and `queries.md`, plus a one-paragraph `README.md` flagging both as deprecated/unmaintained.
+- `experiments/vane-eval/` holds three files: `run_thinking.py` and `queries.md` and an archive of test results, plus a one-paragraph `README.md` flagging both as deprecated/unmaintained.
 - The 28 vane commits already on the branch stand on their own; the cleanup is 3–4 small chores on top of them.
 
 ## Unknowns / To Verify
