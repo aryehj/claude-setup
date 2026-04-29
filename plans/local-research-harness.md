@@ -3,19 +3,22 @@
 ## Status
 
 - [ ] Phase 1: scaffold + container infra
-- [ ] Phase 2: search + rerank pipeline
+- [ ] Phase 2: per-round search + rerank pipeline
 - [ ] Phase 3: fetch + extract + per-source notes
-- [ ] Phase 4: synthesis stage + bundle output
-- [ ] Phase 5: interactive CLI with human gates
-- [ ] Phase 6: q1–q6 batch eval driver
-- [ ] Phase 7: 31b vs 26b-a4b synthesis bake-off
+- [ ] Phase 4: round orchestration (branch proposal, dedupe, per-round digest, termination)
+- [ ] Phase 5: hierarchical synthesis + bundle output
+- [ ] Phase 6: interactive CLI with multi-round gates
+- [ ] Phase 7: --batch mode + q1–q6 regression eval (Opus recommended)
+- [ ] Phase 8: synthesis-quality evaluation harness (Opus recommended)
 <!-- mark [x] as phases complete during implementation. Append `(Haiku ok)` for mechanical edits or `(Opus recommended)` for phases heavy with judgment calls; otherwise no annotation. -->
 
 ## Context
 
 The Vane-based eval showed that retrieval ceilings dominated model/prompt/thinking variation: every model × prompt × thinking combination missed the same reference facts on q3 (saphenous nerve, training-load) and q6 ("lost in the middle"). Vane's intermediation also makes retrieval inscrutable.
 
-The user is dropping Vane as the substrate. The keepers from `research.py`:
+Replacing Vane with a thin Python pipeline that does what real secondary research looks like: iterative, branching search across multiple peripherally related domains. Target ~50–100 sources across 3–5 rounds, not a single 15-source pass. Vane does this but poorly; the goal is to do the same shape well, with a debuggable per-round bundle.
+
+Keepers from `research.py`:
 - `research` Colima VM
 - `research-searxng` container (engines: google, bing, duckduckgo, brave, qwant, wikipedia, arxiv, google scholar, semantic scholar — see `research.py:432`)
 - Squid proxy on port 8888 with the composed denylist
@@ -25,38 +28,43 @@ Per-stage models, per the user's stated prior:
 - Query expansion: E4B (small, format-following)
 - Reranking: nomic embedder (user has it locally)
 - Per-source content extraction: trafilatura (Python lib, no LLM)
+- Branch proposal (gap-driven, after each round): 26b-a4b (judgment call over accumulated digests)
+- Per-round digest: 26b-a4b
 - Per-source notes: 26b-a4b (daily driver — nearly E4B speed, more reliable)
-- Synthesis: 26b-a4b by default in Phases 1–6 to keep iteration fast; Phase 7 runs a 31b-vs-26b-a4b bake-off at this stage to decide whether the slower model is worth it.
+- Final synthesis: 26b-a4b by default in Phases 1–7; Phase 8 sweeps over context-shape, model tier, prompt template, and thinking.
 
 ## Goals
 
-- `./tests/local-research/bootstrap.sh "my query"` runs the whole pipeline in terminal with two human gates.
-- Gate 1: review the ranked list of sources before fetching. Edit/drop indices, add manual URLs.
-- Gate 2: review per-source notes before synthesis. Edit/drop indices.
-- Output: tree of markdown files under `~/.research/sessions/<timestamp-slug>/` (`query.md`, `sources/<n>-<slug>.md`, `synthesis.md`, `manifest.md`). Plus a flat `handoff.md` concatenation for one-shot frontier paste.
-- Synthesis defaults to 26b-a4b for speed; 31b is reserved for the Phase 7 bake-off and as an opt-in override via `SYNTH_MODEL`.
-- `--batch` and `--no-synth` flags for non-interactive eval and for stopping before synthesis when handoff is the goal.
+- `./tests/local-research/bootstrap.sh "my query"` runs an iterative, multi-round pipeline in terminal with three classes of human gate: branch-proposal review (per round), source review (per round), final synthesis approval. Total `2N+1` gates across an N-round session.
+- Output: tree of markdown files under `~/.research/sessions/<timestamp-slug>/` with `query.md`, `rounds/<n>/sources/<m>-<slug>.md`, `rounds/<n>/digest.md`, `synthesis.md`, `manifest.md`. Plus a flat `handoff.md` concatenation for one-shot frontier paste.
+- Each round's digest is preserved as a debuggable artifact even though final synthesis cites at source-level `[N]`.
+- Final synthesis is hierarchical: digests are primary context; per-source notes are supplemental for the top-K relevance-ranked sources across all rounds.
+- `--batch` and `--no-synth` flags. `--batch` selects branches autonomously and terminates on a hybrid hard-cap + novelty-floor heuristic (Phase 7).
 - Reuses `experiments/vane-eval/queries.md` for q1–q6 regression eval. Direct comparability with the Vane run.
 - Lives in `tests/local-research/`.
 - New container `research-runner` joins existing `research-net`; no new VM, no new firewall rules.
 
 ## Approach
 
-Replace Vane with a thin Python CLI in a sibling container `research-runner` joined to `research-net`, reusing the existing Squid proxy + `RESEARCH` iptables chain rather than introducing any new firewall surface. The pipeline runs as discrete stages — expand → search → rerank → fetch → extract → note → synthesise — with two human approval gates between retrieval/rerank and per-source-note review. Output is a tree of markdown files under `~/.research/sessions/<timestamp-slug>/` for handoff to a frontier model when local synthesis isn't enough.
+Replace Vane with a thin Python CLI in a sibling container `research-runner` joined to `research-net`, reusing the existing Squid proxy + `RESEARCH` iptables chain rather than introducing any new firewall surface. The pipeline is a loop: each round does `expand → search → rerank → fetch → extract → notes → digest → branch-proposal`. The orchestrator accumulates sources across rounds with URL dedupe. Round termination is human-driven in interactive mode, hybrid hard-cap-plus-novelty-floor in batch mode. After the final round, hierarchical synthesis runs over the per-round digests + top-K source notes with source-level `[N]` citations.
 
-Phases ladder up from infrastructure to interactivity: Phase 1 stands up the container and confirms connectivity, Phase 2 makes a non-interactive ranked-list pipeline, Phase 3 adds per-source notes, Phase 4 adds synthesis + bundle output, Phase 5 wraps the lot in an interactive CLI with the two gates, and Phase 6 drives the q1–q6 eval against it for direct comparability with the Vane run. Each earlier phase is independently exercisable, so a regression in one phase doesn't block experimenting with the next.
+Phases ladder bottom-up: 1 stands up infra, 2–3 build the per-round inner loop, 4 builds the orchestration layer (branch proposal, dedupe, digest, termination scaffolding), 5 wraps up final synthesis + bundle, 6 wraps it all in an interactive CLI, 7 nails down `--batch` semantics with the autonomous termination heuristic and runs q1–q6, 8 runs the synthesis-quality input-variable sweep. Each phase is independently exercisable; a regression in one doesn't block experimenting with the next.
 
-The biggest risk is that the q3/q6 retrieval gap is engine-side (SearXNG's enabled engines simply don't index the relevant medical/training-load content), in which case the new architecture won't move the needle. Phase 6's comparison is the explicit check for that, and the mitigation (adding PubMed via `research.py`'s SearXNG settings) is called out in Notes — outside this plan but a one-liner.
+The biggest open risk is still that the q3/q6 retrieval gap is engine-side (SearXNG's enabled engines simply don't index the relevant medical/training-load content), in which case the new architecture won't move the needle on the same engines. Phase 7's Vane comparison is the explicit check; mitigation (adding PubMed via `research.py:432`) is called out in Notes — outside this plan but a one-liner.
 
 ## Unknowns / To Verify
 
-1. **Exact omlx model IDs currently served.** The vane-eval cells used `gemma-4-31b-it-6bit`, `gemma-4-26b-a4b-it-8bit`, `gemma-4-E4B-it-MLX-8bit`. Confirm these still match what `/v1/models` returns; treat as env-var overrides if not. Phases 3 and 4. Also confirm the embedder model ID under omlx (likely `nomic-embed-text-v1.5` or similar) before Phase 2 — query `/v1/models` and pick the embedding-class entry.
-2. **omlx embedding endpoint shape.** omlx exposes `/v1/embeddings` (OpenAI-compatible) — verify the request/response shape matches `{"input": "...", "model": "..."}` → `{"data": [{"embedding": [...]}]}` with one curl call before writing `lib/rerank.py`.
-3. **omlx concurrency behavior.** If we want parallel per-source note generation, omlx may serialise concurrent `/v1/chat/completions` calls. Test two concurrent curl calls before deciding. Default to sequential in Phase 3; revisit only if 15-source phase exceeds ~25 minutes.
-4. **Trafilatura coverage on actual source domains.** It's the de-facto Python standard but degrades on JS-rendered pages and PDFs. Test on 5 sample URLs from q3's search results before relying on it; provide a regex strip-tags fallback for `<500`-char results.
-5. **Default research-net intra-bridge connectivity.** The `RESEARCH` iptables chain governs research-net→external; container-to-container on the same bridge should pass freely, but verify `curl http://research-searxng:8080/` from inside a throwaway container during Phase 1 setup before finalising the Dockerfile.
-6. **Whether the bridge IP for Squid is stable across `research.py` runs.** Phase 1's bootstrap needs `HTTP_PROXY=http://<bridge_ip>:8888`. If unstable, derive at runtime from `docker network inspect research-net`. See `research.py:543`.
-7. **`OMLX_API_KEY` plumbing.** `research.py` already passes `OMLX_API_KEY` into the research VM environment for the omlx backend (see `CLAUDE.md` "research.py key decisions"). The runner container needs the same key forwarded as a request `Authorization: Bearer ...` header on every omlx call. Forward via `-e OMLX_API_KEY=$OMLX_API_KEY` in `bootstrap.sh`; have the omlx client helper attach the header when the env var is set.
+1. **Exact omlx model IDs.** vane-eval used `gemma-4-31b-it-6bit`, `gemma-4-26b-a4b-it-8bit`, `gemma-4-E4B-it-MLX-8bit`. Confirm against `/v1/models`; treat as env-var overrides if they've changed. Also confirm the embedder model ID — likely `nomic-embed-text-v1.5` or similar — by querying `/v1/models` and picking the embedding-class entry.
+2. **omlx embedding endpoint shape.** Verify `{"input": "...", "model": "..."}` → `{"data": [{"embedding": [...]}]}` with one curl call before writing `lib/rerank.py`.
+3. **omlx concurrency behavior.** Does omlx serialise concurrent `/v1/chat/completions`? Test with two concurrent curls. Default to sequential everywhere; revisit only if a 50–100-source run is unworkably slow.
+4. **Trafilatura coverage on actual source domains.** Test on 5 sample URLs from q3's search results; provide a regex strip-tags fallback for `<500`-char results.
+5. **Default research-net intra-bridge connectivity.** Verify `curl http://research-searxng:8080/` from inside a throwaway container during Phase 1 setup.
+6. **Bridge IP stability across `research.py` runs.** Phase 1's bootstrap needs `HTTP_PROXY=http://<bridge_ip>:8888`. Resolve at runtime per `bootstrap.sh` invocation; do not bake into the image. See `research.py:543`.
+7. **`OMLX_API_KEY` plumbing.** `research.py` already passes it into the research VM environment. Forward via `-e OMLX_API_KEY=$OMLX_API_KEY` in `bootstrap.sh`; the omlx client helper attaches the header when set. `--smoke` fails loud if missing.
+8. **Rerank score scale across models.** The "high-rerank-score chunks" component of Phase 7's termination heuristic needs a defensible threshold. Cosine scores aren't comparable across embedding models. Sample a real run's score distribution before fixing the constant; consider per-run normalisation against round 01's mean.
+9. **Per-round digest token size.** Hierarchical synthesis is bounded by `(rounds × digest_size + top-K notes + final-instructions)` fitting in the synth model's context. Measure a 4-round digest after Phase 4; if a single digest exceeds ~2k tokens, tighten the digest prompt.
+10. **Squid access-log path inside the runner.** Phase 1's smoke check asserts a fresh entry in `~/.research/squid-cache/access.log`. Verify `research.py` actually exposes that path before depending on it.
+11. **Streaming synthesis.** `lib/cli.py` currently says "stream stdout if the inference endpoint supports streaming." Verify omlx SSE streaming with one curl; either commit to streaming or drop the conditional.
 
 ---
 
@@ -69,44 +77,46 @@ The biggest risk is that the q3/q6 retrieval gap is engine-side (SearXNG's enabl
    - Base: `python:3.12-slim` (or whatever matches conventions in the repo — verify against any existing Python Dockerfiles before picking).
    - Install: `requests`, `trafilatura`, `pyyaml`. No node, no model server.
    - `WORKDIR /app`, copy `lib/` and entrypoint script.
-3. Add `tests/local-research/lib/config.py` with module-level constants and env-var overrides. **omlx is the default and only supported backend for v1** — it hosts both the chat models and the embedder. Constants needed: `SEARXNG_URL`, `OMLX_BASE_URL`, `OMLX_API_KEY`, `EMBED_MODEL`, `EXPAND_MODEL`, `NOTES_MODEL`, `SYNTH_MODEL`, `SESSION_ROOT` (bind-mounted from host `~/.research/sessions/`). Model IDs resolved per Unknowns #1; all four model constants are env-var overridable.
+3. Add `tests/local-research/lib/config.py` with module-level constants and env-var overrides. **omlx is the default and only supported backend for v1** — it hosts both the chat models and the embedder. Constants needed: `SEARXNG_URL`, `OMLX_BASE_URL`, `OMLX_API_KEY`, `EMBED_MODEL`, `EXPAND_MODEL`, `NOTES_MODEL`, `SYNTH_MODEL`, `SESSION_ROOT` (bind-mounted from host `~/.research/sessions/`), and round-budget constants `MAX_ROUNDS`, `MAX_SOURCES`, `QUERIES_PER_ROUND`. Model IDs resolved per Unknowns #1; all four model constants are env-var overridable.
 4. Add `tests/local-research/bootstrap.sh`:
    - Verify the `research` Colima context has `research-searxng` running and `research-net` exists. If not, print "run `./research.py --backend=omlx` first" and exit non-zero.
    - Build `research-runner:latest` if missing or stale (compare Dockerfile mtime to image creation time).
    - Compute bridge IP from `docker network inspect research-net` (per Unknowns #6).
    - `docker run --rm -it --network research-net --add-host=host.docker.internal:host-gateway -v "$HOME/.research/sessions:/sessions" -e HTTP_PROXY=http://<bridge_ip>:8888 -e HTTPS_PROXY=http://<bridge_ip>:8888 -e NO_PROXY=research-searxng,host.docker.internal,localhost,127.0.0.1 -e OMLX_BASE_URL=http://host.docker.internal:8000/v1 -e OMLX_API_KEY="$OMLX_API_KEY" research-runner:latest python -m lib.cli "$@"`.
-   - The `--backend=ollama` path is intentionally not supported in v1; document this in `README.md`. If ollama support is needed later, gate it behind a separate config and a different embedder.
+   - The `--backend=ollama` path is intentionally not supported in v1.
 5. Add `lib/omlx.py` — shared OpenAI-compatible client wrapping `requests`. Exposes `chat(model, messages, **kw) -> str` and `embed(model, inputs) -> list[list[float]]`, plus `list_models() -> list[dict]`. Centralises base URL, API-key header, and timeouts (default 20 min, matching the recent `vane-eval` POST timeout bump per `599f0a3`). Every later phase uses this helper rather than calling `requests` directly.
-6. Add `lib/smoke.py` with three checks: SearXNG reachable, omlx `/v1/models` lists at least one chat model and one embedding model, embedder returns a vector for the string "test". Bootstrap calls it via `--smoke` flag.
+6. Add `lib/smoke.py` with three checks: SearXNG reachable, omlx `/v1/models` lists at least one chat model and one embedding model, embedder returns a vector for the string "test". Bootstrap calls it via `--smoke` flag. Fail loud (non-zero exit + clear error) if `OMLX_API_KEY` is unset.
 7. Write `tests/local-research/README.md` documenting bootstrap usage, env-var overrides, and the session output layout.
 
 ### Acceptance criteria
 
 - `./tests/local-research/bootstrap.sh --smoke` prints non-empty results for SearXNG (`?q=test&format=json`), the omlx `/v1/models` listing (showing at least one chat model and the embedder), and a single embedding vector for the string "test".
-- Squid proxy is exercised end-to-end: a fetch from inside the runner produces a fresh entry in `~/.research/squid-cache/access.log`.
+- Squid proxy is exercised end-to-end: a fetch from inside the runner produces a fresh entry in `~/.research/squid-cache/access.log` (path verified per Unknowns #10).
 - A `curl https://example.com` from inside the runner succeeds (Squid + denylist allows generic web).
 
 ---
 
-## Phase 2: search + rerank pipeline
+## Phase 2: per-round search + rerank pipeline
 
 ### Steps
 
 1. `lib/expand.py` — query expansion. Single function `expand(query: str, n: int = 4) -> list[str]`. Calls `EXPAND_MODEL` with a fixed prompt asking for N alternative phrasings (different angles: technical-vs-lay, narrow-vs-broad, alternative terminology). Parse one-per-line. Return `[query, *expansions]` so the original is always queried.
-2. `lib/search.py` — SearXNG client. `search(query: str, n: int = 20) -> list[dict]` issues GET to `{SEARXNG_URL}/search?q={...}&format=json` and returns the `results` array. Each result has `url`, `title`, `content`, `engine`, `score` per SearXNG's JSON schema.
+2. `lib/search.py` — SearXNG client. `search(query: str, n: int = 20) -> list[dict]` issues GET to `{SEARXNG_URL}/search?q={...}&format=json` and returns the `results` array.
 3. `lib/rerank.py` — embedding rerank against omlx.
-   - `embed(texts: list[str]) -> list[list[float]]` — POST to `{OMLX_BASE_URL}/embeddings` with `{"model": EMBED_MODEL, "input": texts}`. Attach `Authorization: Bearer $OMLX_API_KEY` header when the env var is non-empty. Returns the list of `data[i].embedding` arrays.
-   - `rerank(query: str, results: list[dict], top_k: int = 15) -> list[dict]` — embed `query` and each result's `f"{title}\n{content}"`; cosine-rank against the query embedding; return top_k. Dedupe by URL before reranking. Preserve original `engine` and `score` in the returned dicts.
-4. `lib/pipeline.py` — `gather_sources(query: str) -> dict` calls `expand → search-each → flatten → dedupe → rerank`. Returns a dict `{query, expansions, raw_results, ranked, timings}` for downstream stages and debugging. Pure orchestration; no I/O outside the helpers' subprocess/HTTP calls.
+   - `embed(texts: list[str]) -> list[list[float]]` — POST to `{OMLX_BASE_URL}/embeddings` with `{"model": EMBED_MODEL, "input": texts}`. Attach `Authorization: Bearer $OMLX_API_KEY` header when the env var is set.
+   - `rerank(query: str, results: list[dict], top_k: int = 15, exclude_urls: set[str] = None) -> list[dict]` — embed `query` and each result's `f"{title}\n{content}"`; cosine-rank against the query embedding; return top_k. Dedupe by URL before reranking. Drop URLs in `exclude_urls` (cross-round dedupe) before scoring. Preserve original `engine` and `score` and add `rerank_score` to the returned dicts.
+4. `lib/pipeline.py` — `gather_sources(query: str, exclude_urls: set[str] = None) -> dict` calls `expand → search-each → flatten → dedupe → rerank`. Returns `{query, expansions, raw_results, ranked, timings}` for Phase 4's orchestrator. Pure orchestration; no I/O outside the helpers' subprocess/HTTP calls.
 5. `test_lib.py` — pytest unit tests:
    - `rerank` returns top_k items in cosine order given stubbed embeddings.
    - Dedupe collapses duplicate URLs across expansions.
+   - Cross-round dedupe via `exclude_urls` removes the right items.
    - `search` parses a fixture JSON correctly.
 
 ### Acceptance criteria
 
 - `gather_sources("medial knee pain cyclists")` (q3) runs end-to-end and the ranked top-15 contains visibly more medical / sports-medicine sources than the Vane run for the same question.
 - Ranked-list ordering changes meaningfully when query phrasing varies — confirms the embedder is actually being hit (not silently no-op'd).
+- Passing `exclude_urls={url1, url2}` drops those URLs from the ranked output even if they would otherwise rank top.
 
 ---
 
@@ -114,115 +124,185 @@ The biggest risk is that the q3/q6 retrieval gap is engine-side (SearXNG's enabl
 
 ### Steps
 
-1. `lib/fetch.py` — `fetch(url: str, timeout_s: int = 30) -> tuple[str, dict]`. Issue HTTP GET via `requests` (proxy env vars are honoured automatically). Returns `(body, meta)` where meta has `status`, `final_url` (after redirects), `latency_s`, `bytes`. Raises a structured exception on 4xx/5xx/timeout/proxy-deny.
+1. `lib/fetch.py` — `fetch(url: str, timeout_s: int = 30) -> tuple[str, dict]`. Issue HTTP GET via `requests` (proxy env vars are honoured automatically). Returns `(body, meta)` where meta has `status`, `final_url`, `latency_s`, `bytes`. Raises a structured exception on 4xx/5xx/timeout/proxy-deny.
 2. `lib/extract.py` — `extract(html: str, url: str) -> str`. Wraps `trafilatura.extract(html, output_format='markdown', include_links=False, include_comments=False)`. Falls back to a regex strip-tags + `<title>` if trafilatura returns None or `<500` chars. Returns markdown.
-3. `lib/notes.py` — `note_for_source(query: str, source_text: str, meta: dict) -> str`. Calls `NOTES_MODEL` with a fixed prompt: "Given this user query and this source text, write 4–8 short bullet points: (a) the source's central claim relevant to the query, (b) the most relevant specific facts/quotes, (c) any obvious caveats or contrary evidence. If the source is irrelevant, say so in one line." Truncate `source_text` to fit the model's context window with reasonable margin (rough budget: 8k tokens of source text). Sequential calls per Unknowns #3.
-4. `lib/bundle.py` — `write_source(session_dir: Path, idx: int, url: str, title: str, extracted: str, note: str, meta: dict)`. Writes `sources/<idx:02d>-<slug>.md` with YAML frontmatter (`url`, `title`, `fetch_latency_s`, `extract_chars`, `note_model`, `note_latency_s`, `engine`) followed by `## Note\n\n{note}\n\n## Extracted\n\n{extracted}\n`.
-5. Extend `pipeline.py` with `fetch_and_note(ranked: list[dict], session_dir: Path) -> list[Path]`. For each ranked entry: fetch → extract → note → write_source. Logs per-source progress to stderr (one line: idx, status, fetch_ms, extract_chars, note_ms, note_first_line). On any per-source failure, logs and continues; failures noted in `manifest.md`.
+3. `lib/notes.py` — `note_for_source(query: str, source_text: str, meta: dict) -> str`. Calls `NOTES_MODEL` with a fixed prompt: "Given this user query and this source text, write 4–8 short bullet points: (a) the source's central claim relevant to the query, (b) the most relevant specific facts/quotes, (c) any obvious caveats or contrary evidence. If the source is irrelevant, say so in one line." Truncate `source_text` per Unknowns #9. Sequential per Unknowns #3.
+4. `lib/bundle.py` — `write_source(round_dir: Path, idx: int, url: str, title: str, extracted: str, note: str, meta: dict)`. Writes `<round_dir>/sources/<idx:02d>-<slug>.md` with YAML frontmatter (`url`, `title`, `round`, `branch`, `fetch_latency_s`, `extract_chars`, `note_model`, `note_latency_s`, `engine`, `rerank_score`) followed by `## Note\n\n{note}\n\n## Extracted\n\n{extracted}\n`.
+5. Extend `pipeline.py` with `fetch_and_note(ranked: list[dict], round_dir: Path, round_idx: int, branch_label: str) -> list[dict]`. For each ranked entry: fetch → extract → note → write_source. Returns the list of source-meta dicts (with paths) for the round digest. Logs per-source progress to stderr. On per-source failure, logs and continues; failures recorded in the round's manifest fragment.
 
 ### Acceptance criteria
 
-- A run on q3's ranked top-15 produces source markdown where the note section is query-relevant and concise, and the extracted section is clean prose (not nav cruft).
-- Per-source phase completes within budget (~60s/source × 15 = ~15 min). Notably worse → env-var override to E4B for note generation is documented.
+- A run on q3's ranked top-15 produces source markdown where the note section is query-relevant and concise, and the extracted section is clean prose.
+- Per-source phase completes within budget (~60s/source). Notably worse → env-var override to E4B for note generation is documented.
 - Trafilatura fallback fires on a known JS-heavy page and produces reasonable content.
-- A forced 404 / timeout on one source does not abort the batch; the failure is recorded in `manifest.md`.
+- A forced 404 / timeout on one source does not abort the batch; the failure is recorded in the round manifest fragment.
 
 ---
 
-## Phase 4: synthesis stage + bundle output
+## Phase 4: round orchestration (branch proposal, dedupe, per-round digest, termination)
+
+This phase builds the loop layer that Phase 2–3 plugs into. Branch proposal uses gap-driven reflection (per Phase 7's literature review). Termination scaffolding lands here; the actual `--batch` policy lives in Phase 7.
 
 ### Steps
 
-1. `lib/synthesize.py` — `synthesize(query: str, source_metas: list[dict]) -> str`.
-   - Build a single prompt: original user query, then a numbered list of source notes (note section only, not the full extracted text — keep tokens manageable). Each entry annotated with title and URL as citation anchors `[1]`, `[2]`, ...
-   - Call `SYNTH_MODEL` (default 26b-a4b — same as notes; Phase 7 evaluates whether 31b is meaningfully better) with a prompt asking for a structured synthesis: TL;DR (3 sentences max), key claims with `[N]` citations, contradictions/uncertainties between sources, gaps that retrieval did not fill.
-   - Return markdown.
-2. Extend `lib/bundle.py` to write `query.md`, `synthesis.md`, and `manifest.md` (stages, models, timings, source count, gates passed). API shape decided at the keyboard.
-3. `lib/handoff.py` — `prepare_handoff(session_dir: Path) -> Path`. Concatenates `query.md` + per-source notes (note sections only, no extracted bodies) + `synthesis.md` into a single `handoff.md` at the session-dir root. This is the paste-bombable single-file form. Tree form is canonical; handoff is convenience.
+1. `lib/round_state.py` — accumulator + dedupe registry. Tracks `seen_urls: set[str]`, `accumulated_sources: list[dict]` (each with `round_idx`, `branch_label`, `rerank_score`, path), `digests: list[Path]`, `branches_history: list[list[str]]`, `round_count: int`. Pickled to `state.pkl` after each round for crash debugging; not used for warm-resume.
+2. `lib/branch.py` — `propose_branches(seed_query: str, accumulated_digests: list[str], k: int = 4) -> list[tuple[str, str]]`. Calls `NOTES_MODEL` with a gap-driven prompt: "Original query: {seed}. Here are summaries of what we've found across previous rounds: {digests}. Propose K follow-up queries that target named missing facts or unexplored peripheral domains relevant to the original query. For each, give the query and a one-line rationale. Output one per line as `query | rationale`." Round 1 has no digests; the seed query is the only branch.
+3. `lib/digest.py` — `digest_round(round_idx: int, source_metas: list[dict]) -> str`. Calls `NOTES_MODEL` with a prompt: "Synthesise the following per-source notes from round N into a 200–400 word digest covering: (a) what was learned, (b) which subdomains were touched, (c) what remains unanswered. Cite sources by their round-local index `[r.N]`." Digest is written to `rounds/<n>/digest.md`. Feeds back into branch proposal AND final synthesis.
+4. `lib/orchestrate.py` — top-level `research(seed_query: str, mode: Literal['interactive','batch']) -> Path`. Drives the round loop:
+   - Per round: `propose_branches` → (interactive: branch gate) → for each branch `gather_sources(branch, exclude_urls=state.seen_urls)` → top-K rerank → (interactive: source gate, combined across branches) → `fetch_and_note` → `digest_round` → update `state` → `should_continue?`
+   - `should_continue` is a callable injected by the CLI: in interactive mode it returns the user's gate response; in batch mode it calls `lib/batch.should_stop(state)` (Phase 7).
+   - Final round-end: emit `synthesis.md` via Phase 5 + bundle.
+5. Acceptance harness: a forced 2-round non-interactive driver (`tests/local-research/test_orchestrate.py`) that bypasses `should_continue` and runs exactly 2 rounds. Used to validate Phase 4 in isolation before Phase 6/7 wire up real termination.
 
 ### Acceptance criteria
 
-- A non-interactive run against q1 (factual baseline) produces a `synthesis.md` that cites the EC margin and popular-vote outcome correctly with `[N]` anchors that resolve to actual `sources/<n>-*.md` files.
-- Synthesis-stage wall-clock on 26b-a4b is materially faster than the 5–15 min seen on 31b in vane-eval — target ≤5 min so a full q1–q6 sweep stays under ~2 h.
+- A 2-round forced run on q3 produces `rounds/01/` and `rounds/02/` dirs, each with sources and a digest. URLs from round 01 do not reappear in round 02's `sources/`.
+- `propose_branches` after round 01 of q3 returns 3–4 queries that name distinct subdomains (e.g., "saphenous nerve compression cycling," "training-load progression knee pain," "iliotibial vs medial meniscus diagnosis").
+- A round-01 digest is ≤2k tokens (per Unknowns #9) and is readable as a standalone summary.
+- `state.pkl` after the run contains the complete accumulated-sources list with round and branch labels.
+
+---
+
+## Phase 5: hierarchical synthesis + bundle output
+
+### Steps
+
+1. `lib/synthesize.py` — `synthesize(seed_query: str, digests: list[str], top_source_metas: list[dict], config: SynthConfig | None = None) -> str`.
+   - Build a single prompt: original query, then numbered per-round digests `[R1]..[RN]`, then top-K (default K=15) source notes by accumulated `rerank_score` across all rounds, with anchors `[1]..[K]`. Each entry annotated with title and URL.
+   - Call `SYNTH_MODEL` with a structured-output prompt: TL;DR (3 sentences), key claims with `[N]` source citations and `[Rn]` round refs where helpful, contradictions/uncertainties between sources, gaps that retrieval did not fill.
+   - `SynthConfig` parameterises context-shape, prompt template, and thinking toggle for Phase 8's sweep. Default config matches today's behaviour.
+   - Return markdown.
+2. Extend `lib/bundle.py` to write `query.md`, per-round dirs `rounds/<n>/{sources/, digest.md}`, `synthesis.md`, and `manifest.md` (rounds, models, timings, source counts per round, gates passed, termination reason). API shape decided at the keyboard.
+3. `lib/handoff.py` — `prepare_handoff(session_dir: Path) -> Path`. Concatenates `query.md` + per-round digests + top-K source notes (note sections only) + `synthesis.md` into a single `handoff.md` at the session-dir root. Tree form is canonical; handoff is convenience.
+
+### Acceptance criteria
+
+- A non-interactive 3-round run on q1 produces a `synthesis.md` that cites the EC margin and popular-vote outcome correctly with `[N]` anchors that resolve to actual `rounds/<r>/sources/<m>-*.md` files.
+- Synthesis-stage wall-clock on 26b-a4b with hierarchical input (digests + top-15 notes, not all 50–100 sources) lands ≤5 min.
 - `handoff.md` is self-contained: no broken citation refs, no embedded extracted-text walls.
 
 ---
 
-## Phase 5: interactive CLI with human gates
+## Phase 6: interactive CLI with multi-round gates
 
 ### Steps
 
-1. `lib/cli.py` — entrypoint `python -m lib.cli "user query"`:
-   - Stage A (expand + search + rerank): one-line stderr per substage with timings.
-   - **Gate 1**: print top-K ranked sources as `[idx] domain — title (engine)` + 1-line snippet. Prompt: `Approve [enter] / drop indices [comma list] / add URL [+url] / abort [q]:`. Accept multiple actions on one line.
-   - Stage B (fetch + extract + notes): per-source progress line as each completes (idx, status, fetch ms, note ms, note first sentence).
-   - **Gate 2**: one-line summary per source (idx, title, note first sentence). Prompt: `Approve [enter] / drop indices [comma list] / abort [q]:`.
-   - Stage C (synthesise): print `synthesising with {SYNTH_MODEL}…` (with a rough time hint based on the model: ≤5 min for 26b-a4b, 5–15 min for 31b) then stream stdout if the inference endpoint supports streaming, else print on completion.
+1. `lib/cli.py` — entrypoint `python -m lib.cli "user query"`. Drives the orchestrator with `2N+1` gates per session:
+   - Pre-round (rounds ≥ 2 only): print K proposed branches as `[idx] query — rationale`. Prompt: `Approve [enter] / drop indices [comma list] / add query [+text] / abort [q]:`. Round 1 skips this gate.
+   - Per-round source review (after each round's fetch + notes complete): print combined source list across the round's branches as `[idx] domain — title (engine, branch)` + 1-line snippet + note first sentence. Prompt: `Approve [enter] / drop indices [comma list] / add URL [+url] / abort [q]:`.
+   - Round-end gate: print round digest first sentence + accumulated source count. Prompt: `Continue with another round [enter] / stop and synthesise [s] / abort [q]:`.
+   - Final synthesis gate (after round-end gate chooses `s` or hard cap reached): print accumulated source count and round-digest first sentences. Prompt: `Synthesise [enter] / abort [q]:`.
+   - Synthesis: print `synthesising with {SYNTH_MODEL}…` (rough time hint based on the model: ≤5 min for 26b-a4b, 5–15 min for 31b). Stream stdout if streaming is supported (Unknowns #11), else print on completion.
    - End: print session-dir path on stdout. Exit 0.
-2. `--batch` flag: skip both gates (auto-approve top-K and all notes). Used by Phase 6 eval driver.
-3. `--no-synth` flag: stop after Gate 2. Useful when handoff is the goal and the user doesn't want to spend 10 min on local synthesis.
+2. `--batch` flag: skip all gates. Branches from `propose_branches`; round count and termination governed by Phase 7's `should_stop`.
+3. `--no-synth` flag: stop after the final round-end gate.
 
 ### Acceptance criteria
 
-- An interactive run against a personal query reaches both gates with clear summaries; index parsing matches the indices shown; edits at each gate apply correctly to the next stage's input set.
-- `--batch --no-synth` exits cleanly with a bundle that has every artifact except `synthesis.md`.
-- `--batch` end-to-end on q1 produces a bundle equivalent to the manual approval flow.
+- An interactive 2-round run on a personal query reaches all gate types with clear summaries; index parsing matches indices shown; gate edits propagate correctly to the next stage's input set.
+- `--batch --no-synth` exits cleanly with a bundle that has every round's artifacts plus `handoff.md` but no `synthesis.md`.
+- `--batch` end-to-end on q1 produces a bundle equivalent in shape to the manual approval flow.
 
 ---
 
-## Phase 6: q1–q6 batch eval driver
+## Phase 7: --batch mode + q1–q6 regression eval (Opus recommended)
+
+This phase's batch logic is judgment-heavy because there's no human in the loop and termination has to be defensible. Bakes in research from recent deep-research literature.
+
+### Background (research summary)
+
+Across GPT-Researcher, LangGraph's open-deep-research, local-deep-researcher, OpenAI Deep Research, and Perplexity Deep Research, the dominant patterns for autonomous iterative research are:
+
+- **Branch surfacing: gap-driven reflection.** LLM reads accumulated digests + original query and proposes K=3–5 follow-up queries naming missing facts. STORM is the outlier (persona-driven), but every shipping system without RL training uses gap-driven. (Sources: [LangChain open-deep-research](https://blog.langchain.com/open-deep-research/), [GPT-Researcher deep mode](https://docs.gptr.dev/docs/gpt-researcher/gptr/deep_research), [Stanford STORM arxiv:2402.14207](https://arxiv.org/abs/2402.14207).)
+- **Termination: hybrid hard cap + early-stop heuristic.** [Stop-RAG (arxiv:2510.14337, Oct 2025)](https://arxiv.org/abs/2510.14337) shows that prompted LLM self-assessment underperforms a fixed cap on accuracy because models stop too early; only a learned value head reliably beats a fixed cap. Without training, the right move is hard cap + a structural-novelty floor.
+- **Budgets in production:** GPT-Researcher: `MAX_ITERATIONS=3`. LangGraph: `max_research_loops=3`. Perplexity Deep Research: 3–5 sequential rounds, 100–300 sources cited. OpenAI Deep Research: dozens of queries, 20–50+ sources typical. (Sources: [GPT-Researcher config](https://docs.gptr.dev/docs/gpt-researcher/gptr/config), [Perplexity Deep Research](https://www.perplexity.ai/hub/blog/introducing-perplexity-deep-research), [OpenAI Deep Research](https://openai.com/index/introducing-deep-research/).)
 
 ### Steps
 
-1. `tests/local-research/eval/run_q1q6.py`:
+1. `lib/batch.py` — implements `should_stop(state: RoundState) -> tuple[bool, str]`. Returns `(stop, reason)` where reason is a short human-readable string written into `manifest.md`. Logic, in order:
+   - Hard cap: `state.round_count >= MAX_ROUNDS` (default 4) → stop, reason `"max_rounds"`.
+   - Source cap: `len(state.accumulated_sources) >= MAX_SOURCES` (default 80) → stop, reason `"max_sources"`.
+   - Novelty floor (only if `round_count >= 2`): compute `new_unique_domains = |this_round_domains - prior_domains|` and `new_high_rerank = count(this_round_sources where rerank_score >= threshold)`. Stop if `new_unique_domains / total_domains < 0.15` AND `new_high_rerank < 5`. Reason `"diminishing_returns"`.
+   - Threshold for `high_rerank` is set per Unknowns #8 — initial value derived from a calibration run, env-overridable.
+   - Skip an LLM "do I have enough?" gate per Stop-RAG's empirical result.
+2. `tests/local-research/eval/run_q1q6.py`:
    - Parse `experiments/vane-eval/queries.md`.
-   - For each q in q1..q6: invoke the CLI in `--batch` mode (full pipeline including synthesis). Save bundles under `tests/local-research/eval/results/local-research-<UTC-timestamp>/q<n>/`.
-   - Optionally also a `--no-synth` variant per query to save a no-synthesis bundle for frontier handoff.
-2. `tests/local-research/eval/manifest.py` — write a top-level `MANIFEST.md` in the run-dir (per-cell status, latency, file links). Cell shape here is `q<n>`.
+   - For each q in q1..q6: invoke the CLI in `--batch` mode (full pipeline including final synthesis). Save bundles under `tests/local-research/eval/results/local-research-<UTC-timestamp>/q<n>/`.
+   - Optionally also a `--no-synth` variant per query for frontier handoff.
+3. `tests/local-research/eval/manifest.py` — write a top-level `MANIFEST.md` with per-cell status, latency, round count, source count, termination reason, and file links.
 
 ### Acceptance criteria
 
-- A q1-only run produces the expected layout and parses `queries.md` correctly before the full sweep is attempted.
-- Comparison check vs. the Vane run: q3 source bundles contain PubMed / sports-medicine domains, and at least one q3 source's note mentions saphenous nerve or training-load increase. If yes → architecture has closed the gap. If no → gap is engine-side and SearXNG settings need PubMed (a `research.py:432` edit, outside this plan).
-- Total wall-clock for the sweep lands under ~2 h (6 queries × ~15–20 min each, given 26b-a4b synthesis instead of 31b).
+- A q1-only batch run terminates within 4 rounds, records a termination reason, and parses `queries.md` correctly.
+- Comparison vs. the Vane run: q3 source bundles contain PubMed / sports-medicine domains (or alternative authoritative medical sources), and at least one q3 source's note mentions saphenous nerve or training-load increase. If yes → architecture has closed the gap. If no → SearXNG engine list needs PubMed (research.py:432, outside this plan).
+- Total wall-clock for the sweep lands under ~4 h (6 queries × up to ~30–40 min each, given more rounds and more sources than the earlier 15-source design).
+- Termination breakdown across q1..q6 reported in `MANIFEST.md` — sanity check that not all queries hit `max_rounds` (would indicate the novelty heuristic is too lax) and not all queries stop at round 2 with `diminishing_returns` (would indicate the threshold is too aggressive).
 
 ---
 
-## Phase 7: 31b vs 26b-a4b synthesis bake-off
+## Phase 8: synthesis-quality evaluation harness (Opus recommended)
+
+Replaces the earlier Phase 7 model bake-off. The right question is which input variables move synthesis quality and what mechanical scaffolding makes a small-N (~24-cell) eval productive.
+
+### Background (research summary)
+
+Across MT-Bench / Chatbot Arena, G-Eval, Prometheus 2, RAGAS, ALCE, ARES, and the 2024–2025 LLM-as-Judge surveys:
+
+- **Small-N eval methodology.** A 4–6-dim structured rubric (faithfulness, citation accuracy, coverage, coherence, contradiction-handling), reference-based fact recall against per-query "must-hit" facts, and pairwise A/B for ties. LLM-as-judge as a cheap second opinion *only* with bias mitigations (length normalisation, no same-family writer + judge). (Sources: [MT-Bench / Chatbot Arena Zheng et al.](https://arxiv.org/html/2306.05685v4), [LLMs-as-Judges survey arxiv:2412.05579](https://arxiv.org/html/2412.05579v2), [Justice or Prejudice arxiv:2410.02736](https://arxiv.org/html/2410.02736v1).)
+- **Citation grounding (mechanical).** ALCE-style `citation_precision` + `citation_recall` via NLI. v1 implementation: parse `[N]` markers, decompose synthesis into atomic claims, run an LLM judge with a 3-class entailment prompt over `(claim, source-N-bullets)` pairs. ~50 LOC, no model finetune. (Sources: [ALCE](https://ar5iv.labs.arxiv.org/html/2305.14627), [RAGAS faithfulness](https://docs.ragas.io/en/stable/concepts/metrics/available_metrics/faithfulness/), [ARES arxiv:2311.09476](https://arxiv.org/abs/2311.09476).)
+- **Input-variable effect ordering** (largest first, per ["Do MDS Models Synthesize?" TACL 2024](https://direct.mit.edu/tacl/article/doi/10.1162/tacl_a_00687/124262/Do-Multi-Document-Summarization-Models-Synthesize), [DeepResearch Bench](https://deepresearch-bench.github.io/static/papers/deepresearch-bench.pdf), and ALCE): **context-shape > model tier > prompt template > thinking toggle > citation-format demands**.
 
 ### Steps
 
-1. `tests/local-research/eval/run_synth_bakeoff.py`:
-   - Take a Phase 6 run-dir as input (`--from <run-dir>`); reuse its per-source notes verbatim. Do not re-run retrieval, fetch, extract, or note generation — synthesis is the only variable.
-   - For each q1..q6 cell, call `lib.synthesize.synthesize(...)` twice (26b-a4b and 31b). Save outputs side-by-side as `synthesis-26ba4.md` and `synthesis-31b.md` under `tests/local-research/eval/results/synth-bakeoff-<UTC-timestamp>/q<n>/`. Record per-call latency. Write a top-level `MANIFEST.md` with per-cell wall-clock per model, total tokens if `usage` is reported, and side-by-side links.
-   - Sequential, not parallel — omlx serialises requests per Unknowns #3, and we want clean per-call timings.
-2. Document in `tests/local-research/README.md` how to run the bake-off against any Phase 6 run-dir. Comparison is judged by reading the side-by-side outputs (no LLM judge in v1 — see Out of scope).
+1. Add a per-query reference file `tests/local-research/eval/references/q<n>.md` with: gold-answer paragraph, must-hit facts list, and known contradictions. Curate from `experiments/vane-eval/queries.md` and the prior eval's reference notes. Used by both fact-recall scoring and citation-grounding eval.
+2. `tests/local-research/eval/run_synth_sweep.py`:
+   - Take a Phase 7 run-dir as input (`--from <run-dir>`); reuse its per-round notes + digests verbatim. Synthesis is the only variable.
+   - 24-cell sweep per query: 3 (context-shape) × 2 (model tier) × 2 (prompt template) × 2 (thinking toggle).
+     - context-shape: `{digests-only, digests + top-15 notes, raw-notes}` (raw-notes will OOM context for some configs — log and skip rather than crash)
+     - model tier: `{26b-a4b, 31b}`
+     - prompt template: `{free-form, structured (TL;DR/claims/contradictions/gaps)}`
+     - thinking: `{off, on}` (omlx flag if available; skip cells if unsupported)
+   - Save outputs as `synthesis-<config-slug>.md` under `tests/local-research/eval/results/synth-sweep-<UTC-timestamp>/q<n>/`. Record per-call latency and (if reported) `usage` tokens.
+   - Sequential per Unknowns #3.
+3. `lib/eval/citation_grounding.py` — mechanical metrics:
+   - `parse_citations(synthesis: str) -> list[tuple[claim, list[int]]]` — split by sentence, extract `[N]` markers per sentence.
+   - `judge_entailment(claim: str, source_text: str) -> Literal['entailed','partial','unsupported']` via an LLM judge with a fixed 3-class prompt. Use a different model family from the writer to mitigate self-preference bias.
+   - Aggregate to `citation_precision = supported / cited` and `citation_recall = supported_claims / total_claims`. ALCE-style.
+4. `lib/eval/fact_recall.py` — `score_fact_hits(synthesis: str, must_hits: list[str]) -> dict`. For each must-hit fact, regex match against the synthesis text; report hit/miss. Optional embedding-similarity fallback for paraphrased hits (uses the rerank embedder, threshold per Unknowns #8).
+5. `tests/local-research/eval/sweep_manifest.py` — write per-query and aggregate `MANIFEST.md`: 24-row table per query with citation precision, citation recall, fact-recall %, output length (chars), wall-clock, total tokens. Aggregate table at top with per-axis marginal means. Pairwise A/B markdown for the two hardest queries (q3, q6) to break rubric ties.
+6. Document in `tests/local-research/README.md` how to run the sweep against any Phase 7 run-dir. Include a one-paragraph "what to read for in the rubric" note: prioritise faithfulness and citation accuracy, then coverage, then coherence, then contradiction-handling.
 
 ### Acceptance criteria
 
-- A bake-off run completes for q1–q6 producing two synthesis files per query with recorded latencies, all referenced from `MANIFEST.md`.
-- Per-query 26b-a4b synthesis is meaningfully faster than 31b (target ratio ≥2×) — confirms the speed argument for the Phase 1–6 default.
-- Decision recorded in this plan's Notes section after the run: keep 26b-a4b as default, switch to 31b, or expose a `--synth-model` per-run flag.
+- A sweep against the Phase 7 q1 bundle produces up to 24 synthesis files with mechanical metrics in `MANIFEST.md`. No cell crashes (raw-notes context-shape may OOM for some queries — log and skip rather than crash).
+- Citation-precision and -recall numbers are non-trivially distinguished across cells (range > 0.1 between best and worst); confirms the metric is not floored.
+- Per-axis marginal means show context-shape as the largest mover (per literature priors); if not, that's an interesting result and worth noting in the plan's Notes.
+- Decision recorded in this plan's Notes section after the run: which (context-shape, model, prompt, thinking) combination becomes the new default for `synthesize()`. Lifted to a `--synth-config` CLI flag if the answer is "depends on query."
 
 ---
 
 ## Notes
 
-**Per-stage model assignments** are env-var overridable via `bootstrap.sh`. The eval harness can sweep them; daily use can shift to E4B for notes if 26b-a4b proves too slow over many sources.
+**Per-stage model assignments** are env-var overridable via `bootstrap.sh`. Phase 8 sweeps over the synthesis-stage assignments specifically.
 
-**omlx is the only supported backend in v1.** The user's nomic embedder runs on omlx, and consolidating chat + embedding on a single OpenAI-compatible endpoint simplifies the client (one helper, one auth header). Ollama can be added later as a separate config; not worth the abstraction overhead now.
+**Hierarchical synthesis is structural, not a knob.** At 50–100 sources, no local model can fit all per-source notes in a single synthesis call. The per-round digest is the structural answer: synthesise within a round (≤15 sources fits easily), then synthesise over digests + a top-K of relevance-ranked sources. Keep digests as kept artifacts on disk for debuggability.
 
-**Why a new container, not extending research-vane.** Vane is a complex Node app and effectively a black box. The runner is ~500 lines of Python total. Joining `research-net` reuses the existing egress firewall (Squid + iptables `RESEARCH` chain) without copying any of it.
+**Why no LLM self-assessment for batch termination.** Per [Stop-RAG (arxiv:2510.14337)](https://arxiv.org/abs/2510.14337), prompted LLM "do I have enough?" gates underperform a fixed-iterations cap on retrieval-QA accuracy because the model stops too early. A learned value head dominates both, but training one is out of scope. Hard cap + structural novelty floor is the strongest non-trained option.
 
-**Why `tests/local-research/` rather than top-level `local-research/`.** Daily-driver invocation is a single `bootstrap.sh`; path depth doesn't matter once aliased.
+**omlx is the only supported backend in v1.** The user's nomic embedder runs on omlx, and consolidating chat + embedding on a single OpenAI-compatible endpoint simplifies the client. Ollama can be added later as a separate config; not worth the abstraction overhead now.
 
-**Parallelism deferred.** Per Unknowns #3, omlx may serialise concurrent calls anyway. Sequential per-source notes keep stderr legible (real-time progress) and make the human-in-loop pacing natural. Revisit only if profiling shows wall-clock pain.
+**Why a new container, not extending research-vane.** Vane is a complex Node app and effectively a black box. The runner is a few hundred lines of Python. Joining `research-net` reuses the existing egress firewall (Squid + iptables `RESEARCH` chain) without copying any of it.
+
+**Why `tests/local-research/` rather than top-level `local-research/`.** Daily-driver invocation is a single `bootstrap.sh`; path depth doesn't matter once aliased. Per-round dir layout (`rounds/<n>/...`) is for implementation debug; refactor for production once it's working.
+
+**Parallelism deferred.** Per Unknowns #3, omlx may serialise concurrent calls anyway. Sequential per-source notes within a round keep stderr legible and make pacing natural. The 50–100-source target raises the stakes — revisit if profiling shows wall-clock pain.
 
 **Out of scope for v1:**
-- TUI library / pretty UI (user explicitly said worry about pretty UI later).
+- TUI library / pretty UI.
 - Cross-session corpus / persistent index. Sessions are independent dirs on disk.
 - Multi-turn conversation per session. One query → one bundle → frontier chat for follow-ups if needed.
-- Faithfulness / citation-grounding pass. The visible per-source notes in the bundle are the v1 trust mechanism.
+- Resume support (orchestrator state is pickled per round for crash debug, not for warm-resume).
+- Learned value head for batch termination (Stop-RAG-style; would require training data).
 - Frontier API integration. The bundle is the API; user pastes/uploads it manually.
 
-**Adjacent risk worth flagging.** If the q3 retrieval gap persists after Phase 6 (saphenous nerve / training-load still absent from any retrieved source), the cause is upstream of this harness — SearXNG's enabled engines don't index the relevant content. Adding PubMed via SearXNG's `pubmed` engine is a one-line `render_searxng_settings()` change in `research.py:432`. That's outside this plan but worth a pre-eval edit if you want to give the new architecture its best chance to demonstrate retrieval gains independent of engine-list changes.
+**Adjacent risk worth flagging.** If the q3 retrieval gap persists after Phase 7 (saphenous nerve / training-load still absent from any retrieved source across multiple rounds), the cause is upstream of this harness — SearXNG's enabled engines don't index the relevant content. Adding PubMed via SearXNG's `pubmed` engine is a one-line `render_searxng_settings()` change in `research.py:432`. Worth a pre-eval edit if you want to give the new architecture its best chance to demonstrate retrieval gains independent of engine-list changes.
