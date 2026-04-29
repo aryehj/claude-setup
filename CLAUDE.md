@@ -26,7 +26,6 @@ tests/                       — unit tests and infra smoke tests
 experiments/                 — archived experiments (not part of CI)
   vane-eval/                           — OFAT eval harness (archived); see experiments/vane-eval/README.md
   model-experiment/                    — raw session transcripts from the model-comparison experiment
-ROADMAP.md                   — planned work
 README.md                    — usage reference
 ADR.md                       — architecture decision records
 CLAUDE.md                    — this file
