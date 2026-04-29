@@ -42,22 +42,20 @@ if [ -z "$BRIDGE_IP" ]; then
     BRIDGE_IP="172.17.0.1"
 fi
 
-# ── 4. Build research-runner image if missing or Dockerfile is newer ──────────
+# ── 4. Build research-runner image if missing or sources changed ──────────────
+# Use a local stamp file (portable — avoids macOS vs. Linux find/stat differences).
+STAMP="$SCRIPT_DIR/.image-timestamp"
 NEEDS_BUILD=0
 if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
     NEEDS_BUILD=1
-else
-    IMAGE_CREATED=$(docker image inspect "$IMAGE" --format '{{.Created}}')
-    IMAGE_TS=$(date -d "$IMAGE_CREATED" +%s 2>/dev/null || date -j -f "%Y-%m-%dT%H:%M:%S" "${IMAGE_CREATED%%.*}" +%s 2>/dev/null || echo 0)
-    DOCKERFILE_TS=$(stat -c %Y "$DOCKERFILE" 2>/dev/null || stat -f %m "$DOCKERFILE" 2>/dev/null || echo 999999999999)
-    # Also check lib/ — COPY lib/ lib/ bakes it into the image.
-    LIB_TS=$(find "$SCRIPT_DIR/lib" -type f -printf '%T@\n' 2>/dev/null | sort -n | tail -1 | cut -d. -f1)
-    LIB_TS=${LIB_TS:-0}
-    NEWEST_TS=$(( DOCKERFILE_TS > LIB_TS ? DOCKERFILE_TS : LIB_TS ))
-    if [ "$NEWEST_TS" -gt "$IMAGE_TS" ]; then
-        echo "==> Source newer than image — rebuilding"
-        NEEDS_BUILD=1
-    fi
+elif [ ! -f "$STAMP" ]; then
+    NEEDS_BUILD=1
+elif [ "$DOCKERFILE" -nt "$STAMP" ]; then
+    echo "==> Dockerfile newer than last build — rebuilding"
+    NEEDS_BUILD=1
+elif find "$SCRIPT_DIR/lib" -name "*.py" -newer "$STAMP" | grep -q .; then
+    echo "==> lib/ newer than last build — rebuilding"
+    NEEDS_BUILD=1
 fi
 
 if [ "$NEEDS_BUILD" -eq 1 ]; then
@@ -66,6 +64,7 @@ if [ "$NEEDS_BUILD" -eq 1 ]; then
         --build-arg "HTTP_PROXY=http://${BRIDGE_IP}:${SQUID_PORT}" \
         --build-arg "HTTPS_PROXY=http://${BRIDGE_IP}:${SQUID_PORT}" \
         -t "$IMAGE" "$SCRIPT_DIR"
+    touch "$STAMP"
 fi
 
 # ── 5. Ensure session dir exists ──────────────────────────────────────────────

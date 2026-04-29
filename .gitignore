@@ -30,3 +30,6 @@ refs
 
 # testing things temporarily
 .temp
+
+# local-research build stamp
+tests/local-research/.image-timestamp
