@@ -61,10 +61,8 @@ The biggest open risk is still that the q3/q6 retrieval gap is engine-side (Sear
 5. **Default research-net intra-bridge connectivity.** Verify `curl http://research-searxng:8080/` from inside a throwaway container during Phase 1 setup.
 6. **Bridge IP stability across `research.py` runs.** Phase 1's bootstrap needs `HTTP_PROXY=http://<bridge_ip>:8888`. Resolve at runtime per `bootstrap.sh` invocation; do not bake into the image. See `research.py:543`.
 7. **`OMLX_API_KEY` plumbing.** `research.py` already passes it into the research VM environment. Forward via `-e OMLX_API_KEY=$OMLX_API_KEY` in `bootstrap.sh`; the omlx client helper attaches the header when set. `--smoke` fails loud if missing.
-8. **Rerank score scale across models.** The "high-rerank-score chunks" component of Phase 7's termination heuristic needs a defensible threshold. Cosine scores aren't comparable across embedding models. Sample a real run's score distribution before fixing the constant; consider per-run normalisation against round 01's mean.
-9. **Per-round digest token size.** Hierarchical synthesis is bounded by `(rounds × digest_size + top-K notes + final-instructions)` fitting in the synth model's context. Measure a 4-round digest after Phase 4; if a single digest exceeds ~2k tokens, tighten the digest prompt.
-10. **Squid access-log path inside the runner.** Phase 1's smoke check asserts a fresh entry in `~/.research/squid-cache/access.log`. Verify `research.py` actually exposes that path before depending on it.
-11. **Streaming synthesis.** `lib/cli.py` currently says "stream stdout if the inference endpoint supports streaming." Verify omlx SSE streaming with one curl; either commit to streaming or drop the conditional.
+8. **Rerank score scale across models.** Use a per-run normalised threshold rather than a fixed cutoff — embedder-agnostic and self-calibrating. Exact normalisation strategy (within-round vs re-embedded against the seed query) is an implementation detail for Phase 7; calibrate the sigma multiple after a real q1 run.
+9. **Long-context degradation thresholds for synthesis.** Both 26b-a4b and 31b claim 250k context windows; the testing host has 64 GB RAM. Set ceilings at where we'd expect long-context performance to degrade, not to minimise resource use. Targets: per-round digest ≤5k tokens (≈800–1200 words), final synthesis input ≤40–50k tokens (digests + top-K notes + instructions). Well under typical "lost in the middle" degradation regimes for capable long-context models, but ~3× more input than the prior plan. Measure a 4-round run after Phase 4; loosen further if quality holds.
 
 ---
 
@@ -91,7 +89,7 @@ The biggest open risk is still that the q3/q6 retrieval gap is engine-side (Sear
 ### Acceptance criteria
 
 - `./tests/local-research/bootstrap.sh --smoke` prints non-empty results for SearXNG (`?q=test&format=json`), the omlx `/v1/models` listing (showing at least one chat model and the embedder), and a single embedding vector for the string "test".
-- Squid proxy is exercised end-to-end: a fetch from inside the runner produces a fresh entry in `~/.research/squid-cache/access.log` (path verified per Unknowns #10).
+- Squid proxy is exercised end-to-end: a fetch from inside the runner produces a fresh entry in the Squid access log (whichever path `research.py` exposes — implementation detail).
 - A `curl https://example.com` from inside the runner succeeds (Squid + denylist allows generic web).
 
 ---
@@ -146,8 +144,8 @@ This phase builds the loop layer that Phase 2–3 plugs into. Branch proposal us
 ### Steps
 
 1. `lib/round_state.py` — accumulator + dedupe registry. Tracks `seen_urls: set[str]`, `accumulated_sources: list[dict]` (each with `round_idx`, `branch_label`, `rerank_score`, path), `digests: list[Path]`, `branches_history: list[list[str]]`, `round_count: int`. Pickled to `state.pkl` after each round for crash debugging; not used for warm-resume.
-2. `lib/branch.py` — `propose_branches(seed_query: str, accumulated_digests: list[str], k: int = 4) -> list[tuple[str, str]]`. Calls `NOTES_MODEL` with a gap-driven prompt: "Original query: {seed}. Here are summaries of what we've found across previous rounds: {digests}. Propose K follow-up queries that target named missing facts or unexplored peripheral domains relevant to the original query. For each, give the query and a one-line rationale. Output one per line as `query | rationale`." Round 1 has no digests; the seed query is the only branch.
-3. `lib/digest.py` — `digest_round(round_idx: int, source_metas: list[dict]) -> str`. Calls `NOTES_MODEL` with a prompt: "Synthesise the following per-source notes from round N into a 200–400 word digest covering: (a) what was learned, (b) which subdomains were touched, (c) what remains unanswered. Cite sources by their round-local index `[r.N]`." Digest is written to `rounds/<n>/digest.md`. Feeds back into branch proposal AND final synthesis.
+2. `lib/branch.py` — `propose_branches(seed_query: str, accumulated_digests: list[str], k: int = 4) -> list[tuple[str, str]]`. Calls `NOTES_MODEL` with a gap-driven prompt: "Original query: {seed}. Here are summaries of what we've found across previous rounds: {digests}. Propose K follow-up queries that target named missing facts or unexplored peripheral domains relevant to the original query. For each, give the query and a one-line rationale. Output exactly one per line as `query | rationale`. No bullets, no numbering, no blank lines." Round 1 has no digests; the seed query is the only branch. Parser is tolerant: strip leading bullets/numbers, split each non-empty line on the first `|`. Belt-and-suspenders — give the model a clear format, then forgive minor deviations.
+3. `lib/digest.py` — `digest_round(round_idx: int, source_metas: list[dict]) -> str`. Calls `NOTES_MODEL` with a prompt: "Synthesise the following per-source notes from round N into an 800–1200 word digest covering: (a) what was learned, (b) which subdomains were touched, (c) what remains unanswered. Cite sources by their round-local index `[r.N]`." Digest is written to `rounds/<n>/digest.md`. Feeds back into branch proposal AND final synthesis.
 4. `lib/orchestrate.py` — top-level `research(seed_query: str, mode: Literal['interactive','batch']) -> Path`. Drives the round loop:
    - Per round: `propose_branches` → (interactive: branch gate) → for each branch `gather_sources(branch, exclude_urls=state.seen_urls)` → top-K rerank → (interactive: source gate, combined across branches) → `fetch_and_note` → `digest_round` → update `state` → `should_continue?`
    - `should_continue` is a callable injected by the CLI: in interactive mode it returns the user's gate response; in batch mode it calls `lib/batch.should_stop(state)` (Phase 7).
@@ -158,7 +156,7 @@ This phase builds the loop layer that Phase 2–3 plugs into. Branch proposal us
 
 - A 2-round forced run on q3 produces `rounds/01/` and `rounds/02/` dirs, each with sources and a digest. URLs from round 01 do not reappear in round 02's `sources/`.
 - `propose_branches` after round 01 of q3 returns 3–4 queries that name distinct subdomains (e.g., "saphenous nerve compression cycling," "training-load progression knee pain," "iliotibial vs medial meniscus diagnosis").
-- A round-01 digest is ≤2k tokens (per Unknowns #9) and is readable as a standalone summary.
+- A round-01 digest lands ≤5k tokens (per Unknowns #9) and is readable as a standalone summary.
 - `state.pkl` after the run contains the complete accumulated-sources list with round and branch labels.
 
 ---
@@ -168,7 +166,7 @@ This phase builds the loop layer that Phase 2–3 plugs into. Branch proposal us
 ### Steps
 
 1. `lib/synthesize.py` — `synthesize(seed_query: str, digests: list[str], top_source_metas: list[dict], config: SynthConfig | None = None) -> str`.
-   - Build a single prompt: original query, then numbered per-round digests `[R1]..[RN]`, then top-K (default K=15) source notes by accumulated `rerank_score` across all rounds, with anchors `[1]..[K]`. Each entry annotated with title and URL.
+   - Build a single prompt: original query, then numbered per-round digests `[R1]..[RN]`, then top-K (default K=30) source notes ranked against the seed query — re-rerank all accumulated sources against the seed embedding before selection, since per-round rerank scores were computed against per-round branch queries and aren't directly comparable. Anchor sources `[1]..[K]`; annotate each with title and URL.
    - Call `SYNTH_MODEL` with a structured-output prompt: TL;DR (3 sentences), key claims with `[N]` source citations and `[Rn]` round refs where helpful, contradictions/uncertainties between sources, gaps that retrieval did not fill.
    - `SynthConfig` parameterises context-shape, prompt template, and thinking toggle for Phase 8's sweep. Default config matches today's behaviour.
    - Return markdown.
@@ -178,7 +176,7 @@ This phase builds the loop layer that Phase 2–3 plugs into. Branch proposal us
 ### Acceptance criteria
 
 - A non-interactive 3-round run on q1 produces a `synthesis.md` that cites the EC margin and popular-vote outcome correctly with `[N]` anchors that resolve to actual `rounds/<r>/sources/<m>-*.md` files.
-- Synthesis-stage wall-clock on 26b-a4b with hierarchical input (digests + top-15 notes, not all 50–100 sources) lands ≤5 min.
+- Synthesis-stage wall-clock on 26b-a4b with hierarchical input (digests + top-30 notes, ≤40–50k input tokens) lands ≤8 min.
 - `handoff.md` is self-contained: no broken citation refs, no embedded extracted-text walls.
 
 ---
@@ -192,7 +190,7 @@ This phase builds the loop layer that Phase 2–3 plugs into. Branch proposal us
    - Per-round source review (after each round's fetch + notes complete): print combined source list across the round's branches as `[idx] domain — title (engine, branch)` + 1-line snippet + note first sentence. Prompt: `Approve [enter] / drop indices [comma list] / add URL [+url] / abort [q]:`.
    - Round-end gate: print round digest first sentence + accumulated source count. Prompt: `Continue with another round [enter] / stop and synthesise [s] / abort [q]:`.
    - Final synthesis gate (after round-end gate chooses `s` or hard cap reached): print accumulated source count and round-digest first sentences. Prompt: `Synthesise [enter] / abort [q]:`.
-   - Synthesis: print `synthesising with {SYNTH_MODEL}…` (rough time hint based on the model: ≤5 min for 26b-a4b, 5–15 min for 31b). Stream stdout if streaming is supported (Unknowns #11), else print on completion.
+   - Synthesis: print `synthesising with {SYNTH_MODEL}…` (rough time hint based on the model: ≤8 min for 26b-a4b, 10–20 min for 31b). Print on completion (no streaming — synchronous `requests` POST is technically simpler than SSE parsing and incremental rendering).
    - End: print session-dir path on stdout. Exit 0.
 2. `--batch` flag: skip all gates. Branches from `propose_branches`; round count and termination governed by Phase 7's `should_stop`.
 3. `--no-synth` flag: stop after the final round-end gate.
@@ -223,7 +221,7 @@ Across GPT-Researcher, LangGraph's open-deep-research, local-deep-researcher, Op
    - Hard cap: `state.round_count >= MAX_ROUNDS` (default 4) → stop, reason `"max_rounds"`.
    - Source cap: `len(state.accumulated_sources) >= MAX_SOURCES` (default 80) → stop, reason `"max_sources"`.
    - Novelty floor (only if `round_count >= 2`): compute `new_unique_domains = |this_round_domains - prior_domains|` and `new_high_rerank = count(this_round_sources where rerank_score >= threshold)`. Stop if `new_unique_domains / total_domains < 0.15` AND `new_high_rerank < 5`. Reason `"diminishing_returns"`.
-   - Threshold for `high_rerank` is set per Unknowns #8 — initial value derived from a calibration run, env-overridable.
+   - Threshold for `high_rerank` is per-run normalised per Unknowns #8 — sigma multiple env-overridable; calibrated from a real q1 run.
    - Skip an LLM "do I have enough?" gate per Stop-RAG's empirical result.
 2. `tests/local-research/eval/run_q1q6.py`:
    - Parse `experiments/vane-eval/queries.md`.
@@ -258,7 +256,7 @@ Across MT-Bench / Chatbot Arena, G-Eval, Prometheus 2, RAGAS, ALCE, ARES, and th
 2. `tests/local-research/eval/run_synth_sweep.py`:
    - Take a Phase 7 run-dir as input (`--from <run-dir>`); reuse its per-round notes + digests verbatim. Synthesis is the only variable.
    - 24-cell sweep per query: 3 (context-shape) × 2 (model tier) × 2 (prompt template) × 2 (thinking toggle).
-     - context-shape: `{digests-only, digests + top-15 notes, raw-notes}` (raw-notes will OOM context for some configs — log and skip rather than crash)
+     - context-shape: `{digests-only, digests + top-30 notes, raw-notes}`. With ~50–100 sources × ~500 tokens per note, raw-notes lands ~25–50k tokens — within the claimed 250k window and within the long-context-degradation ceiling from Unknowns #9. If a cell exceeds the synth model's effective limit on a longer run, log and skip rather than crash.
      - model tier: `{26b-a4b, 31b}`
      - prompt template: `{free-form, structured (TL;DR/claims/contradictions/gaps)}`
      - thinking: `{off, on}` (omlx flag if available; skip cells if unsupported)
@@ -274,7 +272,7 @@ Across MT-Bench / Chatbot Arena, G-Eval, Prometheus 2, RAGAS, ALCE, ARES, and th
 
 ### Acceptance criteria
 
-- A sweep against the Phase 7 q1 bundle produces up to 24 synthesis files with mechanical metrics in `MANIFEST.md`. No cell crashes (raw-notes context-shape may OOM for some queries — log and skip rather than crash).
+- A sweep against the Phase 7 q1 bundle produces up to 24 synthesis files with mechanical metrics in `MANIFEST.md`. No cell crashes (raw-notes cells may exceed effective context on long runs — log and skip rather than crash).
 - Citation-precision and -recall numbers are non-trivially distinguished across cells (range > 0.1 between best and worst); confirms the metric is not floored.
 - Per-axis marginal means show context-shape as the largest mover (per literature priors); if not, that's an interesting result and worth noting in the plan's Notes.
 - Decision recorded in this plan's Notes section after the run: which (context-shape, model, prompt, thinking) combination becomes the new default for `synthesize()`. Lifted to a `--synth-config` CLI flag if the answer is "depends on query."
