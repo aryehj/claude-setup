@@ -53,6 +53,10 @@
 
   Bulleted list of what "done" looks like.
 
+  ## Approach
+
+  The architectural through-line across phases — the strategy that ties them together, key risks, and the shape of the solution. 1–3 paragraphs. Skip this section for single-phase plans, mechanical changes, or when the through-line is already obvious from Goals. If you find yourself writing "the approach is to do the steps below," delete the section.
+
   ## Unknowns / To Verify
 
   First-class list of factual unknowns the plan depends on that weren't resolved during the grounding step. Include: the unknown, why it matters, how to verify it (command, URL, person to ask), and which step(s) depend on it. Omit this section only if there are genuinely no unresolved unknowns. Hedging beats fabrication — a plan that admits "verify Qwen 3.x MLX path on HF before Phase 1" is more useful than a plan that invents a confident-looking path.
@@ -63,15 +67,11 @@
 
   ### Steps
 
-  Numbered steps. Each step should be concrete about *intent* — what needs to happen and why. Be specific about commands, file paths, function names, and versions only when grounded in the current repo or in verified external facts. A step like "update the config" is too vague about intent; "add a `retry_limit` field to the pipeline config at `src/config/pipeline.ts`" is good. But don't invent file paths, package names, versions, or API shapes to satisfy the concreteness bar — mark ungrounded specifics explicitly (e.g., "install the MLX server package — verify exact name on PyPI first") or push them into the Unknowns section. Hedging beats fabrication.
+  Numbered steps. Each step should be concrete about *intent* — what needs to happen and why. Be specific about commands, file paths, function names, and versions only when grounded in the current repo or in verified external facts. A step like "update the config" is too vague about intent; "add a `retry_limit` field to the pipeline config at `src/config/pipeline.ts`" is good. Avoid the opposite failure too: a step that re-narrates background already in the plan-level Context, or restates project conventions the implementer can read in CLAUDE.md, is over-specified — trim it. Don't invent file paths, package names, versions, or API shapes to satisfy the concreteness bar — mark ungrounded specifics explicitly (e.g., "install the MLX server package — verify exact name on PyPI first") or push them into the Unknowns section. Hedging beats fabrication; brevity beats restating context.
 
-  ### Files
+  ### Acceptance criteria
 
-  Bulleted list of files created or changed in this phase.
-
-  ### Testing
-
-  How to verify this phase works. Specific commands, behavior to check, edge cases.
+  Optional. Bulleted list of what "done" means for *this phase* when distinct from plan-level Goals. Frame as outcomes, not test mechanism — `/implement` owns how to verify. Include this section when there are phase-specific edge cases worth guarding, manual-verification surface that automated tests won't reach, or the phase has no testable behavior at all (e.g., "docs only — no code-level assertions"). Omit it when plan-level Goals already covers what done means for this phase. The default is to omit.
 
   ---
 
@@ -89,8 +89,9 @@
 
   Rules
 
+  - Match plan length to task size. `## Approach` and per-phase `### Acceptance criteria` are optional — include them only when they carry signal the implementer can't get from the working directory or plan-level Goals. A small task should produce a small plan; a one-phase mechanical edit does not need an Approach section, and most phases do not need Acceptance criteria.
   - Output only questions or a plan file. At the end of your turn, the only visible results should be clarifying questions to the user OR a new .md file written to plans/. Do not produce both in the same turn.
-  - Write for a capable implementer. Assume whoever implements this plan has the contents of this plan plus the working directory (e.g., CLAUDE.md) and nothing else — no memory of this conversation, no outside knowledge of the surrounding task. Include file paths, function names, and concrete descriptions of changes where grounded. Hedging beats fabrication: a plan that says "find and install the MLX server package before proceeding" is better than one that invents a confident-looking package name the implementer can't execute. Do not anchor on a specific model's capability when deciding how detailed to be — write the plan the task actually needs, then add a per-phase model hint in the Status checklist when you have a strong view (mechanical edits → "Haiku ok"; subtle refactors or architectural judgment → "Opus recommended"). Default phases get no annotation. Use the same signal that populates the Unknowns section: phases heavy with implementation-time judgment calls are the ones that warrant a stronger-model flag.
+  - Write for a capable implementer. Assume whoever implements this plan has the plan itself, the working directory (CLAUDE.md, README, ADR, source code, recent git history), the project's conventions visible in that tree, and standard knowledge of the tools in play. They do not have memory of this conversation. Include file paths, function names, and concrete descriptions of changes where grounded — but do not restate context the implementer can read for themselves. If a fact is in CLAUDE.md or trivially greppable, citing it once (or not at all) beats re-narrating it. Hedging beats fabrication: a plan that says "find and install the MLX server package before proceeding" is better than one that invents a confident-looking package name the implementer can't execute. Do not anchor on a specific model's capability when deciding how detailed to be — write the plan the task actually needs, then add a per-phase model hint in the Status checklist when you have a strong view (mechanical edits → "Haiku ok"; subtle refactors or architectural judgment → "Opus recommended"). Default phases get no annotation. Use the same signal that populates the Unknowns section: phases heavy with implementation-time judgment calls are the ones that warrant a stronger-model flag.
   - One file, always. All concerns go in a single plan file, organized as phases. Never create multiple plan files for one /plan invocation.
   - Don't over-explore. Read what you need to write a good plan, then write it. This is not a research task.
   - Don't implement. You are writing a plan, not code. Do not edit any source files outside of plans/.
