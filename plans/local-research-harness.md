@@ -2,15 +2,15 @@
 
 ## Status
 
-- [ ] Phase 1: scaffold + container infra
-- [ ] Phase 2: per-round search + rerank pipeline
-- [ ] Phase 3: fetch + extract + per-source notes
+- [ ] Phase 1: scaffold + container infra (sonnet-medium ok)
+- [ ] Phase 2: per-round search + rerank pipeline (sonnet-medium ok)
+- [ ] Phase 3: fetch + extract + per-source notes (sonnet-medium ok)
 - [ ] Phase 4: round orchestration (branch proposal, dedupe, per-round digest, termination)
 - [ ] Phase 5: hierarchical synthesis + bundle output
-- [ ] Phase 6: interactive CLI with multi-round gates
+- [ ] Phase 6: interactive CLI with multi-round gates (sonnet-medium ok)
 - [ ] Phase 7: --batch mode + q1–q6 regression eval (Opus recommended)
 - [ ] Phase 8: synthesis-quality evaluation harness (Opus recommended)
-<!-- mark [x] as phases complete during implementation. Append `(Haiku ok)` for mechanical edits or `(Opus recommended)` for phases heavy with judgment calls; otherwise no annotation. -->
+<!-- mark [x] as phases complete during implementation. Effort annotations: `(sonnet-medium ok)` for mechanical phases where the spec leaves few decisions (wrapper code, fixed prompts, scaffolding); `(Opus recommended)` for judgment-heavy phases (autonomous decisions, eval design, novel rubric work); unannotated phases default to sonnet-high — typically because the prompt itself is the product (Phases 4, 5) and wording materially affects downstream quality. -->
 
 ## Context
 
