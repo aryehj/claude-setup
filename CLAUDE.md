@@ -16,23 +16,14 @@ templates/                   — seed templates copied to host state dirs on fir
   research-denylist-additions.txt     — seeded to ~/.research/denylist-additions.txt by research.py
 skills/                      — reusable Claude Code skills (back up of ~/.claude/skills/)
 plans/                       — implementation plans written by /plan skill
-tests/                       — unit tests and eval harness
+tests/                       — unit tests and infra smoke tests
   test-agent-firewall.sh               — in-container firewall smoke tests for start-agent.sh (5 of 6 README cases + inter-container port isolation)
   test-cross-vm-isolation.sh           — host-driven cross-VM isolation test: claude-agent ↔ research cannot reach each other
   test_agent_sh.py                     — static check that no docker run in start-agent.sh publishes a host port
   test_research.py                     — unit tests for research.py pure helpers
   probe-denylist.sh                    — host-driven Squid denylist end-to-end probe (allow + deny URLs)
   probe-vane-egress.sh                 — smoke test for research-vane egress env vars and sidecar HTTPS round-trip
-  walkback-checks.py                   — historic debug-saga verifier; not a steady-state test
-  vane-eval/                           — Vane research-quality eval harness (OFAT sweep)
-    queries.md                         — six research queries with reference answers
-    run_cheap.py                       — cheap phase: OFAT sweep against omlx directly (model/prompt/temperature axes)
-    run_thinking.py                    — thinking on/off sweep: two human-prompted phases, classify_status taxonomy, finish_reason+output_tokens in frontmatter, status-summary in MANIFEST
-    select_winners.py                  — pick winner + ablations from a graded cheap run
-    run_vane.py                        — Vane confirm phase: replay winner through full pipeline
-    lib/                               — shared helpers (cells.py: Cell, call_omlx, classify_status, write_cell_output; queries.py: load)
-    test_lib.py, test_run_cheap.py     — pytest suites for lib + run_cheap
-    test_run_vane.py                   — pytest suite for select_winners + run_vane helpers
+experiments/                 — archived experiments (not part of CI); see experiments/vane-eval/README.md
 ROADMAP.md                   — planned work
 README.md                    — usage reference
 ADR.md                       — architecture decision records

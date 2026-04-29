@@ -11,7 +11,7 @@
 
 ## Context
 
-The Vane-based eval (`tests/vane-eval/results/vane-20260429T025556Z/`, analysis at `tests/vane-eval/analysis/vane-20260429T025556Z.md`) showed that retrieval ceilings dominate model/prompt/thinking variation: every model × prompt × thinking combination missed the same reference facts on q3 (saphenous nerve, training-load) and q6 ("lost in the middle"). Vane's intermediation also makes retrieval inscrutable.
+The Vane-based eval showed that retrieval ceilings dominated model/prompt/thinking variation: every model × prompt × thinking combination missed the same reference facts on q3 (saphenous nerve, training-load) and q6 ("lost in the middle"). Vane's intermediation also makes retrieval inscrutable.
 
 The user is dropping Vane as the substrate. The keepers from `research.py`:
 - `research` Colima VM
@@ -36,8 +36,8 @@ Per-stage models, per the user's stated prior:
 - Output: tree of markdown files under `~/.research/sessions/<timestamp-slug>/` (`query.md`, `sources/<n>-<slug>.md`, `synthesis.md`, `manifest.md`). Plus a flat `handoff.md` concatenation for one-shot frontier paste.
 - 31b is exclusively the synthesis-stage model; everything else is smaller.
 - `--batch` and `--no-synth` flags for non-interactive eval and for stopping before synthesis when handoff is the goal.
-- Reuses `tests/vane-eval/queries.md` for q1–q6 regression eval. Direct comparability with the Vane run.
-- Lives in `tests/local-research/` mirroring `tests/vane-eval/` layout.
+- Reuses `experiments/vane-eval/queries.md` for q1–q6 regression eval. Direct comparability with the Vane run.
+- Lives in `tests/local-research/`.
 - New container `research-runner` joins existing `research-net`; no new VM, no new firewall rules.
 
 ## Unknowns / To Verify
@@ -58,7 +58,7 @@ Create the directory layout, the `research-runner` Dockerfile, and a host-side b
 
 ### Steps
 
-1. Create `tests/local-research/` directory mirroring the `tests/vane-eval/` layout (top-level scripts + `lib/` + `test_*.py` + `eval/`).
+1. Create `tests/local-research/` directory (top-level scripts + `lib/` + `test_*.py` + `eval/`).
 2. Add `tests/local-research/Dockerfile`:
    - Base: `python:3.12-slim` (or whatever matches conventions in the repo — verify against any existing Python Dockerfiles before picking).
    - Install: `requests`, `trafilatura`, `pyyaml`. No node, no model server.
@@ -127,7 +127,7 @@ Wire SearXNG fan-out and nomic embedder rerank. No human interaction yet — pip
 
 ### Testing
 
-- Drive `gather_sources("medial knee pain cyclists")` (q3) end-to-end and eyeball the ranked top-15. Hypothesis: with 5 expanded queries fanning out across all SearXNG engines, more medical / sports-medicine sources appear than in the Vane run for the same question. Compare against `tests/vane-eval/results/vane-20260429T025556Z/q3_*.md` `search_results` JSON blocks.
+- Drive `gather_sources("medial knee pain cyclists")` (q3) end-to-end and eyeball the ranked top-15. Hypothesis: with 5 expanded queries fanning out across all SearXNG engines, more medical / sports-medicine sources appear than in the Vane run for the same question.
 - Verify ranked-list ordering changes meaningfully when query phrasing varies; if rerank is a no-op, the embedder isn't being hit correctly.
 
 ---
@@ -226,23 +226,21 @@ Stitch the pipeline together with two human approval gates and a clean stderr/st
 
 ## Phase 6: q1–q6 batch eval driver
 
-Drive the new pipeline against `tests/vane-eval/queries.md` non-interactively and produce a results layout comparable to `tests/vane-eval/results/`.
+Drive the new pipeline against `experiments/vane-eval/queries.md` non-interactively and produce a comparable results layout.
 
 ### Steps
 
 1. `tests/local-research/eval/run_q1q6.py`:
-   - Parse `tests/vane-eval/queries.md` (same parser as `tests/vane-eval/lib/queries.py` — import or copy).
+   - Parse `experiments/vane-eval/queries.md`.
    - For each q in q1..q6: invoke the CLI in `--batch` mode (full pipeline including synthesis). Save bundles under `tests/local-research/eval/results/local-research-<UTC-timestamp>/q<n>/`.
    - Optionally also a `--no-synth` variant per query to save a no-synthesis bundle for frontier handoff.
-2. `tests/local-research/eval/manifest.py` — write a top-level `MANIFEST.md` in the run-dir mirroring `tests/vane-eval/results/<run>/MANIFEST.md` shape (per-cell status, latency, file links). Cell shape here is `q<n>` rather than the model-product cells used by vane-eval.
-3. After the eval run, write a manual analysis at `tests/vane-eval/analysis/local-research-<timestamp>.md` comparing this run's coverage on the gap facts (q3 saphenous nerve, q3 training-load, q6 lost-in-the-middle) against the Vane run. Same fact-check tables as the previous analysis used.
+2. `tests/local-research/eval/manifest.py` — write a top-level `MANIFEST.md` in the run-dir (per-cell status, latency, file links). Cell shape here is `q<n>`.
 
 ### Files
 
 - `tests/local-research/eval/run_q1q6.py`
 - `tests/local-research/eval/manifest.py`
 - `tests/local-research/eval/results/.gitkeep`
-- `tests/vane-eval/analysis/local-research-<timestamp>.md` (written by hand after the run)
 
 ### Testing
 
@@ -260,7 +258,7 @@ Drive the new pipeline against `tests/vane-eval/queries.md` non-interactively an
 
 **Why a new container, not extending research-vane.** Vane is a complex Node app and effectively a black box. The runner is ~500 lines of Python total. Joining `research-net` reuses the existing egress firewall (Squid + iptables `RESEARCH` chain) without copying any of it.
 
-**Why `tests/local-research/` rather than top-level `local-research/`.** Mirrors the `tests/vane-eval/` precedent. Daily-driver invocation is a single `bootstrap.sh`; path depth doesn't matter once aliased.
+**Why `tests/local-research/` rather than top-level `local-research/`.** Daily-driver invocation is a single `bootstrap.sh`; path depth doesn't matter once aliased.
 
 **Parallelism deferred.** Per Unknowns #3, omlx may serialise concurrent calls anyway. Sequential per-source notes keep stderr legible (real-time progress) and make the human-in-loop pacing natural. Revisit only if profiling shows wall-clock pain.
 

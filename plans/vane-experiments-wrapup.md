@@ -10,7 +10,7 @@ type: project
 
 - [x] Phase 1: archive `run_thinking.py` + `queries.md` + ZIP archives of the two subfolders in /results  to `experiments/vane-eval/`; delete everything else under `tests/vane-eval/` (Haiku ok)
 - [x] Phase 2: prune scratch from `tests/` (Haiku ok)
-- [ ] Phase 3: update docs + rename implemented plans
+- [x] Phase 3: update docs + rename implemented plans
 - [ ] Phase 4: verify & commit
 
 ## Context
