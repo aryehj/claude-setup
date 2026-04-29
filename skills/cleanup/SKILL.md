@@ -18,6 +18,8 @@ You have just finished implementing a major change. Perform the following housek
 
 Read the current `CLAUDE.md` (or note its absence). Update it to accurately reflect the current state of the project — layout, what the code does, key decisions, and how to make changes. If no `CLAUDE.md` exists, create one following the same structure. Do not pad it with boilerplate; keep it concise and useful for an LLM working in this repo.
 
+When adding to a **Key decisions** section, use one-liner bullets of the form `- **<heading>** — <one-sentence summary>. See ADR-NN.` Rationale belongs in ADR.md, not here. Only add a bullet if the decision is something an agent working in this repo needs to know *exists* — not every ADR warrants a CLAUDE.md entry.
+
 ## 2. Update README.md
 
 Read the current `README.md` (or note its absence). Update it so it accurately describes the project for a human reader — what it is, how to set it up, how to use it, what's inside. If no `README.md` exists, create one. Match the existing tone and style if one exists.
