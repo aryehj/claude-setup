@@ -1821,3 +1821,97 @@ at-a-glance check rather than a 324-row scroll.
 - `finish_reason` and `output_tokens` in frontmatter are parsed from `result["raw"]`
   and default to `"unknown"` / `0` if the response shape is missing those fields
   (e.g. on transport error).
+
+## ADR-032: Reframe `/plan` around acceptance criteria; drop per-phase Files and Testing
+
+**Date:** 2026-04-29
+**Status:** Accepted
+
+### Context
+
+`/plan` reliably produced over-specified, bloated plans. Two structural drivers:
+
+1. **Audience framing pushed toward restating discoverable context.** The "Write
+   for a capable implementer" rule said the implementer has "the contents of this
+   plan plus the working directory (e.g., CLAUDE.md) and nothing else — no memory
+   of this conversation, no outside knowledge of the surrounding task." Defining
+   the implementer as context-free is functionally an instruction to restate
+   anything they might want — CLAUDE.md, project conventions, the working
+   directory itself were all available, but the framing pretended they weren't.
+
+2. **The mandatory phase scaffold (`### Steps` / `### Files` / `### Testing`)
+   forced weight into every phase regardless of size.** `### Files` duplicated
+   path citations already in Steps. `### Testing` mostly restated the project's
+   test mechanism (`uv run pytest tests/`) — pure boilerplate. Genuine
+   planning-time test signal (edge cases, manual-verification surface, "no
+   testable behavior") was the rare exception, not the norm. Step preambles
+   then re-narrated "why" already covered in plan-level Context, because each
+   phase read as semi-standalone.
+
+The redundancy compounded with `/implement`'s ownership of TDD. `/implement`
+already owns the test runner, the tests-first ordering rule, and the
+tests-pass-before-commit gate. `### Testing` in plans was a second, weaker
+version of the same contract written at planning time without grounding in
+the actual test suite.
+
+### Decision
+
+Four concrete changes to `skills/plan/SKILL.md`:
+
+1. **Audience reframing.** The "capable implementer" rule now affirms what *is*
+   available: the plan, the working directory (CLAUDE.md, README, ADR, source,
+   recent git history), the project's conventions visible in that tree, and
+   standard tool knowledge. The "no memory of this conversation" carve-out is
+   preserved. The don't-confabulate rule is preserved verbatim — it is
+   separately load-bearing and the reframing must not weaken it.
+
+2. **Plan-level `## Approach` added** between Goals and Unknowns. Houses the
+   architectural through-line across phases — strategy, key risks, shape of
+   the solution. Explicitly optional with a skip-when clause for single-phase
+   plans, mechanical changes, and plans where the through-line is already
+   obvious from Goals.
+
+3. **Per-phase `### Files` and `### Testing` dropped.** Files duplicated Steps;
+   Testing duplicated `/implement`'s ownership.
+
+4. **Per-phase `### Acceptance criteria` added as optional.** Frames "done" as
+   outcomes, not test mechanism. Default is to omit; include only when there
+   are phase-specific edge cases worth guarding, manual-verification surface,
+   or the phase has no testable behavior at all (e.g., "docs only — no
+   code-level assertions"). The when-to-omit text mirrors the existing
+   "Omit this section only if…" pattern used for Unknowns, since "optional"
+   sections in skills tend to become de-facto required if the model just
+   sees an example to fill in.
+
+A new top Rules entry — "Match plan length to task size" — explicitly flags
+both Approach and Acceptance criteria as optional and instructs that small
+tasks should produce small plans.
+
+The corresponding `/implement` change in `skills/implement/SKILL.md`:
+
+- Step 5's tests-first task now derives the test target from a fallback
+  chain: phase-level `### Acceptance criteria` if present → plan-level
+  `## Goals` if not → infer from Steps as a last resort. The "no testable
+  behavior" escape hatch is preserved, with the addition that plans may
+  declare docs-only directly via Acceptance criteria — when they do, the
+  implementer accepts the plan's classification rather than re-deciding.
+- Step 2 notes that legacy-format plans (with `### Files` / `### Testing`)
+  and updated-format plans (with optional `### Acceptance criteria`) are
+  both valid input.
+
+### Consequences
+
+- **Existing plans in `plans/` are not migrated.** `/implement` reads both
+  formats, so the change lands without a flag-day rewrite. This is the
+  intentional escape valve.
+- The "optional sections become de-facto required" risk is the most likely
+  failure mode. If `## Approach` and `### Acceptance criteria` start
+  sprouting reflexively on every plan in the next several runs, the next
+  iteration tightens the skill text further with explicit negative
+  examples of when *not* to include each.
+- `/implement`'s test-target derivation is now keyed off the plan rather
+  than implementer-time guesswork. Plans that say nothing about phase-level
+  done-state fall through to plan-level Goals; the implementer no longer
+  has to invent the spec at execution time.
+- `/plan` and `/implement` retain a clean ownership split: `/plan` declares
+  outcomes, `/implement` chooses mechanism.
