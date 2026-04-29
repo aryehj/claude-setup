@@ -69,15 +69,7 @@ The biggest risk is that the q3/q6 retrieval gap is engine-side (SearXNG's enabl
    - Base: `python:3.12-slim` (or whatever matches conventions in the repo — verify against any existing Python Dockerfiles before picking).
    - Install: `requests`, `trafilatura`, `pyyaml`. No node, no model server.
    - `WORKDIR /app`, copy `lib/` and entrypoint script.
-3. Add `tests/local-research/lib/config.py` with module-level constants and env-var overrides. **omlx is the default and only supported backend for v1** — it hosts both the chat models and the embedder. Constants:
-   - `SEARXNG_URL = "http://research-searxng:8080"`
-   - `OMLX_BASE_URL = os.environ.get("OMLX_BASE_URL", "http://host.docker.internal:8000/v1")`
-   - `OMLX_API_KEY = os.environ.get("OMLX_API_KEY", "")` — attached as `Authorization: Bearer ...` when non-empty.
-   - `EMBED_MODEL` (default discovered at startup from `/v1/models` — pick the embedding-class entry, override via env)
-   - `EXPAND_MODEL` (default `gemma-4-E4B-it-MLX-8bit`)
-   - `NOTES_MODEL` (default `gemma-4-26b-a4b-it-8bit`)
-   - `SYNTH_MODEL` (default `gemma-4-26b-a4b-it-8bit` — same as `NOTES_MODEL`; Phase 7 sweeps to 31b)
-   - `SESSION_ROOT = Path("/sessions")` (bind-mounted from host `~/.research/sessions/`)
+3. Add `tests/local-research/lib/config.py` with module-level constants and env-var overrides. **omlx is the default and only supported backend for v1** — it hosts both the chat models and the embedder. Constants needed: `SEARXNG_URL`, `OMLX_BASE_URL`, `OMLX_API_KEY`, `EMBED_MODEL`, `EXPAND_MODEL`, `NOTES_MODEL`, `SYNTH_MODEL`, `SESSION_ROOT` (bind-mounted from host `~/.research/sessions/`). Model IDs resolved per Unknowns #1; all four model constants are env-var overridable.
 4. Add `tests/local-research/bootstrap.sh`:
    - Verify the `research` Colima context has `research-searxng` running and `research-net` exists. If not, print "run `./research.py --backend=omlx` first" and exit non-zero.
    - Build `research-runner:latest` if missing or stale (compare Dockerfile mtime to image creation time).
@@ -145,11 +137,7 @@ The biggest risk is that the q3/q6 retrieval gap is engine-side (SearXNG's enabl
    - Build a single prompt: original user query, then a numbered list of source notes (note section only, not the full extracted text — keep tokens manageable). Each entry annotated with title and URL as citation anchors `[1]`, `[2]`, ...
    - Call `SYNTH_MODEL` (default 26b-a4b — same as notes; Phase 7 evaluates whether 31b is meaningfully better) with a prompt asking for a structured synthesis: TL;DR (3 sentences max), key claims with `[N]` citations, contradictions/uncertainties between sources, gaps that retrieval did not fill.
    - Return markdown.
-2. Extend `lib/bundle.py`:
-   - `write_query(session_dir, query, expansions)` → `query.md`.
-   - `write_synthesis(session_dir, synthesis_md)` → `synthesis.md`.
-   - `write_manifest(session_dir, stages, models, timings, source_count, gates_passed)` → `manifest.md`.
-   - `write_tarball(session_dir)` → `bundle.tar.gz` of the whole session dir; convenience for one-file handoff.
+2. Extend `lib/bundle.py` to write `query.md`, `synthesis.md`, and `manifest.md` (stages, models, timings, source count, gates passed). API shape decided at the keyboard.
 3. `lib/handoff.py` — `prepare_handoff(session_dir: Path) -> Path`. Concatenates `query.md` + per-source notes (note sections only, no extracted bodies) + `synthesis.md` into a single `handoff.md` at the session-dir root. This is the paste-bombable single-file form. Tree form is canonical; handoff is convenience.
 
 ### Acceptance criteria
@@ -171,15 +159,12 @@ The biggest risk is that the q3/q6 retrieval gap is engine-side (SearXNG's enabl
    - **Gate 2**: one-line summary per source (idx, title, note first sentence). Prompt: `Approve [enter] / drop indices [comma list] / abort [q]:`.
    - Stage C (synthesise): print `synthesising with {SYNTH_MODEL}…` (with a rough time hint based on the model: ≤5 min for 26b-a4b, 5–15 min for 31b) then stream stdout if the inference endpoint supports streaming, else print on completion.
    - End: print session-dir path on stdout. Exit 0.
-2. Resume support: write a small `state.json` in the session dir after each gate. `--resume <session-dir>` skips completed stages and re-enters at the next gate. Phase-1 implementation: state captures stage-completion booleans + a hash of the input query; reject resume if the hash differs.
-3. `--batch` flag: skip both gates (auto-approve top-K and all notes). Used by Phase 6 eval driver.
-4. `--no-synth` flag: stop after Gate 2. Useful when handoff is the goal and the user doesn't want to spend 10 min on local synthesis.
-5. `--top-k N` and `--expansions N` flags surfacing the rerank/expansion knobs.
+2. `--batch` flag: skip both gates (auto-approve top-K and all notes). Used by Phase 6 eval driver.
+3. `--no-synth` flag: stop after Gate 2. Useful when handoff is the goal and the user doesn't want to spend 10 min on local synthesis.
 
 ### Acceptance criteria
 
 - An interactive run against a personal query reaches both gates with clear summaries; index parsing matches the indices shown; edits at each gate apply correctly to the next stage's input set.
-- Ctrl-C at gate 1 followed by `--resume <session-dir>` shows the same ranked list and the same gate state.
 - `--batch --no-synth` exits cleanly with a bundle that has every artifact except `synthesis.md`.
 - `--batch` end-to-end on q1 produces a bundle equivalent to the manual approval flow.
 
@@ -209,18 +194,15 @@ The biggest risk is that the q3/q6 retrieval gap is engine-side (SearXNG's enabl
 
 1. `tests/local-research/eval/run_synth_bakeoff.py`:
    - Take a Phase 6 run-dir as input (`--from <run-dir>`); reuse its per-source notes verbatim. Do not re-run retrieval, fetch, extract, or note generation — synthesis is the only variable.
-   - For each q1..q6 cell in the input run-dir, call `lib.synthesize.synthesize(...)` twice: once with `SYNTH_MODEL=gemma-4-26b-a4b-it-8bit`, once with `SYNTH_MODEL=gemma-4-31b-it-6bit`. Save outputs side-by-side as `synthesis-26ba4.md` and `synthesis-31b.md` under `tests/local-research/eval/results/synth-bakeoff-<UTC-timestamp>/q<n>/`. Record per-call latency.
+   - For each q1..q6 cell, call `lib.synthesize.synthesize(...)` twice (26b-a4b and 31b). Save outputs side-by-side as `synthesis-26ba4.md` and `synthesis-31b.md` under `tests/local-research/eval/results/synth-bakeoff-<UTC-timestamp>/q<n>/`. Record per-call latency. Write a top-level `MANIFEST.md` with per-cell wall-clock per model, total tokens if `usage` is reported, and side-by-side links.
    - Sequential, not parallel — omlx serialises requests per Unknowns #3, and we want clean per-call timings.
-2. `tests/local-research/eval/bakeoff_manifest.py` — write a top-level `MANIFEST.md` summarising per-cell wall-clock for each model and total tokens (if the inference endpoint reports `usage`). Include side-by-side links to the two synthesis files for each query.
-3. Add a `tests/local-research/eval/bakeoff_diff.py` helper that, for each query, prints a small comparison: which `[N]` citation anchors each synthesis used, citation-count overlap, length in chars, and whether each surfaces the q3 reference facts (saphenous nerve, training-load increase) and q6 "lost in the middle" — string-match heuristics, not an LLM judge.
-4. Document in `tests/local-research/README.md` how to run the bake-off against any Phase 6 run-dir, and call out that the comparison is judged by reading the side-by-side outputs (no LLM judge in v1 — see Out of scope).
+2. Document in `tests/local-research/README.md` how to run the bake-off against any Phase 6 run-dir. Comparison is judged by reading the side-by-side outputs (no LLM judge in v1 — see Out of scope).
 
 ### Acceptance criteria
 
 - A bake-off run completes for q1–q6 producing two synthesis files per query with recorded latencies, all referenced from `MANIFEST.md`.
 - Per-query 26b-a4b synthesis is meaningfully faster than 31b (target ratio ≥2×) — confirms the speed argument for the Phase 1–6 default.
-- The diff report makes it possible to answer "does 31b surface anything 26b-a4b missed on the same notes" by eyeball — at minimum, citation-anchor sets, lengths, and reference-fact hits are shown side-by-side per query.
-- Decision recorded in this plan's Notes section after the run: keep 26b-a4b as default, switch to 31b, or expose a `--synth-model` per-run flag (already present via `SYNTH_MODEL` env var, but may want to lift to a CLI flag if the answer is "depends on query").
+- Decision recorded in this plan's Notes section after the run: keep 26b-a4b as default, switch to 31b, or expose a `--synth-model` per-run flag.
 
 ---
 
