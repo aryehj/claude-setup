@@ -1858,46 +1858,32 @@ the actual test suite.
 
 Four concrete changes to `skills/plan/SKILL.md`:
 
-1. **Audience reframing.** The "capable implementer" rule now affirms what *is*
-   available: the plan, the working directory (CLAUDE.md, README, ADR, source,
-   recent git history), the project's conventions visible in that tree, and
-   standard tool knowledge. The "no memory of this conversation" carve-out is
-   preserved. The don't-confabulate rule is preserved verbatim — it is
-   separately load-bearing and the reframing must not weaken it.
-
-2. **Plan-level `## Approach` added** between Goals and Unknowns. Houses the
-   architectural through-line across phases — strategy, key risks, shape of
-   the solution. Explicitly optional with a skip-when clause for single-phase
-   plans, mechanical changes, and plans where the through-line is already
-   obvious from Goals.
-
-3. **Per-phase `### Files` and `### Testing` dropped.** Files duplicated Steps;
-   Testing duplicated `/implement`'s ownership.
-
-4. **Per-phase `### Acceptance criteria` added as optional.** Frames "done" as
-   outcomes, not test mechanism. Default is to omit; include only when there
-   are phase-specific edge cases worth guarding, manual-verification surface,
-   or the phase has no testable behavior at all (e.g., "docs only — no
-   code-level assertions"). The when-to-omit text mirrors the existing
-   "Omit this section only if…" pattern used for Unknowns, since "optional"
-   sections in skills tend to become de-facto required if the model just
-   sees an example to fill in.
-
-A new top Rules entry — "Match plan length to task size" — explicitly flags
-both Approach and Acceptance criteria as optional and instructs that small
-tasks should produce small plans.
+1. **Audience reframing.** The "capable implementer" rule affirms what *is*
+   available — plan, working directory (CLAUDE.md, README, ADR, source,
+   recent git history), project conventions, standard tool knowledge —
+   instead of declaring the implementer context-free. The "no memory of
+   this conversation" carve-out and the don't-confabulate rule are
+   preserved.
+2. **Plan-level `## Approach` added** between Goals and Unknowns. Houses
+   the architectural through-line across phases. Explicitly optional,
+   skipped for single-phase or mechanical changes.
+3. **Per-phase `### Files` and `### Testing` dropped.** Files duplicated
+   Steps; Testing duplicated `/implement`'s ownership.
+4. **Per-phase `### Acceptance criteria` added as optional.** Frames
+   "done" as outcomes, not test mechanism. Default is to omit; include
+   only for phase-specific edge cases, manual-verification surface, or
+   non-testable phases (e.g., "docs only"). The explicit when-to-omit
+   text mirrors the existing Unknowns pattern, since "optional" sections
+   in skills tend to become de-facto required if the model only sees an
+   example to fill in.
 
 The corresponding `/implement` change in `skills/implement/SKILL.md`:
-
-- Step 5's tests-first task now derives the test target from a fallback
-  chain: phase-level `### Acceptance criteria` if present → plan-level
-  `## Goals` if not → infer from Steps as a last resort. The "no testable
-  behavior" escape hatch is preserved, with the addition that plans may
-  declare docs-only directly via Acceptance criteria — when they do, the
-  implementer accepts the plan's classification rather than re-deciding.
-- Step 2 notes that legacy-format plans (with `### Files` / `### Testing`)
-  and updated-format plans (with optional `### Acceptance criteria`) are
-  both valid input.
+step 5's tests-first task derives the test target from a fallback chain
+— phase-level Acceptance criteria → plan-level Goals → infer from Steps.
+The no-testable-behavior escape hatch covers both implementer-assessed
+and plan-declared docs-only phases. Step 2 notes that legacy-format
+plans (with `### Files` / `### Testing`) and updated-format plans (with
+optional `### Acceptance criteria`) are both valid input.
 
 ### Consequences
 
