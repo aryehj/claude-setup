@@ -16,12 +16,10 @@ CONTAINER_SEARXNG="research-searxng"
 RESEARCH_NET="research-net"
 SQUID_PORT=8888
 
-# ── 1. Switch to research Colima docker context ────────────────────────────────
 if ! docker context use colima-research >/dev/null 2>&1; then
     echo "warning: could not switch to colima-research docker context; assuming current context is correct" >&2
 fi
 
-# ── 2. Verify research-searxng is running and research-net exists ─────────────
 if ! docker inspect "$CONTAINER_SEARXNG" --format '{{.State.Running}}' 2>/dev/null | grep -q true; then
     echo "error: $CONTAINER_SEARXNG is not running." >&2
     echo "       Start the research environment first: ./research.py --backend=omlx" >&2
@@ -34,7 +32,11 @@ if ! docker network inspect "$RESEARCH_NET" >/dev/null 2>&1; then
     exit 1
 fi
 
-# ── 3. Compute bridge IP (where Squid listens) — needed for build + run ───────
+if [ -z "${OMLX_API_KEY:-}" ]; then
+    echo "error: OMLX_API_KEY is not set. Export it before running bootstrap.sh." >&2
+    exit 1
+fi
+
 BRIDGE_IP=$(docker network inspect bridge \
     -f '{{(index .IPAM.Config 0).Gateway}}' 2>/dev/null || true)
 if [ -z "$BRIDGE_IP" ]; then
@@ -42,8 +44,8 @@ if [ -z "$BRIDGE_IP" ]; then
     BRIDGE_IP="172.17.0.1"
 fi
 
-# ── 4. Build research-runner image if missing or sources changed ──────────────
-# Use a local stamp file (portable — avoids macOS vs. Linux find/stat differences).
+# Rebuild image when Dockerfile or lib/ sources are newer than the last build.
+# Stamp file avoids macOS vs. Linux find/stat incompatibilities.
 STAMP="$SCRIPT_DIR/.image-timestamp"
 NEEDS_BUILD=0
 if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
@@ -67,11 +69,9 @@ if [ "$NEEDS_BUILD" -eq 1 ]; then
     touch "$STAMP"
 fi
 
-# ── 5. Ensure session dir exists ──────────────────────────────────────────────
 SESSION_HOST_DIR="${HOME}/.research/sessions"
 mkdir -p "$SESSION_HOST_DIR"
 
-# ── 6. Determine entrypoint ──────────────────────────────────────────────────
 if [ "${1:-}" = "--smoke" ]; then
     CMD=("python" "-m" "lib.smoke")
     shift
@@ -81,7 +81,6 @@ else
     TTY_FLAGS="-it"
 fi
 
-# ── 7. Run the container ──────────────────────────────────────────────────────
 exec docker run --rm $TTY_FLAGS \
     --network "$RESEARCH_NET" \
     --add-host "host.docker.internal:host-gateway" \
