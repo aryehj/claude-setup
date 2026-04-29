@@ -165,11 +165,34 @@ This phase builds the loop layer that Phase 2–3 plugs into. Branch proposal us
 
 ### Steps
 
-1. `lib/synthesize.py` — `synthesize(seed_query: str, digests: list[str], top_source_metas: list[dict], config: SynthConfig | None = None) -> str`.
-   - Build a single prompt: original query, then numbered per-round digests `[R1]..[RN]`, then top-K (default K=30) source notes ranked against the seed query — re-rerank all accumulated sources against the seed embedding before selection, since per-round rerank scores were computed against per-round branch queries and aren't directly comparable. Anchor sources `[1]..[K]`; annotate each with title and URL.
-   - Call `SYNTH_MODEL` with a structured-output prompt: TL;DR (3 sentences), key claims with `[N]` source citations and `[Rn]` round refs where helpful, contradictions/uncertainties between sources, gaps that retrieval did not fill.
-   - `SynthConfig` parameterises context-shape, prompt template, and thinking toggle for Phase 8's sweep. Default config matches today's behaviour.
-   - Return markdown.
+1. `lib/synthesize.py` — `synthesize(seed_query: str, digests: list[str], top_source_metas: list[dict], config: SynthConfig = DEFAULT) -> str`. Caller (orchestrator or sweep driver) assembles `digests` and `top_source_metas` per `config.context_shape` and passes them in; the function builds the prompt and calls the model. Top-K source notes are ranked against the seed query — re-rerank all accumulated sources against the seed embedding before selection, since per-round rerank scores were computed against per-round branch queries and aren't directly comparable. Anchor sources `[1]..[K]`; annotate each with title and URL. Digests anchor `[R1]..[RN]`.
+
+   `SynthConfig` is a frozen dataclass with five orthogonal axes. Sweep driver iterates the Cartesian product:
+
+   ```python
+   class ContextShape(StrEnum): DIGESTS_ONLY, DIGESTS_PLUS_TOPK, RAW_NOTES
+   class PromptTemplate(StrEnum): FREE_FORM, STRUCTURED
+
+   @dataclass(frozen=True)
+   class SynthConfig:
+       context_shape: ContextShape
+       model: str
+       prompt_template: PromptTemplate
+       thinking: bool
+       top_k: int = 30
+       def slug(self) -> str: ...      # e.g. "digests-plus-topk-26ba4-structured-thinkoff"
+       def to_dict(self) -> dict: ...  # for manifest.md
+   ```
+
+   Default ships with `DIGESTS_PLUS_TOPK`, `SYNTH_MODEL` env var (or 26b-a4b), `STRUCTURED`, `thinking=False`, `top_k=30`. Phase 8 may overturn any axis.
+
+   `STRUCTURED` template: TL;DR (3 sentences), key claims with `[N]` source citations and `[Rn]` round refs where helpful, contradictions/uncertainties between sources, gaps that retrieval did not fill. `FREE_FORM` is an unstructured "synthesise these sources" instruction.
+
+   `model_short` mapping from full omlx model ID to slug fragment (`gemma-4-26b-a4b-it-8bit` → `26ba4`, `gemma-4-31b-it-6bit` → `31b`) lives next to the dataclass — a few lines, hand-curated.
+
+   No prompt-template versioning / enum graveyard. When a template's text changes, replace in place; rely on git tags for re-runnable historical bundles. Matches the project's commit style of not carrying compatibility shims.
+
+   Return markdown.
 2. Extend `lib/bundle.py` to write `query.md`, per-round dirs `rounds/<n>/{sources/, digest.md}`, `synthesis.md`, and `manifest.md` (rounds, models, timings, source counts per round, gates passed, termination reason). API shape decided at the keyboard.
 3. `lib/handoff.py` — `prepare_handoff(session_dir: Path) -> Path`. Concatenates `query.md` + per-round digests + top-K source notes (note sections only) + `synthesis.md` into a single `handoff.md` at the session-dir root. Tree form is canonical; handoff is convenience.
 
@@ -260,7 +283,7 @@ Across MT-Bench / Chatbot Arena, G-Eval, Prometheus 2, RAGAS, ALCE, ARES, and th
      - model tier: `{26b-a4b, 31b}`
      - prompt template: `{free-form, structured (TL;DR/claims/contradictions/gaps)}`
      - thinking: `{off, on}` (omlx flag if available; skip cells if unsupported)
-   - Save outputs as `synthesis-<config-slug>.md` under `tests/local-research/eval/results/synth-sweep-<UTC-timestamp>/q<n>/`. Record per-call latency and (if reported) `usage` tokens.
+   - Sweep driver iterates the Cartesian product of `SynthConfig` axes (Phase 5), calling `synthesize(...)` once per cell. File names use `config.slug()`; `manifest.md` rows use `config.to_dict()`. Save outputs as `synthesis-<slug>.md` under `tests/local-research/eval/results/synth-sweep-<UTC-timestamp>/q<n>/`. Record per-call latency and (if reported) `usage` tokens.
    - Sequential per Unknowns #3.
 3. `lib/eval/citation_grounding.py` — mechanical metrics:
    - `parse_citations(synthesis: str) -> list[tuple[claim, list[int]]]` — split by sentence, extract `[N]` markers per sentence.
