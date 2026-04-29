@@ -50,8 +50,12 @@ else
     IMAGE_CREATED=$(docker image inspect "$IMAGE" --format '{{.Created}}')
     IMAGE_TS=$(date -d "$IMAGE_CREATED" +%s 2>/dev/null || date -j -f "%Y-%m-%dT%H:%M:%S" "${IMAGE_CREATED%%.*}" +%s 2>/dev/null || echo 0)
     DOCKERFILE_TS=$(stat -c %Y "$DOCKERFILE" 2>/dev/null || stat -f %m "$DOCKERFILE" 2>/dev/null || echo 999999999999)
-    if [ "$DOCKERFILE_TS" -gt "$IMAGE_TS" ]; then
-        echo "==> Dockerfile newer than image — rebuilding"
+    # Also check lib/ — COPY lib/ lib/ bakes it into the image.
+    LIB_TS=$(find "$SCRIPT_DIR/lib" -type f -printf '%T@\n' 2>/dev/null | sort -n | tail -1 | cut -d. -f1)
+    LIB_TS=${LIB_TS:-0}
+    NEWEST_TS=$(( DOCKERFILE_TS > LIB_TS ? DOCKERFILE_TS : LIB_TS ))
+    if [ "$NEWEST_TS" -gt "$IMAGE_TS" ]; then
+        echo "==> Source newer than image — rebuilding"
         NEEDS_BUILD=1
     fi
 fi
