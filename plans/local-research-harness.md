@@ -2,7 +2,7 @@
 
 ## Status
 
-- [ ] Phase 1: scaffold + container infra (sonnet-medium ok)
+- [x] Phase 1: scaffold + container infra (sonnet-medium ok)
 - [ ] Phase 2: per-round search + rerank pipeline (sonnet-medium ok)
 - [ ] Phase 3: fetch + extract + per-source notes (sonnet-medium ok)
 - [ ] Phase 4: round orchestration (branch proposal, dedupe, per-round digest, termination)
