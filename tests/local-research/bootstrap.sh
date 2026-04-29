@@ -34,7 +34,15 @@ if ! docker network inspect "$RESEARCH_NET" >/dev/null 2>&1; then
     exit 1
 fi
 
-# ── 3. Build research-runner image if missing or Dockerfile is newer ──────────
+# ── 3. Compute bridge IP (where Squid listens) — needed for build + run ───────
+BRIDGE_IP=$(docker network inspect bridge \
+    -f '{{(index .IPAM.Config 0).Gateway}}' 2>/dev/null || true)
+if [ -z "$BRIDGE_IP" ]; then
+    echo "warning: could not determine bridge gateway IP; falling back to 172.17.0.1" >&2
+    BRIDGE_IP="172.17.0.1"
+fi
+
+# ── 4. Build research-runner image if missing or Dockerfile is newer ──────────
 NEEDS_BUILD=0
 if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
     NEEDS_BUILD=1
@@ -50,15 +58,10 @@ fi
 
 if [ "$NEEDS_BUILD" -eq 1 ]; then
     echo "==> Building $IMAGE"
-    docker build -t "$IMAGE" "$SCRIPT_DIR"
-fi
-
-# ── 4. Compute bridge IP (where Squid listens) ────────────────────────────────
-BRIDGE_IP=$(docker network inspect bridge \
-    -f '{{(index .IPAM.Config 0).Gateway}}' 2>/dev/null || true)
-if [ -z "$BRIDGE_IP" ]; then
-    echo "warning: could not determine bridge gateway IP; falling back to 172.17.0.1" >&2
-    BRIDGE_IP="172.17.0.1"
+    docker build \
+        --build-arg "HTTP_PROXY=http://${BRIDGE_IP}:${SQUID_PORT}" \
+        --build-arg "HTTPS_PROXY=http://${BRIDGE_IP}:${SQUID_PORT}" \
+        -t "$IMAGE" "$SCRIPT_DIR"
 fi
 
 # ── 5. Ensure session dir exists ──────────────────────────────────────────────
