@@ -23,7 +23,9 @@ tests/                       — unit tests and infra smoke tests
   test_research.py                     — unit tests for research.py pure helpers
   probe-denylist.sh                    — host-driven Squid denylist end-to-end probe (allow + deny URLs)
   probe-vane-egress.sh                 — smoke test for research-vane egress env vars and sidecar HTTPS round-trip
-experiments/                 — archived experiments (not part of CI); see experiments/vane-eval/README.md
+experiments/                 — archived experiments (not part of CI)
+  vane-eval/                           — OFAT eval harness (archived); see experiments/vane-eval/README.md
+  model-experiment/                    — raw session transcripts from the model-comparison experiment
 ROADMAP.md                   — planned work
 README.md                    — usage reference
 ADR.md                       — architecture decision records
