@@ -3,7 +3,7 @@
 ## ADR-001: Set `UV_CACHE_DIR` to a writable path in the container environment
 
 **Date:** 2026-04-03
-**Status:** Accepted
+**Status:** Superseded in part by ADR-004 — dynamic `$TMPDIR` resolution replaced the static `/tmp/uv-cache` path.
 
 ### Context
 
@@ -47,7 +47,7 @@ belt-and-suspenders for manual shell sessions.
 ## ADR-002: Add `/tmp/uv-cache` to sandbox `filesystem.allowWrite`
 
 **Date:** 2026-04-03
-**Status:** Accepted
+**Status:** Superseded in part by ADR-004 — dynamic `$TMPDIR` resolution replaced the static `/tmp/uv-cache` path.
 
 ### Context
 
@@ -1470,7 +1470,7 @@ purposes — uncommenting one will re-fetch on the next refresh.
 ## ADR-027: research.py: route Vane through Squid via `HTTPS_PROXY` only
 
 **Date:** 2026-04-26
-**Status:** Superseded by ADR-029
+**Status:** Superseded by ADR-029 — both `HTTP_PROXY` and `HTTPS_PROXY` are now set on `research-vane`; the HTTPS-only workaround was based on a wrong-Vane observation.
 
 ### Context
 
