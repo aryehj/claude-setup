@@ -7,7 +7,7 @@ status: draft
 ## Status
 
 - [x] Phase 1: refactor `/plan` scaffold
-- [ ] Phase 2: align `/implement` with the new acceptance-criteria framing
+- [x] Phase 2: align `/implement` with the new acceptance-criteria framing
 - [ ] Phase 3: ADR-032 capturing the rationale
 
 ## Context
