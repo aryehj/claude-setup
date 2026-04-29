@@ -8,6 +8,8 @@
 - [ ] Phase 4: synthesis stage + bundle output
 - [ ] Phase 5: interactive CLI with human gates
 - [ ] Phase 6: q1–q6 batch eval driver
+- [ ] Phase 7: 31b vs 26b-a4b synthesis bake-off
+<!-- mark [x] as phases complete during implementation. Append `(Haiku ok)` for mechanical edits or `(Opus recommended)` for phases heavy with judgment calls; otherwise no annotation. -->
 
 ## Context
 
@@ -19,14 +21,12 @@ The user is dropping Vane as the substrate. The keepers from `research.py`:
 - Squid proxy on port 8888 with the composed denylist
 - `RESEARCH` iptables chain with the egress allowlist for SearXNG fan-out + LLM endpoint
 
-What replaces Vane: a thin Python CLI in a sibling container `research-runner` joined to `research-net`. Pipeline runs as discrete stages with two human approval gates (after retrieval-and-rerank, after per-source notes), then synthesises with the 31b model. Output is a tree of markdown files under `~/.research/sessions/<timestamp-slug>/` for handoff to a frontier model when local synthesis isn't enough.
-
 Per-stage models, per the user's stated prior:
 - Query expansion: E4B (small, format-following)
 - Reranking: nomic embedder (user has it locally)
 - Per-source content extraction: trafilatura (Python lib, no LLM)
 - Per-source notes: 26b-a4b (daily driver — nearly E4B speed, more reliable)
-- Synthesis: 31b (slow OK; user explicitly wants to test 31b at this step)
+- Synthesis: 26b-a4b by default in Phases 1–6 to keep iteration fast; Phase 7 runs a 31b-vs-26b-a4b bake-off at this stage to decide whether the slower model is worth it.
 
 ## Goals
 
@@ -34,11 +34,19 @@ Per-stage models, per the user's stated prior:
 - Gate 1: review the ranked list of sources before fetching. Edit/drop indices, add manual URLs.
 - Gate 2: review per-source notes before synthesis. Edit/drop indices.
 - Output: tree of markdown files under `~/.research/sessions/<timestamp-slug>/` (`query.md`, `sources/<n>-<slug>.md`, `synthesis.md`, `manifest.md`). Plus a flat `handoff.md` concatenation for one-shot frontier paste.
-- 31b is exclusively the synthesis-stage model; everything else is smaller.
+- Synthesis defaults to 26b-a4b for speed; 31b is reserved for the Phase 7 bake-off and as an opt-in override via `SYNTH_MODEL`.
 - `--batch` and `--no-synth` flags for non-interactive eval and for stopping before synthesis when handoff is the goal.
 - Reuses `experiments/vane-eval/queries.md` for q1–q6 regression eval. Direct comparability with the Vane run.
 - Lives in `tests/local-research/`.
 - New container `research-runner` joins existing `research-net`; no new VM, no new firewall rules.
+
+## Approach
+
+Replace Vane with a thin Python CLI in a sibling container `research-runner` joined to `research-net`, reusing the existing Squid proxy + `RESEARCH` iptables chain rather than introducing any new firewall surface. The pipeline runs as discrete stages — expand → search → rerank → fetch → extract → note → synthesise — with two human approval gates between retrieval/rerank and per-source-note review. Output is a tree of markdown files under `~/.research/sessions/<timestamp-slug>/` for handoff to a frontier model when local synthesis isn't enough.
+
+Phases ladder up from infrastructure to interactivity: Phase 1 stands up the container and confirms connectivity, Phase 2 makes a non-interactive ranked-list pipeline, Phase 3 adds per-source notes, Phase 4 adds synthesis + bundle output, Phase 5 wraps the lot in an interactive CLI with the two gates, and Phase 6 drives the q1–q6 eval against it for direct comparability with the Vane run. Each earlier phase is independently exercisable, so a regression in one phase doesn't block experimenting with the next.
+
+The biggest risk is that the q3/q6 retrieval gap is engine-side (SearXNG's enabled engines simply don't index the relevant medical/training-load content), in which case the new architecture won't move the needle. Phase 6's comparison is the explicit check for that, and the mitigation (adding PubMed via `research.py`'s SearXNG settings) is called out in Notes — outside this plan but a one-liner.
 
 ## Unknowns / To Verify
 
@@ -54,8 +62,6 @@ Per-stage models, per the user's stated prior:
 
 ## Phase 1: scaffold + container infra
 
-Create the directory layout, the `research-runner` Dockerfile, and a host-side bootstrap that builds the image and runs the container with the right network and mounts. No pipeline logic yet — Phase 1 success is "smoke-test hits SearXNG and prints JSON."
-
 ### Steps
 
 1. Create `tests/local-research/` directory (top-level scripts + `lib/` + `test_*.py` + `eval/`).
@@ -70,7 +76,7 @@ Create the directory layout, the `research-runner` Dockerfile, and a host-side b
    - `EMBED_MODEL` (default discovered at startup from `/v1/models` — pick the embedding-class entry, override via env)
    - `EXPAND_MODEL` (default `gemma-4-E4B-it-MLX-8bit`)
    - `NOTES_MODEL` (default `gemma-4-26b-a4b-it-8bit`)
-   - `SYNTH_MODEL` (default `gemma-4-31b-it-6bit`)
+   - `SYNTH_MODEL` (default `gemma-4-26b-a4b-it-8bit` — same as `NOTES_MODEL`; Phase 7 sweeps to 31b)
    - `SESSION_ROOT = Path("/sessions")` (bind-mounted from host `~/.research/sessions/`)
 4. Add `tests/local-research/bootstrap.sh`:
    - Verify the `research` Colima context has `research-searxng` running and `research-net` exists. If not, print "run `./research.py --backend=omlx` first" and exit non-zero.
@@ -80,29 +86,17 @@ Create the directory layout, the `research-runner` Dockerfile, and a host-side b
    - The `--backend=ollama` path is intentionally not supported in v1; document this in `README.md`. If ollama support is needed later, gate it behind a separate config and a different embedder.
 5. Add `lib/omlx.py` — shared OpenAI-compatible client wrapping `requests`. Exposes `chat(model, messages, **kw) -> str` and `embed(model, inputs) -> list[list[float]]`, plus `list_models() -> list[dict]`. Centralises base URL, API-key header, and timeouts (default 20 min, matching the recent `vane-eval` POST timeout bump per `599f0a3`). Every later phase uses this helper rather than calling `requests` directly.
 6. Add `lib/smoke.py` with three checks: SearXNG reachable, omlx `/v1/models` lists at least one chat model and one embedding model, embedder returns a vector for the string "test". Bootstrap calls it via `--smoke` flag.
-6. Write `tests/local-research/README.md` documenting bootstrap usage, env-var overrides, and the session output layout.
+7. Write `tests/local-research/README.md` documenting bootstrap usage, env-var overrides, and the session output layout.
 
-### Files
-
-- `tests/local-research/Dockerfile`
-- `tests/local-research/bootstrap.sh`
-- `tests/local-research/lib/__init__.py`
-- `tests/local-research/lib/config.py`
-- `tests/local-research/lib/omlx.py`
-- `tests/local-research/lib/smoke.py`
-- `tests/local-research/README.md`
-
-### Testing
+### Acceptance criteria
 
 - `./tests/local-research/bootstrap.sh --smoke` prints non-empty results for SearXNG (`?q=test&format=json`), the omlx `/v1/models` listing (showing at least one chat model and the embedder), and a single embedding vector for the string "test".
-- Confirm Squid proxy is exercised by `tail -f ~/.research/squid-cache/access.log` during a fetch test and watching one entry appear.
-- Confirm a `curl https://example.com` from inside the runner succeeds (Squid + denylist allows generic web).
+- Squid proxy is exercised end-to-end: a fetch from inside the runner produces a fresh entry in `~/.research/squid-cache/access.log`.
+- A `curl https://example.com` from inside the runner succeeds (Squid + denylist allows generic web).
 
 ---
 
 ## Phase 2: search + rerank pipeline
-
-Wire SearXNG fan-out and nomic embedder rerank. No human interaction yet — pipeline is callable as a function and prints a ranked list.
 
 ### Steps
 
@@ -117,24 +111,14 @@ Wire SearXNG fan-out and nomic embedder rerank. No human interaction yet — pip
    - Dedupe collapses duplicate URLs across expansions.
    - `search` parses a fixture JSON correctly.
 
-### Files
+### Acceptance criteria
 
-- `tests/local-research/lib/expand.py`
-- `tests/local-research/lib/search.py`
-- `tests/local-research/lib/rerank.py`
-- `tests/local-research/lib/pipeline.py`
-- `tests/local-research/test_lib.py`
-
-### Testing
-
-- Drive `gather_sources("medial knee pain cyclists")` (q3) end-to-end and eyeball the ranked top-15. Hypothesis: with 5 expanded queries fanning out across all SearXNG engines, more medical / sports-medicine sources appear than in the Vane run for the same question.
-- Verify ranked-list ordering changes meaningfully when query phrasing varies; if rerank is a no-op, the embedder isn't being hit correctly.
+- `gather_sources("medial knee pain cyclists")` (q3) runs end-to-end and the ranked top-15 contains visibly more medical / sports-medicine sources than the Vane run for the same question.
+- Ranked-list ordering changes meaningfully when query phrasing varies — confirms the embedder is actually being hit (not silently no-op'd).
 
 ---
 
 ## Phase 3: fetch + extract + per-source notes
-
-Fetch each ranked URL through Squid, extract main content with trafilatura, generate a per-source note with the daily-driver model.
 
 ### Steps
 
@@ -144,32 +128,22 @@ Fetch each ranked URL through Squid, extract main content with trafilatura, gene
 4. `lib/bundle.py` — `write_source(session_dir: Path, idx: int, url: str, title: str, extracted: str, note: str, meta: dict)`. Writes `sources/<idx:02d>-<slug>.md` with YAML frontmatter (`url`, `title`, `fetch_latency_s`, `extract_chars`, `note_model`, `note_latency_s`, `engine`) followed by `## Note\n\n{note}\n\n## Extracted\n\n{extracted}\n`.
 5. Extend `pipeline.py` with `fetch_and_note(ranked: list[dict], session_dir: Path) -> list[Path]`. For each ranked entry: fetch → extract → note → write_source. Logs per-source progress to stderr (one line: idx, status, fetch_ms, extract_chars, note_ms, note_first_line). On any per-source failure, logs and continues; failures noted in `manifest.md`.
 
-### Files
+### Acceptance criteria
 
-- `tests/local-research/lib/fetch.py`
-- `tests/local-research/lib/extract.py`
-- `tests/local-research/lib/notes.py`
-- `tests/local-research/lib/bundle.py`
-- (extends) `tests/local-research/lib/pipeline.py`, `test_lib.py`
-
-### Testing
-
-- Run on q3's ranked top-15 from Phase 2. Eyeball one source markdown: note section is query-relevant and concise; extracted section is clean prose, not nav cruft.
-- Time the per-source phase: budget ~60s/source × 15 = ~15 min. If notably worse, env-var override to `EXPAND_MODEL`-style E4B for note generation.
-- Trafilatura fallback: pick a known JS-heavy page and confirm fallback fires (extract returns reasonable content).
-- One forced 404 / timeout to confirm error path doesn't abort the batch.
+- A run on q3's ranked top-15 produces source markdown where the note section is query-relevant and concise, and the extracted section is clean prose (not nav cruft).
+- Per-source phase completes within budget (~60s/source × 15 = ~15 min). Notably worse → env-var override to E4B for note generation is documented.
+- Trafilatura fallback fires on a known JS-heavy page and produces reasonable content.
+- A forced 404 / timeout on one source does not abort the batch; the failure is recorded in `manifest.md`.
 
 ---
 
 ## Phase 4: synthesis stage + bundle output
 
-Run 31b over the per-source notes to produce `synthesis.md`; assemble the full bundle.
-
 ### Steps
 
 1. `lib/synthesize.py` — `synthesize(query: str, source_metas: list[dict]) -> str`.
    - Build a single prompt: original user query, then a numbered list of source notes (note section only, not the full extracted text — keep tokens manageable). Each entry annotated with title and URL as citation anchors `[1]`, `[2]`, ...
-   - Call `SYNTH_MODEL` (default 31b) with a prompt asking for a structured synthesis: TL;DR (3 sentences max), key claims with `[N]` citations, contradictions/uncertainties between sources, gaps that retrieval did not fill.
+   - Call `SYNTH_MODEL` (default 26b-a4b — same as notes; Phase 7 evaluates whether 31b is meaningfully better) with a prompt asking for a structured synthesis: TL;DR (3 sentences max), key claims with `[N]` citations, contradictions/uncertainties between sources, gaps that retrieval did not fill.
    - Return markdown.
 2. Extend `lib/bundle.py`:
    - `write_query(session_dir, query, expansions)` → `query.md`.
@@ -178,23 +152,15 @@ Run 31b over the per-source notes to produce `synthesis.md`; assemble the full b
    - `write_tarball(session_dir)` → `bundle.tar.gz` of the whole session dir; convenience for one-file handoff.
 3. `lib/handoff.py` — `prepare_handoff(session_dir: Path) -> Path`. Concatenates `query.md` + per-source notes (note sections only, no extracted bodies) + `synthesis.md` into a single `handoff.md` at the session-dir root. This is the paste-bombable single-file form. Tree form is canonical; handoff is convenience.
 
-### Files
+### Acceptance criteria
 
-- `tests/local-research/lib/synthesize.py`
-- `tests/local-research/lib/handoff.py`
-- (extends) `tests/local-research/lib/bundle.py`
-
-### Testing
-
-- Run the full pipeline non-interactively against q1 (factual baseline). Verify `synthesis.md` cites the EC margin and popular-vote outcome correctly with `[N]` anchors that resolve to actual `sources/<n>-*.md` files.
-- Time the synthesis stage: expect 5–15 min on 31b based on vane-eval data.
-- Eyeball that `handoff.md` is self-contained (no broken citation refs, no embedded extracted-text walls).
+- A non-interactive run against q1 (factual baseline) produces a `synthesis.md` that cites the EC margin and popular-vote outcome correctly with `[N]` anchors that resolve to actual `sources/<n>-*.md` files.
+- Synthesis-stage wall-clock on 26b-a4b is materially faster than the 5–15 min seen on 31b in vane-eval — target ≤5 min so a full q1–q6 sweep stays under ~2 h.
+- `handoff.md` is self-contained: no broken citation refs, no embedded extracted-text walls.
 
 ---
 
 ## Phase 5: interactive CLI with human gates
-
-Stitch the pipeline together with two human approval gates and a clean stderr/stdout flow.
 
 ### Steps
 
@@ -203,30 +169,23 @@ Stitch the pipeline together with two human approval gates and a clean stderr/st
    - **Gate 1**: print top-K ranked sources as `[idx] domain — title (engine)` + 1-line snippet. Prompt: `Approve [enter] / drop indices [comma list] / add URL [+url] / abort [q]:`. Accept multiple actions on one line.
    - Stage B (fetch + extract + notes): per-source progress line as each completes (idx, status, fetch ms, note ms, note first sentence).
    - **Gate 2**: one-line summary per source (idx, title, note first sentence). Prompt: `Approve [enter] / drop indices [comma list] / abort [q]:`.
-   - Stage C (synthesise): print "synthesising with 31b… (5–15 min)" then stream stdout if the inference endpoint supports streaming, else print on completion.
+   - Stage C (synthesise): print `synthesising with {SYNTH_MODEL}…` (with a rough time hint based on the model: ≤5 min for 26b-a4b, 5–15 min for 31b) then stream stdout if the inference endpoint supports streaming, else print on completion.
    - End: print session-dir path on stdout. Exit 0.
 2. Resume support: write a small `state.json` in the session dir after each gate. `--resume <session-dir>` skips completed stages and re-enters at the next gate. Phase-1 implementation: state captures stage-completion booleans + a hash of the input query; reject resume if the hash differs.
 3. `--batch` flag: skip both gates (auto-approve top-K and all notes). Used by Phase 6 eval driver.
 4. `--no-synth` flag: stop after Gate 2. Useful when handoff is the goal and the user doesn't want to spend 10 min on local synthesis.
 5. `--top-k N` and `--expansions N` flags surfacing the rerank/expansion knobs.
 
-### Files
+### Acceptance criteria
 
-- `tests/local-research/lib/cli.py`
-- (extends) `tests/local-research/lib/pipeline.py` for resume hooks
-
-### Testing
-
-- Run interactively against a personal query end-to-end. Gates are clear; index parsing matches indices shown; edits applied correctly to the next stage's input set.
-- Ctrl-C at gate 1 → re-run with `--resume <session-dir>` → same ranked list shown, same gate state.
-- `--batch --no-synth` exits cleanly with bundle minus `synthesis.md`.
-- `--batch` end-to-end on q1 produces a bundle equivalent to a manual approval flow.
+- An interactive run against a personal query reaches both gates with clear summaries; index parsing matches the indices shown; edits at each gate apply correctly to the next stage's input set.
+- Ctrl-C at gate 1 followed by `--resume <session-dir>` shows the same ranked list and the same gate state.
+- `--batch --no-synth` exits cleanly with a bundle that has every artifact except `synthesis.md`.
+- `--batch` end-to-end on q1 produces a bundle equivalent to the manual approval flow.
 
 ---
 
 ## Phase 6: q1–q6 batch eval driver
-
-Drive the new pipeline against `experiments/vane-eval/queries.md` non-interactively and produce a comparable results layout.
 
 ### Steps
 
@@ -236,17 +195,32 @@ Drive the new pipeline against `experiments/vane-eval/queries.md` non-interactiv
    - Optionally also a `--no-synth` variant per query to save a no-synthesis bundle for frontier handoff.
 2. `tests/local-research/eval/manifest.py` — write a top-level `MANIFEST.md` in the run-dir (per-cell status, latency, file links). Cell shape here is `q<n>`.
 
-### Files
+### Acceptance criteria
 
-- `tests/local-research/eval/run_q1q6.py`
-- `tests/local-research/eval/manifest.py`
-- `tests/local-research/eval/results/.gitkeep`
+- A q1-only run produces the expected layout and parses `queries.md` correctly before the full sweep is attempted.
+- Comparison check vs. the Vane run: q3 source bundles contain PubMed / sports-medicine domains, and at least one q3 source's note mentions saphenous nerve or training-load increase. If yes → architecture has closed the gap. If no → gap is engine-side and SearXNG settings need PubMed (a `research.py:432` edit, outside this plan).
+- Total wall-clock for the sweep lands under ~2 h (6 queries × ~15–20 min each, given 26b-a4b synthesis instead of 31b).
 
-### Testing
+---
 
-- Run on q1 alone first to confirm shape and parse. Then full sweep.
-- Comparison check: do q3 source bundles now contain PubMed / sports-medicine domains? Does any q3 source's note mention saphenous nerve or training-load increase? If yes on either, the architecture has closed the gap. If no, the gap is engine-side and SearXNG settings need PubMed (a `research.py` edit, outside this plan).
-- Total wall-clock budget: 6 queries × ~20–30 min each = 2–3 h sweep.
+## Phase 7: 31b vs 26b-a4b synthesis bake-off
+
+### Steps
+
+1. `tests/local-research/eval/run_synth_bakeoff.py`:
+   - Take a Phase 6 run-dir as input (`--from <run-dir>`); reuse its per-source notes verbatim. Do not re-run retrieval, fetch, extract, or note generation — synthesis is the only variable.
+   - For each q1..q6 cell in the input run-dir, call `lib.synthesize.synthesize(...)` twice: once with `SYNTH_MODEL=gemma-4-26b-a4b-it-8bit`, once with `SYNTH_MODEL=gemma-4-31b-it-6bit`. Save outputs side-by-side as `synthesis-26ba4.md` and `synthesis-31b.md` under `tests/local-research/eval/results/synth-bakeoff-<UTC-timestamp>/q<n>/`. Record per-call latency.
+   - Sequential, not parallel — omlx serialises requests per Unknowns #3, and we want clean per-call timings.
+2. `tests/local-research/eval/bakeoff_manifest.py` — write a top-level `MANIFEST.md` summarising per-cell wall-clock for each model and total tokens (if the inference endpoint reports `usage`). Include side-by-side links to the two synthesis files for each query.
+3. Add a `tests/local-research/eval/bakeoff_diff.py` helper that, for each query, prints a small comparison: which `[N]` citation anchors each synthesis used, citation-count overlap, length in chars, and whether each surfaces the q3 reference facts (saphenous nerve, training-load increase) and q6 "lost in the middle" — string-match heuristics, not an LLM judge.
+4. Document in `tests/local-research/README.md` how to run the bake-off against any Phase 6 run-dir, and call out that the comparison is judged by reading the side-by-side outputs (no LLM judge in v1 — see Out of scope).
+
+### Acceptance criteria
+
+- A bake-off run completes for q1–q6 producing two synthesis files per query with recorded latencies, all referenced from `MANIFEST.md`.
+- Per-query 26b-a4b synthesis is meaningfully faster than 31b (target ratio ≥2×) — confirms the speed argument for the Phase 1–6 default.
+- The diff report makes it possible to answer "does 31b surface anything 26b-a4b missed on the same notes" by eyeball — at minimum, citation-anchor sets, lengths, and reference-fact hits are shown side-by-side per query.
+- Decision recorded in this plan's Notes section after the run: keep 26b-a4b as default, switch to 31b, or expose a `--synth-model` per-run flag (already present via `SYNTH_MODEL` env var, but may want to lift to a CLI flag if the answer is "depends on query").
 
 ---
 
