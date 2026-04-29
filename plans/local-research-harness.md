@@ -75,7 +75,7 @@ The biggest open risk is still that the q3/q6 retrieval gap is engine-side (Sear
    - Base: `python:3.12-slim` (or whatever matches conventions in the repo — verify against any existing Python Dockerfiles before picking).
    - Install: `requests`, `trafilatura`, `pyyaml`. No node, no model server.
    - `WORKDIR /app`, copy `lib/` and entrypoint script.
-3. Add `tests/local-research/lib/config.py` with module-level constants and env-var overrides. **omlx is the default and only supported backend for v1** — it hosts both the chat models and the embedder. Constants needed: `SEARXNG_URL`, `OMLX_BASE_URL`, `OMLX_API_KEY`, `EMBED_MODEL`, `EXPAND_MODEL`, `NOTES_MODEL`, `SYNTH_MODEL`, `SESSION_ROOT` (bind-mounted from host `~/.research/sessions/`), and round-budget constants `MAX_ROUNDS`, `MAX_SOURCES`, `QUERIES_PER_ROUND`. Model IDs resolved per Unknowns #1; all four model constants are env-var overridable.
+3. Add `tests/local-research/lib/config.py` with module-level constants and env-var overrides. **omlx is the default and only supported backend for v1** — it hosts both the chat models and the embedder. Constants needed: SearXNG URL, omlx base URL + API key, four model IDs (embedder, expand, notes, synth), session root (bind-mounted from host `~/.research/sessions/`), and the round-budget constants (`MAX_ROUNDS`, `MAX_SOURCES`) consumed by Phase 7. Model IDs resolved per Unknowns #1; all model constants env-var overridable.
 4. Add `tests/local-research/bootstrap.sh`:
    - Verify the `research` Colima context has `research-searxng` running and `research-net` exists. If not, print "run `./research.py --backend=omlx` first" and exit non-zero.
    - Build `research-runner:latest` if missing or stale (compare Dockerfile mtime to image creation time).
@@ -104,11 +104,7 @@ The biggest open risk is still that the q3/q6 retrieval gap is engine-side (Sear
    - `embed(texts: list[str]) -> list[list[float]]` — POST to `{OMLX_BASE_URL}/embeddings` with `{"model": EMBED_MODEL, "input": texts}`. Attach `Authorization: Bearer $OMLX_API_KEY` header when the env var is set.
    - `rerank(query: str, results: list[dict], top_k: int = 15, exclude_urls: set[str] = None) -> list[dict]` — embed `query` and each result's `f"{title}\n{content}"`; cosine-rank against the query embedding; return top_k. Dedupe by URL before reranking. Drop URLs in `exclude_urls` (cross-round dedupe) before scoring. Preserve original `engine` and `score` and add `rerank_score` to the returned dicts.
 4. `lib/pipeline.py` — `gather_sources(query: str, exclude_urls: set[str] = None) -> dict` calls `expand → search-each → flatten → dedupe → rerank`. Returns `{query, expansions, raw_results, ranked, timings}` for Phase 4's orchestrator. Pure orchestration; no I/O outside the helpers' subprocess/HTTP calls.
-5. `test_lib.py` — pytest unit tests:
-   - `rerank` returns top_k items in cosine order given stubbed embeddings.
-   - Dedupe collapses duplicate URLs across expansions.
-   - Cross-round dedupe via `exclude_urls` removes the right items.
-   - `search` parses a fixture JSON correctly.
+5. `test_lib.py` — unit tests for rerank ordering, expansion-level URL dedupe, cross-round URL dedupe, and SearXNG JSON fixture parsing.
 
 ### Acceptance criteria
 
@@ -124,9 +120,9 @@ The biggest open risk is still that the q3/q6 retrieval gap is engine-side (Sear
 
 1. `lib/fetch.py` — `fetch(url: str, timeout_s: int = 30) -> tuple[str, dict]`. Issue HTTP GET via `requests` (proxy env vars are honoured automatically). Returns `(body, meta)` where meta has `status`, `final_url`, `latency_s`, `bytes`. Raises a structured exception on 4xx/5xx/timeout/proxy-deny.
 2. `lib/extract.py` — `extract(html: str, url: str) -> str`. Wraps `trafilatura.extract(html, output_format='markdown', include_links=False, include_comments=False)`. Falls back to a regex strip-tags + `<title>` if trafilatura returns None or `<500` chars. Returns markdown.
-3. `lib/notes.py` — `note_for_source(query: str, source_text: str, meta: dict) -> str`. Calls `NOTES_MODEL` with a fixed prompt: "Given this user query and this source text, write 4–8 short bullet points: (a) the source's central claim relevant to the query, (b) the most relevant specific facts/quotes, (c) any obvious caveats or contrary evidence. If the source is irrelevant, say so in one line." Truncate `source_text` per Unknowns #9. Sequential per Unknowns #3.
-4. `lib/bundle.py` — `write_source(round_dir: Path, idx: int, url: str, title: str, extracted: str, note: str, meta: dict)`. Writes `<round_dir>/sources/<idx:02d>-<slug>.md` with YAML frontmatter (`url`, `title`, `round`, `branch`, `fetch_latency_s`, `extract_chars`, `note_model`, `note_latency_s`, `engine`, `rerank_score`) followed by `## Note\n\n{note}\n\n## Extracted\n\n{extracted}\n`.
-5. Extend `pipeline.py` with `fetch_and_note(ranked: list[dict], round_dir: Path, round_idx: int, branch_label: str) -> list[dict]`. For each ranked entry: fetch → extract → note → write_source. Returns the list of source-meta dicts (with paths) for the round digest. Logs per-source progress to stderr. On per-source failure, logs and continues; failures recorded in the round's manifest fragment.
+3. `lib/notes.py` — `note_for_source(query, source_text, meta) -> str`. Calls `NOTES_MODEL` with a fixed prompt asking for 4–8 query-relevant bullets covering central claim, specific facts/quotes, caveats; "irrelevant" line if the source doesn't apply. Truncate source text per Unknowns #9. Sequential per Unknowns #3.
+4. `lib/bundle.py` — `write_source(...)` writes `<round_dir>/sources/<idx:02d>-<slug>.md` with a YAML frontmatter block (URL, title, round, branch, timings, model, engine, rerank score) followed by note and extracted-text sections. Exact field set decided at the keyboard.
+5. Extend `pipeline.py` with `fetch_and_note(ranked, round_dir, round_idx, branch_label)`. For each ranked entry: fetch → extract → note → write_source. Returns source-meta dicts for the round digest. Per-source progress to stderr; per-source failure logs and continues, recorded in the round's manifest fragment.
 
 ### Acceptance criteria
 
@@ -143,14 +139,11 @@ This phase builds the loop layer that Phase 2–3 plugs into. Branch proposal us
 
 ### Steps
 
-1. `lib/round_state.py` — accumulator + dedupe registry. Tracks `seen_urls: set[str]`, `accumulated_sources: list[dict]` (each with `round_idx`, `branch_label`, `rerank_score`, path), `digests: list[Path]`, `branches_history: list[list[str]]`, `round_count: int`. Pickled to `state.pkl` after each round for crash debugging; not used for warm-resume.
-2. `lib/branch.py` — `propose_branches(seed_query: str, accumulated_digests: list[str], k: int = 4) -> list[tuple[str, str]]`. Calls `NOTES_MODEL` with a gap-driven prompt: "Original query: {seed}. Here are summaries of what we've found across previous rounds: {digests}. Propose K follow-up queries that target named missing facts or unexplored peripheral domains relevant to the original query. For each, give the query and a one-line rationale. Output exactly one per line as `query | rationale`. No bullets, no numbering, no blank lines." Round 1 has no digests; the seed query is the only branch. Parser is tolerant: strip leading bullets/numbers, split each non-empty line on the first `|`. Belt-and-suspenders — give the model a clear format, then forgive minor deviations.
-3. `lib/digest.py` — `digest_round(round_idx: int, source_metas: list[dict]) -> str`. Calls `NOTES_MODEL` with a prompt: "Synthesise the following per-source notes from round N into an 800–1200 word digest covering: (a) what was learned, (b) which subdomains were touched, (c) what remains unanswered. Cite sources by their round-local index `[r.N]`." Digest is written to `rounds/<n>/digest.md`. Feeds back into branch proposal AND final synthesis.
-4. `lib/orchestrate.py` — top-level `research(seed_query: str, mode: Literal['interactive','batch']) -> Path`. Drives the round loop:
-   - Per round: `propose_branches` → (interactive: branch gate) → for each branch `gather_sources(branch, exclude_urls=state.seen_urls)` → top-K rerank → (interactive: source gate, combined across branches) → `fetch_and_note` → `digest_round` → update `state` → `should_continue?`
-   - `should_continue` is a callable injected by the CLI: in interactive mode it returns the user's gate response; in batch mode it calls `lib/batch.should_stop(state)` (Phase 7).
-   - Final round-end: emit `synthesis.md` via Phase 5 + bundle.
-5. Acceptance harness: a forced 2-round non-interactive driver (`tests/local-research/test_orchestrate.py`) that bypasses `should_continue` and runs exactly 2 rounds. Used to validate Phase 4 in isolation before Phase 6/7 wire up real termination.
+1. `lib/round_state.py` — accumulator + URL-dedupe registry across rounds. Tracks seen URLs, accumulated source metas (with their round and branch labels), digest paths, branch history, and round count. Pickled per round for crash debug; not used for warm-resume.
+2. `lib/branch.py` — `propose_branches(seed_query, accumulated_digests, k=4)`. Calls `NOTES_MODEL` with a gap-driven prompt: read accumulated digests, name K follow-up queries targeting still-missing facts or unexplored peripheral domains. Output one per line as `query | rationale` (instruct format explicitly in the prompt). Parser is tolerant: strip leading bullets/numbers, split each non-empty line on the first `|`. Round 1 has no digests; the seed query is the only branch.
+3. `lib/digest.py` — `digest_round(round_idx, source_metas)`. Calls `NOTES_MODEL` with a prompt asking for an 800–1200 word digest covering what was learned, which subdomains were touched, and what remains unanswered, with `[r.N]` round-local citations. Written to `rounds/<n>/digest.md`. Feeds back into branch proposal and final synthesis.
+4. `lib/orchestrate.py` — top-level `research(seed_query, mode)` drives the round loop. Per round: branch proposal → (interactive: branch gate) → per-branch `gather_sources(exclude_urls=state.seen_urls)` → top-K rerank → (interactive: source gate, combined across branches) → fetch + notes → digest → update state → continue? Continuation is a callable injected by the CLI: interactive returns the user's round-end gate; batch calls `lib/batch.should_stop` (Phase 7). Final round-end emits `synthesis.md` via Phase 5.
+5. Acceptance harness: a forced 2-round driver in `test_orchestrate.py` that bypasses the continuation callable. Validates Phase 4 in isolation before Phase 6/7 wire up real termination.
 
 ### Acceptance criteria
 
@@ -165,34 +158,11 @@ This phase builds the loop layer that Phase 2–3 plugs into. Branch proposal us
 
 ### Steps
 
-1. `lib/synthesize.py` — `synthesize(seed_query: str, digests: list[str], top_source_metas: list[dict], config: SynthConfig = DEFAULT) -> str`. Caller (orchestrator or sweep driver) assembles `digests` and `top_source_metas` per `config.context_shape` and passes them in; the function builds the prompt and calls the model. Top-K source notes are ranked against the seed query — re-rerank all accumulated sources against the seed embedding before selection, since per-round rerank scores were computed against per-round branch queries and aren't directly comparable. Anchor sources `[1]..[K]`; annotate each with title and URL. Digests anchor `[R1]..[RN]`.
+1. `lib/synthesize.py` — `synthesize(seed_query, digests, top_source_metas, config=DEFAULT)`. Caller (orchestrator or sweep driver) assembles `digests` and `top_source_metas` per `config.context_shape` and passes them in; the function builds the prompt and calls the model. Top-K source notes are ranked against the seed query — re-rerank all accumulated sources against the seed embedding before selection, since per-round rerank scores were computed against per-round branch queries and aren't directly comparable. Anchor sources `[1]..[K]`, digests `[R1]..[RN]`.
 
-   `SynthConfig` is a frozen dataclass with five orthogonal axes. Sweep driver iterates the Cartesian product:
+   `SynthConfig` is a frozen dataclass with five orthogonal axes — `context_shape` ∈ `{digests_only, digests_plus_topk, raw_notes}`, `model` (str), `prompt_template` ∈ `{free_form, structured}`, `thinking` (bool), `top_k` (int, default 30). Provides `slug()` for filenames and `to_dict()` for manifest rows. Default ships with `digests_plus_topk`, `SYNTH_MODEL` env var (or 26b-a4b), `structured`, `thinking=False`, `top_k=30`. Phase 8 may overturn any axis.
 
-   ```python
-   class ContextShape(StrEnum): DIGESTS_ONLY, DIGESTS_PLUS_TOPK, RAW_NOTES
-   class PromptTemplate(StrEnum): FREE_FORM, STRUCTURED
-
-   @dataclass(frozen=True)
-   class SynthConfig:
-       context_shape: ContextShape
-       model: str
-       prompt_template: PromptTemplate
-       thinking: bool
-       top_k: int = 30
-       def slug(self) -> str: ...      # e.g. "digests-plus-topk-26ba4-structured-thinkoff"
-       def to_dict(self) -> dict: ...  # for manifest.md
-   ```
-
-   Default ships with `DIGESTS_PLUS_TOPK`, `SYNTH_MODEL` env var (or 26b-a4b), `STRUCTURED`, `thinking=False`, `top_k=30`. Phase 8 may overturn any axis.
-
-   `STRUCTURED` template: TL;DR (3 sentences), key claims with `[N]` source citations and `[Rn]` round refs where helpful, contradictions/uncertainties between sources, gaps that retrieval did not fill. `FREE_FORM` is an unstructured "synthesise these sources" instruction.
-
-   `model_short` mapping from full omlx model ID to slug fragment (`gemma-4-26b-a4b-it-8bit` → `26ba4`, `gemma-4-31b-it-6bit` → `31b`) lives next to the dataclass — a few lines, hand-curated.
-
-   No prompt-template versioning / enum graveyard. When a template's text changes, replace in place; rely on git tags for re-runnable historical bundles. Matches the project's commit style of not carrying compatibility shims.
-
-   Return markdown.
+   `structured` template: TL;DR (3 sentences), key claims with `[N]` source citations and `[Rn]` round refs where helpful, contradictions/uncertainties between sources, gaps that retrieval did not fill. `free_form` is an unstructured "synthesise these sources" instruction.
 2. Extend `lib/bundle.py` to write `query.md`, per-round dirs `rounds/<n>/{sources/, digest.md}`, `synthesis.md`, and `manifest.md` (rounds, models, timings, source counts per round, gates passed, termination reason). API shape decided at the keyboard.
 3. `lib/handoff.py` — `prepare_handoff(session_dir: Path) -> Path`. Concatenates `query.md` + per-round digests + top-K source notes (note sections only) + `synthesis.md` into a single `handoff.md` at the session-dir root. Tree form is canonical; handoff is convenience.
 
@@ -208,13 +178,13 @@ This phase builds the loop layer that Phase 2–3 plugs into. Branch proposal us
 
 ### Steps
 
-1. `lib/cli.py` — entrypoint `python -m lib.cli "user query"`. Drives the orchestrator with `2N+1` gates per session:
-   - Pre-round (rounds ≥ 2 only): print K proposed branches as `[idx] query — rationale`. Prompt: `Approve [enter] / drop indices [comma list] / add query [+text] / abort [q]:`. Round 1 skips this gate.
-   - Per-round source review (after each round's fetch + notes complete): print combined source list across the round's branches as `[idx] domain — title (engine, branch)` + 1-line snippet + note first sentence. Prompt: `Approve [enter] / drop indices [comma list] / add URL [+url] / abort [q]:`.
-   - Round-end gate: print round digest first sentence + accumulated source count. Prompt: `Continue with another round [enter] / stop and synthesise [s] / abort [q]:`.
-   - Final synthesis gate (after round-end gate chooses `s` or hard cap reached): print accumulated source count and round-digest first sentences. Prompt: `Synthesise [enter] / abort [q]:`.
-   - Synthesis: print `synthesising with {SYNTH_MODEL}…` (rough time hint based on the model: ≤8 min for 26b-a4b, 10–20 min for 31b). Print on completion (no streaming — synchronous `requests` POST is technically simpler than SSE parsing and incremental rendering).
-   - End: print session-dir path on stdout. Exit 0.
+1. `lib/cli.py` — entrypoint `python -m lib.cli "user query"`. Drives the orchestrator with `2N+1` gates per session. Each gate accepts: approve (enter), drop indices (comma list), add (`+text` for queries / URLs), abort (`q`); compose actions on one line.
+   - Pre-round (rounds ≥ 2 only): K proposed branches with rationales. Round 1 skips this gate.
+   - Per-round source review (after each round's fetch + notes): combined source list across the round's branches, each line with domain, title, engine, branch label, snippet, note first sentence.
+   - Round-end gate: round digest first sentence + accumulated source count. Choices: continue another round, stop and synthesise, abort.
+   - Final synthesis gate: accumulated source count + each round's digest first sentence. Confirm or abort.
+   - Synthesis stage: print model + rough time hint (≤8 min for 26b-a4b, 10–20 min for 31b). Print on completion (no streaming — synchronous POST is simpler than SSE parsing).
+   - Exit prints session-dir path on stdout.
 2. `--batch` flag: skip all gates. Branches from `propose_branches`; round count and termination governed by Phase 7's `should_stop`.
 3. `--no-synth` flag: stop after the final round-end gate.
 
@@ -285,12 +255,9 @@ Across MT-Bench / Chatbot Arena, G-Eval, Prometheus 2, RAGAS, ALCE, ARES, and th
      - thinking: `{off, on}` (omlx flag if available; skip cells if unsupported)
    - Sweep driver iterates the Cartesian product of `SynthConfig` axes (Phase 5), calling `synthesize(...)` once per cell. File names use `config.slug()`; `manifest.md` rows use `config.to_dict()`. Save outputs as `synthesis-<slug>.md` under `tests/local-research/eval/results/synth-sweep-<UTC-timestamp>/q<n>/`. Record per-call latency and (if reported) `usage` tokens.
    - Sequential per Unknowns #3.
-3. `lib/eval/citation_grounding.py` — mechanical metrics:
-   - `parse_citations(synthesis: str) -> list[tuple[claim, list[int]]]` — split by sentence, extract `[N]` markers per sentence.
-   - `judge_entailment(claim: str, source_text: str) -> Literal['entailed','partial','unsupported']` via an LLM judge with a fixed 3-class prompt. Use a different model family from the writer to mitigate self-preference bias.
-   - Aggregate to `citation_precision = supported / cited` and `citation_recall = supported_claims / total_claims`. ALCE-style.
-4. `lib/eval/fact_recall.py` — `score_fact_hits(synthesis: str, must_hits: list[str]) -> dict`. For each must-hit fact, regex match against the synthesis text; report hit/miss. Optional embedding-similarity fallback for paraphrased hits (uses the rerank embedder, threshold per Unknowns #8).
-5. `tests/local-research/eval/sweep_manifest.py` — write per-query and aggregate `MANIFEST.md`: 24-row table per query with citation precision, citation recall, fact-recall %, output length (chars), wall-clock, total tokens. Aggregate table at top with per-axis marginal means. Pairwise A/B markdown for the two hardest queries (q3, q6) to break rubric ties.
+3. `lib/eval/citation_grounding.py` — ALCE-style mechanical metrics. Parse `[N]` markers per sentence, run an LLM judge with a 3-class entailment prompt (entailed / partial / unsupported) over `(claim, cited-source-bullets)` pairs, aggregate to `citation_precision = supported / cited` and `citation_recall = supported_claims / total_claims`. Use a different model family from the writer to mitigate self-preference bias.
+4. `lib/eval/fact_recall.py` — `score_fact_hits(synthesis, must_hits)`. Regex match each must-hit against the synthesis; optional embedding-similarity fallback for paraphrased hits (rerank embedder, threshold per Unknowns #8).
+5. `tests/local-research/eval/sweep_manifest.py` — per-query and aggregate `MANIFEST.md` with mechanical metrics per cell, per-axis marginal means at the top, and pairwise A/B markdown for the two hardest queries (q3, q6) to break rubric ties.
 6. Document in `tests/local-research/README.md` how to run the sweep against any Phase 7 run-dir. Include a one-paragraph "what to read for in the rubric" note: prioritise faithfulness and citation accuracy, then coverage, then coherence, then contradiction-handling.
 
 ### Acceptance criteria
@@ -305,6 +272,8 @@ Across MT-Bench / Chatbot Arena, G-Eval, Prometheus 2, RAGAS, ALCE, ARES, and th
 ## Notes
 
 **Per-stage model assignments** are env-var overridable via `bootstrap.sh`. Phase 8 sweeps over the synthesis-stage assignments specifically.
+
+**No prompt-template versioning.** When a template's text changes, replace in place; rely on git tags for re-runnable historical bundles. Matches the project's no-compat-shims commit style.
 
 **Hierarchical synthesis is structural, not a knob.** At 50–100 sources, no local model can fit all per-source notes in a single synthesis call. The per-round digest is the structural answer: synthesise within a round (≤15 sources fits easily), then synthesise over digests + a top-K of relevance-ranked sources. Keep digests as kept artifacts on disk for debuggability.
 
