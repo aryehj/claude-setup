@@ -27,11 +27,10 @@ Unknown #1 — Vane HTTP API:
 Unknown #2 — Vane forwards neither `temperature` nor a thinking flag in its
 request body. Knobs map as follows:
 
-  temperature  → mutate `~/.research/vane-data/data/config.json` under
-                 `modelProviders[*].config.options.temperature`, then
-                 `docker restart research-vane` and wait for /api 200.
-                 Vane's openaiLLM falls back to this value when the agent
-                 calls generateText without an explicit `options.temperature`.
+  temperature  → not exposed. Vane runs the underlying model at temperature=1
+                 every call regardless of any config setting, so this script
+                 deliberately does not send, mutate, or restart on temperature.
+                 The matrix is therefore (model × prompt_style × thinking).
   thinking     → not exposed by the API or config, and a per-request
                  `chat_template_kwargs: {enable_thinking: true}` is silently
                  ignored by omlx for Gemma models (cells.py docstring).
@@ -57,7 +56,6 @@ import argparse
 import copy
 import json
 import os
-import subprocess
 import sys
 import time
 import urllib.error
@@ -75,9 +73,7 @@ from lib.queries import load as load_queries  # noqa: E402
 
 _DEFAULT_VANE_URL = "http://localhost:3000"
 _DEFAULT_QUERIES = ["q1", "q3", "q5"]
-_DEFAULT_VANE_DATA_DIR = Path(os.path.expanduser("~/.research/vane-data"))
 _DEFAULT_RESEARCH_DIR = Path(os.path.expanduser("~/.research"))
-_HEALTH_TIMEOUT_S = 60
 
 
 # ── HTTP helpers ───────────────────────────────────────────────────────────────
@@ -256,54 +252,6 @@ def _read_domain_lines(path: Path) -> list[str]:
     return out
 
 
-# ── Temperature mutation + container restart ──────────────────────────────────
-
-
-def mutate_temperature(
-    config_path: Path,
-    provider_id: str,
-    temperature: float,
-) -> bool:
-    """Set modelProviders[id=provider_id].config.options.temperature.
-
-    Returns True if the file was written, False if the existing value already
-    matched (no-op). Raises ValueError if the provider is missing.
-    """
-    data = json.loads(config_path.read_text())
-    providers = data.get("modelProviders") or []
-    target = next((p for p in providers if p.get("id") == provider_id), None)
-    if target is None:
-        raise ValueError(
-            f"provider id {provider_id!r} not in {config_path} modelProviders"
-        )
-    cfg = target.setdefault("config", {})
-    options = cfg.setdefault("options", {})
-    if options.get("temperature") == temperature:
-        return False
-    options["temperature"] = temperature
-    config_path.write_text(json.dumps(data, indent=2) + "\n")
-    return True
-
-
-def restart_vane_container(container: str = "research-vane") -> None:
-    """Run `docker restart <container>`. Raises CalledProcessError on failure."""
-    subprocess.run(["docker", "restart", container], check=True, capture_output=True)
-
-
-def wait_vane_healthy(base_url: str, timeout_s: int = _HEALTH_TIMEOUT_S) -> None:
-    """Poll {base_url}/api/providers until 200 or timeout."""
-    deadline = time.monotonic() + timeout_s
-    last_err: Exception | None = None
-    while time.monotonic() < deadline:
-        try:
-            _http_get_json(f"{base_url.rstrip('/')}/api/providers", timeout_s=5)
-            return
-        except Exception as exc:  # noqa: BLE001
-            last_err = exc
-            time.sleep(1)
-    raise TimeoutError(f"Vane did not become healthy at {base_url} ({last_err})")
-
-
 # ── Thinking-state phases ──────────────────────────────────────────────────────
 
 
@@ -354,23 +302,46 @@ def prompt_thinking_phase(thinking: bool, models: list[str]) -> bool:
 # ── Status classification ──────────────────────────────────────────────────────
 
 
+_SEARXNG_MISS_MARKERS = (
+    "could not find",
+    "couldn't find",
+    "no relevant information",
+    "no relevant results",
+    "no information",
+)
+
+
 def classify_vane_status(result: dict[str, Any], sources: list[dict]) -> str:
     """Worst-wins status for one Vane cell.
 
       error             — HTTP/transport failure
-      error:no-content  — request succeeded but response is unusable for grading:
-                          empty text OR zero sources (Vane's "sorry I could not
-                          find any relevant information" fallback returns text
-                          with no sources, which the cheap-phase grader's
-                          PROCESS skip rule would otherwise score as a real
-                          attempt)
+      error:no-content  — request succeeded but text is empty/whitespace.
+      error:no-results  — Vane ran the search and got nothing usable: text
+                          present but matches the "sorry I could not find any
+                          relevant information" fallback AND sources is empty.
+                          A real retrieval miss; the SearXNG/scrape side of
+                          Vane is the suspect.
+      error:skip-search — Substantive answer text but zero sources. Vane's
+                          agent decided the question was answerable from
+                          parametric memory and did not invoke SearXNG at all.
+                          This is a research-quality regression masquerading
+                          as success — DO NOT bury it under no-content again.
       ok                — none of the above
+
+    The skip-search vs no-results split exists because the prior single
+    "error:no-content" bucket conflated two very different failure modes
+    in earlier runs and let one of them go unexamined.
     """
     if result.get("error"):
         return "error"
-    text = result.get("text") or ""
-    if not text.strip() or not sources:
+    text = (result.get("text") or "").strip()
+    if not text:
         return "error:no-content"
+    if not sources:
+        lowered = text.lower()
+        if any(marker in lowered for marker in _SEARXNG_MISS_MARKERS):
+            return "error:no-results"
+        return "error:skip-search"
     return "ok"
 
 
@@ -423,7 +394,6 @@ def write_vane_cell_output(
         f"query_id: {query_id}",
         f"model: {cell.model!r}",
         f"prompt_style: {cell.prompt_style!r}",
-        f"temperature: {cell.temperature}",
         f"thinking: {str(cell.thinking).lower()}",
         f"label: {cell.label!r}",
         f"latency_s: {result.get('latency_s', 0.0):.2f}",
@@ -536,48 +506,50 @@ def parse_thinking_arg(value: str) -> list[bool]:
 def build_matrix_cells(
     models: list[str],
     prompt_styles: list[str],
-    temperatures: list[float],
     thinking_states: list[bool],
 ) -> list[Cell]:
     """Cross-product matrix flags into Cells.
 
-    Order: model → prompt_style → temperature → thinking (OFF before ON within
-    a thinking pair). The thinking-OFF-first inner ordering keeps split_phases
-    happy without re-sorting and matches what run_thinking.py does.
+    Order: model → prompt_style → thinking (OFF before ON within a thinking
+    pair). Temperature is not an axis — Vane runs models at temperature=1
+    server-side regardless, so the script neither sweeps nor sets it. Cells
+    carry temperature=0.0 as an unused placeholder. The thinking-OFF-first
+    inner ordering keeps split_phases happy without re-sorting and matches
+    what run_thinking.py does.
     """
     sorted_thinking = sorted(set(thinking_states))  # False (0) before True (1)
     cells: list[Cell] = []
     for model in models:
         for style in prompt_styles:
-            for temp in temperatures:
-                for thinking in sorted_thinking:
-                    label = (
-                        f"{model} · {style} · t={temp} · "
-                        f"think={'on' if thinking else 'off'}"
-                    )
-                    cells.append(Cell(
-                        query_id="",
-                        model=model,
-                        prompt_style=style,
-                        temperature=float(temp),
-                        thinking=bool(thinking),
-                        label=label,
-                    ))
+            for thinking in sorted_thinking:
+                label = (
+                    f"{model} · {style} · think={'on' if thinking else 'off'}"
+                )
+                cells.append(Cell(
+                    query_id="",
+                    model=model,
+                    prompt_style=style,
+                    temperature=0.0,
+                    thinking=bool(thinking),
+                    label=label,
+                ))
     return cells
 
 
 def _winners_to_cells(winners: dict) -> list[Cell]:
+    """Build cells from a winners.json. Any temperature field is ignored
+    (Vane pins temperature=1 server-side)."""
     out: list[Cell] = []
     for d in [winners["winner"]] + list(winners.get("ablations") or []):
         label = d.get("label") or (
-            f"{d['model']} · {d['prompt_style']} · t={d['temperature']} · "
+            f"{d['model']} · {d['prompt_style']} · "
             f"think={'on' if d['thinking'] else 'off'}"
         )
         out.append(Cell(
             query_id="",
             model=d["model"],
             prompt_style=d["prompt_style"],
-            temperature=float(d["temperature"]),
+            temperature=0.0,
             thinking=bool(d["thinking"]),
             label=label,
         ))
@@ -603,11 +575,6 @@ def main(argv: list[str] | None = None) -> int:
         help="comma-separated prompt styles: bare,structured,research_system",
     )
     parser.add_argument(
-        "--temperatures",
-        default=None,
-        help="comma-separated floats, e.g. 0.2,1.0",
-    )
-    parser.add_argument(
         "--thinking",
         default=None,
         help="comma-separated thinking states: off,on (or just 'off' or 'on')",
@@ -623,21 +590,11 @@ def main(argv: list[str] | None = None) -> int:
         help=f"Vane base URL (default: {_DEFAULT_VANE_URL})",
     )
     parser.add_argument(
-        "--vane-data-dir",
-        default=str(_DEFAULT_VANE_DATA_DIR),
-        help="Vane persistent state dir (host path)",
-    )
-    parser.add_argument(
         "--research-dir",
         default=str(_DEFAULT_RESEARCH_DIR),
         help="research dir for denylist composition",
     )
     parser.add_argument("--out", default="", help="output dir (default: results/vane-<UTC-ts>)")
-    parser.add_argument(
-        "--no-restart",
-        action="store_true",
-        help="skip docker restart between cells (assumes temperature=fixed)",
-    )
     parser.add_argument(
         "--assume-configured",
         action="store_true",
@@ -648,34 +605,31 @@ def main(argv: list[str] | None = None) -> int:
     if not args.base_url.startswith(("http://", "https://")):
         sys.exit(f"--base-url must be an http(s) URL: {args.base_url!r}")
 
-    matrix_flags = [args.models, args.prompt_styles, args.temperatures, args.thinking]
+    matrix_flags = [args.models, args.prompt_styles, args.thinking]
     matrix_mode = any(matrix_flags)
     winners_path: Path | None = None
 
     if matrix_mode and args.winners:
         sys.exit("Pass --winners OR matrix flags (--models/--prompt-styles/"
-                 "--temperatures/--thinking), not both.")
+                 "--thinking), not both.")
     if not matrix_mode and not args.winners:
         sys.exit("One of --winners or the matrix flags "
-                 "(--models, --prompt-styles, --temperatures, --thinking) "
-                 "is required.")
+                 "(--models, --prompt-styles, --thinking) is required.")
 
     if matrix_mode:
         missing = [n for n, v in zip(
-            ("--models", "--prompt-styles", "--temperatures", "--thinking"),
+            ("--models", "--prompt-styles", "--thinking"),
             matrix_flags,
         ) if not v]
         if missing:
             sys.exit(f"Matrix mode requires all of: {', '.join(missing)} also set.")
         try:
-            temps = [float(t.strip()) for t in args.temperatures.split(",") if t.strip()]
             thinking_list = parse_thinking_arg(args.thinking)
         except ValueError as exc:
             sys.exit(str(exc))
         cells = build_matrix_cells(
             models=[m.strip() for m in args.models.split(",") if m.strip()],
             prompt_styles=[s.strip() for s in args.prompt_styles.split(",") if s.strip()],
-            temperatures=temps,
             thinking_states=thinking_list,
         )
         print(f"Matrix mode: {len(cells)} cells "
@@ -732,14 +686,9 @@ def main(argv: list[str] | None = None) -> int:
     denylist = load_denylist_domains(Path(args.research_dir))
     print(f"Loaded {len(denylist)} denylist domains for metrics.")
 
-    # Vane data config (for temperature mutation)
-    config_path = Path(args.vane_data_dir) / "data" / "config.json"
-    config_writable = config_path.exists() and not args.no_restart
-
     # Sweep
     cell_results: list[dict] = []
     t_start = time.monotonic()
-    last_temperature_for_provider: dict[str, float | None] = {}
 
     total = len(cells) * len(active_queries)
     done = 0
@@ -759,20 +708,6 @@ def main(argv: list[str] | None = None) -> int:
                 continue
 
         for cell, provider_id in phase_cells:
-            # Apply temperature for this cell's provider, restart if changed
-            if config_writable:
-                try:
-                    changed = mutate_temperature(config_path, provider_id, cell.temperature)
-                    if changed and last_temperature_for_provider.get(provider_id) is not None:
-                        print(f"  ↻ restart research-vane (temp → {cell.temperature})")
-                        restart_vane_container()
-                        wait_vane_healthy(args.base_url)
-                    elif changed:
-                        print(f"  · temp set to {cell.temperature} (no restart needed; first cell)")
-                    last_temperature_for_provider[provider_id] = cell.temperature
-                except Exception as exc:  # noqa: BLE001
-                    print(f"  ! temperature mutation failed: {exc}", file=sys.stderr)
-
             for query in active_queries:
                 done += 1
                 cell_with_q = copy.copy(cell)
@@ -783,7 +718,6 @@ def main(argv: list[str] | None = None) -> int:
                     cell={
                         "model": cell.model,
                         "prompt_style": cell.prompt_style,
-                        "temperature": cell.temperature,
                         "thinking": cell.thinking,
                     },
                     query=query.query,

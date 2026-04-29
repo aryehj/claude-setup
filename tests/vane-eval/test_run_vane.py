@@ -332,41 +332,6 @@ def test_compute_metrics_empty_sources():
     assert m == {"citation_count": 0, "edu_gov_wiki_share": 0.0, "denylist_hits": 0}
 
 
-# ── temperature config mutation ────────────────────────────────────────────────
-
-@skip_if_no_rv
-def test_mutate_temperature_writes_options(tmp_path):
-    cfg = tmp_path / "config.json"
-    cfg.write_text(
-        '{"version":1,"modelProviders":[{"id":"uuid-omlx","type":"openai_compatible",'
-        '"name":"omlx","config":{"apiKey":"x","baseURL":"http://h:8000/v1","model":""}}]}'
-    )
-    changed = _rv.mutate_temperature(cfg, provider_id="uuid-omlx", temperature=0.7)
-    assert changed is True
-    import json
-    data = json.loads(cfg.read_text())
-    assert data["modelProviders"][0]["config"]["options"]["temperature"] == 0.7
-
-
-@skip_if_no_rv
-def test_mutate_temperature_idempotent(tmp_path):
-    """Re-applying the same value returns False (no write needed)."""
-    cfg = tmp_path / "config.json"
-    cfg.write_text(
-        '{"modelProviders":[{"id":"u","config":{"options":{"temperature":0.3}}}]}'
-    )
-    changed = _rv.mutate_temperature(cfg, provider_id="u", temperature=0.3)
-    assert changed is False
-
-
-@skip_if_no_rv
-def test_mutate_temperature_unknown_provider_raises(tmp_path):
-    cfg = tmp_path / "config.json"
-    cfg.write_text('{"modelProviders":[{"id":"u","config":{}}]}')
-    with pytest.raises(ValueError, match="provider"):
-        _rv.mutate_temperature(cfg, provider_id="missing", temperature=0.3)
-
-
 # ── split_phases / prompt_thinking_phase ───────────────────────────────────────
 
 
@@ -498,24 +463,39 @@ def test_classify_vane_status_no_content_when_text_empty():
 
 
 @skip_if_no_rv
-def test_classify_vane_status_no_content_when_sources_empty():
+def test_classify_vane_status_no_results_when_searxng_miss_text_and_no_sources():
     """The 'sorry I could not find any relevant information' fallback comes
-    back with text but zero sources. That's a Vane retrieval miss, not a
-    real attempt — must not be fed to the rubric."""
+    back with text but zero sources. That's a SearXNG/scrape retrieval
+    miss; bucket separately so it doesn't get conflated with a skipSearch
+    fallback (which carries substantive answer text)."""
     result = {
         "text": "Hmm, sorry I could not find any relevant information on this topic.",
         "error": None,
     }
-    assert _rv.classify_vane_status(result, []) == "error:no-content"
+    assert _rv.classify_vane_status(result, []) == "error:no-results"
 
 
 @skip_if_no_rv
-def test_write_vane_cell_output_writes_no_content_status(tmp_path):
-    """End-to-end: empty sources should land in the cell file's frontmatter
-    as status:error:no-content so the grader's PROCESS skip rule applies."""
+def test_classify_vane_status_skip_search_when_substantive_text_and_no_sources():
+    """Vane's agent can answer from parametric memory and skip SearXNG
+    entirely: substantive text comes back with zero sources. This is a
+    research-quality regression — must NOT be lumped under no-results
+    again, or future runs will silently bury the signal."""
+    result = {
+        "text": "The Eagles defeated the Chiefs 40-22 in Super Bowl LIX, played at "
+                "Caesars Superdome in New Orleans on February 9, 2025.",
+        "error": None,
+    }
+    assert _rv.classify_vane_status(result, []) == "error:skip-search"
+
+
+@skip_if_no_rv
+def test_write_vane_cell_output_writes_no_results_status(tmp_path):
+    """End-to-end: SearXNG-miss fallback text + zero sources lands in the
+    cell file's frontmatter as status:error:no-results."""
     cell = _cell("m1", False)
     cell.query_id = "q1"
-    cell.label = "m1 · structured · t=0.3 · think=off"
+    cell.label = "m1 · structured · think=off"
     result = {
         "text": "Hmm, sorry I could not find any relevant information…",
         "raw": {},
@@ -533,7 +513,35 @@ def test_write_vane_cell_output_writes_no_content_status(tmp_path):
         metrics={"citation_count": 0, "edu_gov_wiki_share": 0.0, "denylist_hits": 0},
     )
     text = out.read_text()
-    assert "status: error:no-content" in text
+    assert "status: error:no-results" in text
+
+
+@skip_if_no_rv
+def test_write_vane_cell_output_writes_skip_search_status(tmp_path):
+    """End-to-end: substantive answer text + zero sources lands as
+    status:error:skip-search so the regression is visible in MANIFEST."""
+    cell = _cell("m1", False)
+    cell.query_id = "q1"
+    cell.label = "m1 · structured · think=off"
+    result = {
+        "text": "Tritium has a half-life of about 12.32 years and decays by beta "
+                "emission.",
+        "raw": {},
+        "latency_s": 4.2,
+        "error": None,
+    }
+    out = _rv.write_vane_cell_output(
+        run_dir=tmp_path,
+        cell=cell,
+        query_id="q1",
+        query_text="What is the half-life of tritium?",
+        reference_text="≈12.32 years",
+        result=result,
+        sources=[],
+        metrics={"citation_count": 0, "edu_gov_wiki_share": 0.0, "denylist_hits": 0},
+    )
+    text = out.read_text()
+    assert "status: error:skip-search" in text
 
 
 # ── compute_source_run (REVIEW issue #3) ───────────────────────────────────────
@@ -571,35 +579,33 @@ def test_build_matrix_cells_cross_product_count():
     cells = _rv.build_matrix_cells(
         models=["m1", "m2"],
         prompt_styles=["structured", "research_system"],
-        temperatures=[0.2, 1.0],
         thinking_states=[False, True],
     )
-    assert len(cells) == 2 * 2 * 2 * 2  # 16
+    assert len(cells) == 2 * 2 * 2  # 8
 
 
 @skip_if_no_rv
 def test_build_matrix_cells_label_format_matches_existing_cells():
-    """Labels must match the format _winners_to_cells emits so JUDGE.md's
-    per-(query, model) partition + select_winners parsing keep working."""
+    """Labels must match the format _winners_to_cells emits. Temperature is
+    not in the label — Vane pins it server-side."""
     cells = _rv.build_matrix_cells(
         models=["m1"],
         prompt_styles=["structured"],
-        temperatures=[0.3],
         thinking_states=[False],
     )
     assert len(cells) == 1
     c = cells[0]
     assert c.model == "m1"
     assert c.prompt_style == "structured"
-    assert c.temperature == 0.3
     assert c.thinking is False
-    assert c.label == "m1 · structured · t=0.3 · think=off"
+    assert c.label == "m1 · structured · think=off"
+    assert "t=" not in c.label
 
 
 @skip_if_no_rv
 def test_build_matrix_cells_thinking_on_label():
     cells = _rv.build_matrix_cells(
-        models=["m1"], prompt_styles=["bare"], temperatures=[0.7],
+        models=["m1"], prompt_styles=["bare"],
         thinking_states=[True],
     )
     assert cells[0].label.endswith("think=on")
@@ -610,7 +616,7 @@ def test_build_matrix_cells_orders_thinking_off_then_on_per_model():
     """Within a model, OFF cells come before ON cells so split_phases
     preserves OFF→ON order without re-sorting."""
     cells = _rv.build_matrix_cells(
-        models=["m1"], prompt_styles=["structured"], temperatures=[0.2],
+        models=["m1"], prompt_styles=["structured"],
         thinking_states=[True, False],
     )
     assert [c.thinking for c in cells] == [False, True]

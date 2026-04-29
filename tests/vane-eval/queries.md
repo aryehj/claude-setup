@@ -5,28 +5,30 @@ stable identifiers used as filename fragments in eval output.
 
 ---
 
-## Q1: tritium-half-life
+## Q1: us-presidential-election-2024
 
-**Query:** What is the half-life of tritium, and what are its primary civilian
-applications?
+**Query:** What were the results of the 2024 United States presidential election —
+who won, what was the Electoral College margin, and what happened with the popular
+vote?
 
-**Reference:** Tritium (hydrogen-3) has a half-life of approximately 12.32 years,
-decaying by beta emission to helium-3. Its primary civilian applications include
-self-luminous EXIT signs and watch dials (where the beta particles excite a
-phosphor coating), neutron generators used in oil-well logging, and as a tracer in
-hydrological studies to date groundwater. It is also a key fuel component in
-deuterium–tritium fusion reactions being developed for commercial power generation.
-Because of its relatively short half-life and low-energy beta emission, it is
-considered one of the least hazardous radioactive isotopes in external exposure
-scenarios, though ingestion or inhalation remains a concern.
+**Reference:** The 2024 U.S. presidential election was held on November 5, 2024.
+Donald J. Trump (Republican) defeated Kamala Harris (Democratic), winning the
+Electoral College 312 to 226. Trump also won the national popular vote — the first
+Republican presidential candidate to do so since George W. Bush in 2004 — by roughly
+1.5 percentage points. JD Vance was elected Vice President as Trump's running mate.
+Harris had become the Democratic nominee in late July 2024 after President Joe Biden
+withdrew from the race following his June 27 debate performance. Trump and Vance
+were inaugurated on January 20, 2025, beginning Trump's second, non-consecutive term.
 
 **Key facts:**
-- Half-life ≈ 12.32 years
-- Decays by beta emission to helium-3
-- Used in self-luminous devices (EXIT signs, watch dials)
-- Tracer in hydrology / groundwater dating
-- Fuel component in D–T fusion reactors
-- Low external hazard due to weak beta, but internal exposure still a concern
+- Election date: 5 November 2024
+- Donald Trump (R) defeated Kamala Harris (D)
+- Electoral College result: 312 (Trump) to 226 (Harris)
+- Trump also won the national popular vote (≈1.5 pp margin)
+- First Republican popular-vote win since 2004
+- JD Vance elected Vice President
+- Harris replaced Biden as nominee in late July 2024
+- Trump's second, non-consecutive term — inaugurated 20 January 2025
 
 ---
 
@@ -59,36 +61,75 @@ with the cache.
 
 ---
 
-## Q3: iron-curtain-speech-context
+## Q3: medial-knee-pain-cycling
 
-**Query:** Who gave the "Iron Curtain" speech, when and where was it delivered, and
-what political circumstances made it historically significant?
+**Query:** A cyclist develops stubborn medial knee pain that comes on during long
+rides and lingers for days afterward. What are the most likely diagnoses, how do
+bike-fit and biomechanical factors contribute to each, and what clinical features
+would help distinguish between them?
 
-**Reference:** Winston Churchill delivered the "Sinews of Peace" speech — popularly
-known as the "Iron Curtain" speech — on 5 March 1946 at Westminster College in
-Fulton, Missouri, United States, with President Harry S. Truman seated on the stage.
-Churchill, then out of office as British Prime Minister (he had been defeated in the
-1945 general election), used the address to describe the division of Europe:
-"From Stettin in the Baltic to Trieste in the Adriatic, an iron curtain has descended
-across the Continent." The speech was significant for several reasons: it was one of
-the earliest prominent public articulations of the emerging Cold War division between
-Soviet-dominated Eastern Europe and the Western democracies; it called for an
-Anglo-American alliance to counter Soviet expansionism at a time when the wartime
-alliance with the USSR was fraying; and it provoked sharp criticism from both
-Stalin — who compared Churchill to Hitler — and from American progressives who saw it
-as inflammatory. Historians generally regard it as a landmark in the rhetorical
-opening of the Cold War.
+**Reference:** Medial knee pain in cyclists is multifactorial; the same symptom
+location can arise from several distinct structures, and bike fit interacts
+differently with each.
+
+**Pes anserine bursitis / tendinopathy** is one of the most common cycling-specific
+causes. The pes anserine is the conjoined insertion of the sartorius, gracilis, and
+semitendinosus tendons on the medial tibia just below the joint line. Repetitive
+knee flexion/extension under load inflames the bursa or the tendons themselves. The
+primary bike-fit driver is saddle height that is too low: excessive knee flexion at
+the bottom of the pedal stroke increases compressive and shear load on the insertion
+with every revolution. Saddle fore-aft position also matters — too far forward
+increases peak knee flexion angle similarly. Pain is typically at the proximal medial
+tibia, reproduced by palpation 2–3 cm below the joint line, and worsens toward the
+end of long efforts when fatigue degrades pedaling mechanics.
+
+**Medial collateral ligament (MCL) stress** occurs when valgus force is repeatedly
+applied to the knee. In cycling, this arises from cleat misalignment (insufficient
+float or fixed cleats rotated too far inward, forcing the heel outward and knee
+inward), excessive Q-factor mismatch (pedal stance width narrower than the rider's
+natural hip width), or dynamic knee valgus driven by hip abductor weakness. The pain
+follows the ligament line from the medial femoral epicondyle toward the tibial
+attachment rather than below the joint, and is reproduced by valgus stress testing
+or by replicating the cleat-forced alignment on the bike.
+
+**Medial meniscus irritation** is less common in pure cycling than in impact sports
+but can occur in riders with pre-existing degenerative changes or those who also run.
+Joint-line tenderness, a palpable click, and pain that is provoked by combined
+flexion and rotation (McMurray's test) distinguish it from soft-tissue causes. Bike
+fit rarely causes de novo meniscus tears, but a saddle that is too low can aggravate
+an already irritated meniscus by loading the joint in deep flexion.
+
+**Saphenous nerve entrapment** is an under-recognised cause of medial knee and
+distal thigh pain in cyclists. The infrapatellar branch of the saphenous nerve can be
+compressed at the adductor canal or by sustained hip flexion in the aero position.
+Pain has a dysaesthetic, burning, or tingling quality rather than the aching soreness
+of musculotendinous causes, and may radiate down the medial calf. It does not
+correlate with palpation of joint line or tendon insertion.
+
+**Training load error** underlies or amplifies all of the above: a sudden large
+increase in weekly distance or elevation is the most common precipitant, because
+tissue adaptation lags behind cardiovascular fitness gains.
+
+**Key distinguishing features by diagnosis:**
+- Pes anserine: tenderness 2–3 cm below joint line on medial tibia; worsens late in
+  long rides; linked to low saddle or forward seat
+- MCL stress: tenderness along ligament from epicondyle to tibia; valgus-stress test
+  positive or reproduces pain; linked to cleat rotation, narrow Q-factor, hip
+  abductor weakness
+- Medial meniscus: joint-line tenderness at the joint itself; McMurray's or Thessaly
+  test positive; clicking or giving-way reported
+- Saphenous nerve: burning/tingling quality; no focal musculoskeletal tenderness;
+  may worsen in aggressive forward position
 
 **Key facts:**
-- Speaker: Winston Churchill (former UK Prime Minister, out of office)
-- Date: 5 March 1946
-- Venue: Westminster College, Fulton, Missouri, USA
-- Truman was present on stage
-- Phrase used: "an iron curtain has descended across the Continent"
-- Described division from Stettin (Baltic) to Trieste (Adriatic)
-- Called for Anglo-American alliance against Soviet expansion
-- Stalin compared Churchill to Hitler in response
-- Regarded as an early landmark articulation of Cold War division
+- Saddle too low → excessive knee flexion → pes anserine overload (most common fit cause)
+- Cleat toe-in or insufficient float → valgus knee vector → MCL stress
+- Q-factor narrower than hip width amplifies valgus load each pedal stroke
+- Medial meniscus irritation: joint-line tenderness, McMurray's/Thessaly positive
+- Saphenous nerve: burning/tingling quality, no musculoskeletal tenderness, worse in aero
+- Training load spike is the most common precipitant regardless of structural diagnosis
+- Saddle fore-aft too far forward increases knee flexion angle same as saddle too low
+- Hip abductor weakness is a biomechanical amplifier for MCL and pes anserine pathology
 
 ---
 
