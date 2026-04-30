@@ -82,6 +82,14 @@ if [ "${1:-}" = "--smoke" ]; then
     CMD=("python" "-m" "lib.smoke")
     shift
     TTY_FLAGS="-it"
+elif [ "${1:-}" = "--capture" ]; then
+    shift
+    CMD=("python" "eval/source-bias/capture.py" "$@")
+    TTY_FLAGS="-it"
+elif [ "${1:-}" = "--compare" ]; then
+    shift
+    CMD=("python" "eval/source-bias/compare.py" "$@")
+    TTY_FLAGS=""
 else
     CMD=("python" "-m" "lib.cli" "$@")
     TTY_FLAGS="-it"
@@ -92,6 +100,7 @@ exec docker run --rm $TTY_FLAGS \
     --network "$RESEARCH_NET" \
     --add-host "host.docker.internal:host-gateway" \
     -v "${SESSION_HOST_DIR}:/sessions" \
+    -v "${SCRIPT_DIR}/eval:/app/eval" \
     -e "HTTP_PROXY=http://${BRIDGE_IP}:${SQUID_PORT}" \
     -e "HTTPS_PROXY=http://${BRIDGE_IP}:${SQUID_PORT}" \
     -e "NO_PROXY=${CONTAINER_SEARXNG},host.docker.internal,localhost,127.0.0.1" \

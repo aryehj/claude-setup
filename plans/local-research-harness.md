@@ -6,7 +6,7 @@
 - [x] Phase 2: per-round search + rerank pipeline (sonnet-medium ok)
 - [x] Phase 3: fetch + extract + per-source notes (sonnet-medium ok)
 - [x] Phase 4: round orchestration (branch proposal, dedupe, per-round digest, termination)
-- [ ] Phase 5: source-quality biasing (input-side levers)
+- [x] Phase 5: source-quality biasing (input-side levers)
 - [ ] Phase 6: hierarchical synthesis + bundle output
 - [ ] Phase 7: interactive CLI with multi-round gates (sonnet-medium ok)
 - [ ] Phase 8: --batch mode + q1–q6 regression eval (Opus recommended)
