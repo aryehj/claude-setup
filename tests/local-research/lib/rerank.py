@@ -5,6 +5,7 @@ import math
 
 from lib.config import EMBED_MODEL
 from lib import omlx
+from lib.round_state import canonicalize_url
 
 
 def _cosine(a: list[float], b: list[float]) -> float:
@@ -34,14 +35,17 @@ def rerank(
     Adds rerank_score to each returned dict; original engine and score are preserved.
     """
     exclude_urls = exclude_urls or set()
+    # Canonicalize the exclude set once so srsltid/utm variants are also excluded.
+    exclude_canonical = {canonicalize_url(u) for u in exclude_urls}
 
-    # Dedupe by URL, preserving first occurrence.
+    # Dedupe by canonical URL, preserving first occurrence.
     seen: set[str] = set()
     unique: list[dict] = []
     for r in results:
         url = r.get("url", "")
-        if url not in seen and url not in exclude_urls:
-            seen.add(url)
+        canon = canonicalize_url(url) if url else ""
+        if canon not in seen and canon not in exclude_canonical:
+            seen.add(canon)
             unique.append(r)
 
     if not unique:
