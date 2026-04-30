@@ -253,5 +253,332 @@ class TestPipeline(unittest.TestCase):
         self.assertEqual(seen_urls.count(shared_url), 1, "shared URL must appear only once before reranking")
 
 
+# ---------------------------------------------------------------------------
+# Phase 3 — lib/fetch.py
+# ---------------------------------------------------------------------------
+
+import lib.fetch
+
+
+class TestFetch(unittest.TestCase):
+    def test_success_returns_body_and_meta(self):
+        mock_resp = MagicMock()
+        mock_resp.text = "<html><body>hello</body></html>"
+        mock_resp.status_code = 200
+        mock_resp.url = "https://example.com"
+        mock_resp.elapsed.total_seconds.return_value = 0.1
+        mock_resp.content = b"<html><body>hello</body></html>"
+        mock_resp.raise_for_status.return_value = None
+
+        with patch("lib.fetch.requests.get", return_value=mock_resp):
+            body, meta = lib.fetch.fetch("https://example.com")
+
+        self.assertIsInstance(body, str)
+        self.assertIn("hello", body)
+        self.assertEqual(meta["status"], 200)
+        self.assertIn("final_url", meta)
+        self.assertIn("latency_s", meta)
+        self.assertIn("bytes", meta)
+
+    def test_raises_on_4xx(self):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 404
+        mock_resp.raise_for_status.side_effect = Exception("404 Not Found")
+
+        with patch("lib.fetch.requests.get", return_value=mock_resp):
+            with self.assertRaises(lib.fetch.FetchError):
+                lib.fetch.fetch("https://example.com/missing")
+
+    def test_raises_on_timeout(self):
+        import requests as _req
+        with patch("lib.fetch.requests.get", side_effect=_req.exceptions.Timeout("timed out")):
+            with self.assertRaises(lib.fetch.FetchError):
+                lib.fetch.fetch("https://slow.example.com")
+
+    def test_meta_bytes_matches_content_length(self):
+        content = b"hello world"
+        mock_resp = MagicMock()
+        mock_resp.text = "hello world"
+        mock_resp.status_code = 200
+        mock_resp.url = "https://example.com"
+        mock_resp.elapsed.total_seconds.return_value = 0.05
+        mock_resp.content = content
+        mock_resp.raise_for_status.return_value = None
+
+        with patch("lib.fetch.requests.get", return_value=mock_resp):
+            _, meta = lib.fetch.fetch("https://example.com")
+
+        self.assertEqual(meta["bytes"], len(content))
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 — lib/extract.py
+# ---------------------------------------------------------------------------
+
+import lib.extract
+
+
+class TestExtract(unittest.TestCase):
+    def test_returns_string(self):
+        html = "<html><body><p>This is a test article with enough content to extract properly.</p></body></html>"
+        result = lib.extract.extract(html, "https://example.com")
+        self.assertIsInstance(result, str)
+        self.assertGreater(len(result), 0)
+
+    def test_fallback_fires_on_none_from_trafilatura(self):
+        html = "<html><head><title>Page Title</title></head><body><script>var x = 1;</script></body></html>"
+        with patch("lib.extract.trafilatura.extract", return_value=None):
+            result = lib.extract.extract(html, "https://js-heavy.example.com")
+        self.assertIsInstance(result, str)
+        self.assertGreater(len(result), 0)
+
+    def test_fallback_fires_when_short_result(self):
+        html = "<html><head><title>Short</title></head><body><p>tiny</p></body></html>"
+        with patch("lib.extract.trafilatura.extract", return_value="x" * 10):
+            result = lib.extract.extract(html, "https://short.example.com")
+        self.assertIsInstance(result, str)
+        self.assertGreater(len(result), 0)
+
+    def test_tags_stripped_in_fallback(self):
+        html = "<html><head><title>Test</title></head><body><p>Clean text here.</p><script>bad()</script></body></html>"
+        with patch("lib.extract.trafilatura.extract", return_value=None):
+            result = lib.extract.extract(html, "https://example.com")
+        self.assertNotIn("<p>", result)
+        self.assertNotIn("<script>", result)
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 — lib/notes.py
+# ---------------------------------------------------------------------------
+
+import lib.notes
+
+
+class TestNotes(unittest.TestCase):
+    def test_returns_string(self):
+        with patch("lib.omlx.chat", return_value="- Bullet one\n- Bullet two"):
+            result = lib.notes.note_for_source(
+                query="test query",
+                source_text="Some source text about the topic.",
+                meta={"url": "https://example.com", "title": "Example"},
+            )
+        self.assertIsInstance(result, str)
+        self.assertGreater(len(result), 0)
+
+    def test_query_in_prompt(self):
+        captured = {}
+
+        def capture_chat(model, messages, **kw):
+            captured["messages"] = messages
+            return "- Note"
+
+        with patch("lib.omlx.chat", side_effect=capture_chat):
+            lib.notes.note_for_source(
+                query="medial knee pain cyclists",
+                source_text="Article text",
+                meta={"url": "https://x.com", "title": "X"},
+            )
+
+        full_prompt = " ".join(m["content"] for m in captured["messages"])
+        self.assertIn("medial knee pain cyclists", full_prompt)
+
+    def test_source_text_truncated_to_budget(self):
+        long_text = "word " * 10000
+        captured = {}
+
+        def capture_chat(model, messages, **kw):
+            captured["messages"] = messages
+            return "- Note"
+
+        with patch("lib.omlx.chat", side_effect=capture_chat):
+            lib.notes.note_for_source(
+                query="q",
+                source_text=long_text,
+                meta={"url": "https://x.com", "title": "X"},
+            )
+
+        full_prompt = " ".join(m["content"] for m in captured["messages"])
+        self.assertLess(len(full_prompt), len(long_text), "prompt must be shorter than untruncated text")
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 — lib/bundle.py
+# ---------------------------------------------------------------------------
+
+import tempfile
+import pathlib
+import lib.bundle
+
+
+class TestBundle(unittest.TestCase):
+    def test_write_source_creates_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            round_dir = pathlib.Path(tmpdir) / "rounds" / "01"
+            lib.bundle.write_source(
+                round_dir=round_dir,
+                idx=1,
+                url="https://example.com/article",
+                title="Example Article",
+                round_idx=1,
+                branch_label="main",
+                engine="google",
+                rerank_score=0.85,
+                note="- Key finding here",
+                extracted_text="Full article text goes here.",
+                timings={"fetch_s": 0.5, "extract_s": 0.1, "note_s": 2.3},
+                model="gemma-4-26b-a4b-it-8bit",
+            )
+            sources_dir = round_dir / "sources"
+            files = list(sources_dir.glob("*.md"))
+            self.assertEqual(len(files), 1)
+
+    def test_write_source_has_yaml_frontmatter(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            round_dir = pathlib.Path(tmpdir) / "rounds" / "01"
+            lib.bundle.write_source(
+                round_dir=round_dir,
+                idx=1,
+                url="https://example.com/article",
+                title="Example Article",
+                round_idx=1,
+                branch_label="main",
+                engine="google",
+                rerank_score=0.85,
+                note="- Key finding here",
+                extracted_text="Full article text.",
+                timings={"fetch_s": 0.5},
+                model="gemma-4-26b-a4b-it-8bit",
+            )
+            sources_dir = round_dir / "sources"
+            content = list(sources_dir.glob("*.md"))[0].read_text()
+            self.assertTrue(content.startswith("---"), "file must start with YAML frontmatter")
+            self.assertIn("url:", content)
+
+    def test_write_source_has_note_and_extracted_sections(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            round_dir = pathlib.Path(tmpdir) / "rounds" / "01"
+            lib.bundle.write_source(
+                round_dir=round_dir,
+                idx=1,
+                url="https://example.com/article",
+                title="Example Article",
+                round_idx=1,
+                branch_label="main",
+                engine="google",
+                rerank_score=0.85,
+                note="- Key finding here",
+                extracted_text="Clean prose text here.",
+                timings={"fetch_s": 0.5},
+                model="gemma-4-26b-a4b-it-8bit",
+            )
+            sources_dir = round_dir / "sources"
+            content = list(sources_dir.glob("*.md"))[0].read_text()
+            self.assertIn("Key finding here", content)
+            self.assertIn("Clean prose text here.", content)
+
+    def test_write_source_slug_from_url(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            round_dir = pathlib.Path(tmpdir) / "rounds" / "01"
+            lib.bundle.write_source(
+                round_dir=round_dir,
+                idx=3,
+                url="https://pubmed.ncbi.nlm.nih.gov/12345",
+                title="Pubmed Article",
+                round_idx=1,
+                branch_label="main",
+                engine="google",
+                rerank_score=0.7,
+                note="- note",
+                extracted_text="text",
+                timings={},
+                model="m",
+            )
+            sources_dir = round_dir / "sources"
+            files = list(sources_dir.glob("*.md"))
+            self.assertEqual(len(files), 1)
+            # idx=3 → filename starts with "03-"
+            self.assertTrue(files[0].name.startswith("03-"))
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 — pipeline.fetch_and_note
+# ---------------------------------------------------------------------------
+
+
+class TestFetchAndNote(unittest.TestCase):
+    def _make_ranked(self, n=3):
+        return [
+            {
+                "url": f"https://source{i}.example.com/",
+                "title": f"Source {i}",
+                "content": f"Content {i}",
+                "engine": "google",
+                "score": 1.0,
+                "rerank_score": 0.8,
+            }
+            for i in range(n)
+        ]
+
+    def test_returns_source_metas_for_success(self):
+        ranked = self._make_ranked(3)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            round_dir = pathlib.Path(tmpdir) / "rounds" / "01"
+            with patch("lib.fetch.fetch", return_value=("<html>hello</html>", {"status": 200, "final_url": "https://x.com", "latency_s": 0.1, "bytes": 5})), \
+                 patch("lib.extract.extract", return_value="Extracted text here"), \
+                 patch("lib.notes.note_for_source", return_value="- Key fact"), \
+                 patch("lib.bundle.write_source", return_value=pathlib.Path(tmpdir) / "file.md"):
+                metas = lib.pipeline.fetch_and_note(ranked, round_dir, round_idx=1, branch_label="main")
+
+        self.assertEqual(len(metas), 3)
+
+    def test_failure_does_not_abort_batch(self):
+        ranked = self._make_ranked(3)
+
+        def fetch_side_effect(url, **kw):
+            if "source1" in url:
+                raise lib.fetch.FetchError("404 Not Found")
+            return ("<html>ok</html>", {"status": 200, "final_url": url, "latency_s": 0.1, "bytes": 2})
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            round_dir = pathlib.Path(tmpdir) / "rounds" / "01"
+            with patch("lib.fetch.fetch", side_effect=fetch_side_effect), \
+                 patch("lib.extract.extract", return_value="text"), \
+                 patch("lib.notes.note_for_source", return_value="- note"), \
+                 patch("lib.bundle.write_source", return_value=pathlib.Path(tmpdir) / "file.md"):
+                metas = lib.pipeline.fetch_and_note(ranked, round_dir, round_idx=1, branch_label="main")
+
+        # 3 sources tried, 1 failed — should still return 3 entries (with error flag)
+        self.assertEqual(len(metas), 3)
+
+    def test_failure_recorded_in_meta(self):
+        ranked = self._make_ranked(2)
+
+        def fetch_side_effect(url, **kw):
+            raise lib.fetch.FetchError("timeout")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            round_dir = pathlib.Path(tmpdir) / "rounds" / "01"
+            with patch("lib.fetch.fetch", side_effect=fetch_side_effect):
+                metas = lib.pipeline.fetch_and_note(ranked, round_dir, round_idx=1, branch_label="main")
+
+        for m in metas:
+            self.assertIn("error", m)
+            self.assertIsNotNone(m["error"])
+
+    def test_success_meta_has_expected_keys(self):
+        ranked = self._make_ranked(1)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            round_dir = pathlib.Path(tmpdir) / "rounds" / "01"
+            with patch("lib.fetch.fetch", return_value=("<html>x</html>", {"status": 200, "final_url": "https://x.com", "latency_s": 0.1, "bytes": 3})), \
+                 patch("lib.extract.extract", return_value="text"), \
+                 patch("lib.notes.note_for_source", return_value="- note"), \
+                 patch("lib.bundle.write_source", return_value=pathlib.Path(tmpdir) / "file.md"):
+                metas = lib.pipeline.fetch_and_note(ranked, round_dir, round_idx=1, branch_label="main")
+
+        m = metas[0]
+        for key in ("url", "title", "round_idx", "branch_label", "error"):
+            self.assertIn(key, m)
+
+
 if __name__ == "__main__":
     unittest.main()

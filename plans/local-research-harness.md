@@ -4,7 +4,7 @@
 
 - [x] Phase 1: scaffold + container infra (sonnet-medium ok)
 - [x] Phase 2: per-round search + rerank pipeline (sonnet-medium ok)
-- [ ] Phase 3: fetch + extract + per-source notes (sonnet-medium ok)
+- [x] Phase 3: fetch + extract + per-source notes (sonnet-medium ok)
 - [ ] Phase 4: round orchestration (branch proposal, dedupe, per-round digest, termination)
 - [ ] Phase 5: hierarchical synthesis + bundle output
 - [ ] Phase 6: interactive CLI with multi-round gates (sonnet-medium ok)
