@@ -46,7 +46,7 @@ Then export the corrected IDs before running bootstrap.sh.
 
 ## Session output layout
 
-Each run produces a directory under `~/.research/sessions/<timestamp-slug>/`:
+Each run produces a directory under `tests/local-research/sessions/<timestamp-slug>/`:
 
 ```
 query.md                    — the original research question

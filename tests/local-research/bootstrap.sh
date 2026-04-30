@@ -74,7 +74,7 @@ if [ "$NEEDS_BUILD" -eq 1 ]; then
 fi
 
 # Ensure session dir exists ────────────────────────────────────────────────────
-SESSION_HOST_DIR="${HOME}/.research/sessions"
+SESSION_HOST_DIR="${SCRIPT_DIR}/sessions"
 mkdir -p "$SESSION_HOST_DIR"
 
 # Determine entrypoint ─────────────────────────────────────────────────────────

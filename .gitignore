@@ -31,5 +31,6 @@ refs
 # testing things temporarily
 .temp
 
-# local-research build stamp
+# local-research build stamp and session output
 tests/local-research/.image-timestamp
+tests/local-research/sessions/
