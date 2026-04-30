@@ -59,9 +59,9 @@ def rerank(
 
     scored = []
     for r, vec in zip(unique, result_vecs):
-        score = _cosine(query_vec, vec)
+        cosine = _cosine(query_vec, vec)
         entry = dict(r)
-        entry["rerank_score"] = score
+        entry["rerank_score"] = cosine + entry.get("prior_adj", 0.0)
         scored.append(entry)
 
     scored.sort(key=lambda x: x["rerank_score"], reverse=True)

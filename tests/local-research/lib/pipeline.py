@@ -12,6 +12,7 @@ from lib import fetch as _fetch_mod
 from lib import notes as _notes_mod
 from lib import rerank as _rerank_mod
 from lib import search as _search_mod
+from lib import source_priors as _priors_mod
 
 
 def gather_sources(
@@ -22,7 +23,11 @@ def gather_sources(
     top_k: int = 15,
 ) -> dict:
     """
-    expand → search-each → flatten → dedupe → rerank
+    expand → search-each → flatten → dedupe → apply priors → rerank
+
+    When SCHOLARLY_MODE env var is set, non-seed expansions (index 1+) are
+    routed to categories=science (arxiv, scholar, semantic-scholar, pubmed-if-
+    enabled).  The seed query (index 0) always uses the default SearXNG mix.
 
     Returns:
         {
@@ -33,6 +38,9 @@ def gather_sources(
             timings: dict,
         }
     """
+    import os
+    scholarly_mode = bool(os.environ.get("SCHOLARLY_MODE") or "")
+
     exclude_urls = exclude_urls or set()
     t0 = time.monotonic()
 
@@ -42,21 +50,27 @@ def gather_sources(
     # Search each expansion, flatten, dedupe by URL.
     seen_urls: set[str] = set(exclude_urls)
     raw: list[dict] = []
-    for q in expansions:
-        for r in _search_mod.search(q, n=n_per_query):
+    for i, q in enumerate(expansions):
+        # Seed query (i==0) uses the default engine mix; scholarly expansions use
+        # categories=science to bias toward arxiv/scholar/semantic-scholar.
+        categories = "science" if (scholarly_mode and i > 0) else None
+        for r in _search_mod.search(q, n=n_per_query, categories=categories):
             url = r.get("url", "")
             if url and url not in seen_urls:
                 seen_urls.add(url)
                 raw.append(r)
     t_search = time.monotonic()
 
-    ranked = _rerank_mod.rerank(query, raw, top_k=top_k, exclude_urls=exclude_urls)
+    # Apply domain-quality priors before rerank so the embedder sees them.
+    raw_with_priors = _priors_mod.apply_priors(raw)
+
+    ranked = _rerank_mod.rerank(query, raw_with_priors, top_k=top_k, exclude_urls=exclude_urls)
     t_rerank = time.monotonic()
 
     return {
         "query": query,
         "expansions": expansions,
-        "raw_results": raw,
+        "raw_results": raw_with_priors,
         "ranked": ranked,
         "timings": {
             "expand_s": round(t_expand - t0, 2),

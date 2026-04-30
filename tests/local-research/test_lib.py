@@ -196,7 +196,7 @@ class TestExpand(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestPipeline(unittest.TestCase):
-    def _fake_search(self, query, n=20):
+    def _fake_search(self, query, n=20, categories=None, engines=None, pages=1):
         return [
             {"url": f"https://{query[:3].replace(' ', '_')}.example.com/{i}", "title": f"T{i}", "content": f"C{i}", "engine": "google", "score": 1.0}
             for i in range(3)
@@ -236,7 +236,7 @@ class TestPipeline(unittest.TestCase):
         """Two expansion queries returning the same URL should dedupe before reranking."""
         shared_url = "https://shared.example.com/"
 
-        def dupe_search(query, n=20):
+        def dupe_search(query, n=20, categories=None, engines=None, pages=1):
             return [{"url": shared_url, "title": "shared", "content": "x", "engine": "g", "score": 1.0}]
 
         seen_urls = []
