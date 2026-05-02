@@ -193,6 +193,9 @@ start-agent.sh --backend=omlx
 # Rebuild image + container (prompts before deleting the Colima VM)
 start-agent.sh --rebuild
 
+# Reset container state only (keeps image + VM; no network egress)
+start-agent.sh --reset-container
+
 # Apply edits to the allowlist without touching the running container
 start-agent.sh --reload-allowlist
 
