@@ -599,6 +599,18 @@ vm_put_file() {
   colima ssh -p "$COLIMA_PROFILE" -- sudo chmod "$mode" "$dest"
 }
 
+remove_containers() {
+  local label="$1"
+  if docker container inspect "$CONTAINER_NAME" &>/dev/null; then
+    echo "==> $label: removing container '$CONTAINER_NAME'"
+    docker rm -f "$CONTAINER_NAME" >/dev/null
+  fi
+  if $LOCAL_SEARCH_ENABLED && docker container inspect "$SEARXNG_CONTAINER" &>/dev/null; then
+    echo "==> $label: removing container '$SEARXNG_CONTAINER'"
+    docker rm -f "$SEARXNG_CONTAINER" >/dev/null
+  fi
+}
+
 # ── --rebuild: optionally destroy the Colima VM before starting it ───────────
 # Container + image removal happens AFTER the VM is up so that `docker`
 # actually has something to talk to; deleting the VM itself must happen BEFORE
@@ -640,27 +652,13 @@ fi
 # containers (and the image, for --rebuild) from the VM's docker runtime.
 # The VM itself was handled earlier (--rebuild only).
 if $REBUILD && ! $RELOAD_ALLOWLIST; then
-  if docker container inspect "$CONTAINER_NAME" &>/dev/null; then
-    echo "==> --rebuild: removing container '$CONTAINER_NAME'"
-    docker rm -f "$CONTAINER_NAME" >/dev/null
-  fi
-  if $LOCAL_SEARCH_ENABLED && docker container inspect "$SEARXNG_CONTAINER" &>/dev/null; then
-    echo "==> --rebuild: removing container '$SEARXNG_CONTAINER'"
-    docker rm -f "$SEARXNG_CONTAINER" >/dev/null
-  fi
+  remove_containers "--rebuild"
   if docker image inspect "$IMAGE_TAG" &>/dev/null; then
     echo "==> --rebuild: removing image '$IMAGE_TAG'"
     docker image rm "$IMAGE_TAG" >/dev/null
   fi
 elif $RESET_CONTAINER && ! $RELOAD_ALLOWLIST; then
-  if docker container inspect "$CONTAINER_NAME" &>/dev/null; then
-    echo "==> --reset-container: removing container '$CONTAINER_NAME'"
-    docker rm -f "$CONTAINER_NAME" >/dev/null
-  fi
-  if $LOCAL_SEARCH_ENABLED && docker container inspect "$SEARXNG_CONTAINER" &>/dev/null; then
-    echo "==> --reset-container: removing container '$SEARXNG_CONTAINER'"
-    docker rm -f "$SEARXNG_CONTAINER" >/dev/null
-  fi
+  remove_containers "--reset-container"
   echo "==> --reset-container: image '$IMAGE_TAG' kept intact"
 fi
 

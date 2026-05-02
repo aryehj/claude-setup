@@ -74,7 +74,7 @@ def test_reset_container_mutual_exclusion_check():
         "RESET_CONTAINER or REBUILD variable missing"
     )
     # The guard must produce an error message referencing both flags.
-    assert re.search(r"reset.container.*rebuild|rebuild.*reset.container", _SCRIPT_TEXT, re.IGNORECASE), (
+    assert re.search(r"reset-container.*rebuild|rebuild.*reset-container", _SCRIPT_TEXT, re.IGNORECASE), (
         "No mutual-exclusion error message referencing both --reset-container and --rebuild found"
     )
 
