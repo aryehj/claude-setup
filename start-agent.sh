@@ -601,13 +601,11 @@ vm_put_file() {
 
 remove_containers() {
   local label="$1"
-  if docker container inspect "$CONTAINER_NAME" &>/dev/null; then
-    echo "==> $label: removing container '$CONTAINER_NAME'"
-    docker rm -f "$CONTAINER_NAME" >/dev/null
+  if docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1; then
+    echo "==> $label: removed container '$CONTAINER_NAME'"
   fi
-  if $LOCAL_SEARCH_ENABLED && docker container inspect "$SEARXNG_CONTAINER" &>/dev/null; then
-    echo "==> $label: removing container '$SEARXNG_CONTAINER'"
-    docker rm -f "$SEARXNG_CONTAINER" >/dev/null
+  if $LOCAL_SEARCH_ENABLED && docker rm -f "$SEARXNG_CONTAINER" >/dev/null 2>&1; then
+    echo "==> $label: removed container '$SEARXNG_CONTAINER'"
   fi
 }
 

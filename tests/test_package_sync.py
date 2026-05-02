@@ -10,12 +10,7 @@ _PKG_NAME = re.compile(r"^[a-zA-Z][a-zA-Z0-9+\-\.~]*$")
 
 
 def _parse_apt_packages(text: str) -> set[str]:
-    """Extract packages from the apt-get install --no-install-recommends block.
-
-    Walks line by line: starts collecting after the install header line, stops
-    when it reaches a line that neither ends with \\ nor contains only package
-    names (catches && continuations and bare shell commands).
-    """
+    """Extract packages from the apt-get install --no-install-recommends block."""
     lines = text.splitlines()
     in_block = False
     packages: set[str] = set()
@@ -26,34 +21,14 @@ def _parse_apt_packages(text: str) -> set[str]:
         if not in_block:
             if "apt-get install -y --no-install-recommends" in stripped:
                 in_block = True
-                # Packages may start on the same line after the flag; fall through.
-                # Remove the apt-get prefix up to the flag, then collect tokens.
-                payload = re.sub(r".*--no-install-recommends", "", stripped)
-                payload = payload.rstrip("\\").strip()
-                for tok in payload.split():
-                    if _PKG_NAME.match(tok):
-                        packages.add(tok)
+                payload = re.sub(r".*--no-install-recommends", "", stripped).rstrip("\\").strip()
+                packages.update(t for t in payload.split() if _PKG_NAME.match(t))
             continue
 
-        # We're inside the block. A line that starts with && or a bare command
-        # (apt-get, rm, touch, …) signals the end of the package list.
-        if stripped.startswith("&&") or (
-            not stripped.endswith("\\") and not all(_PKG_NAME.match(t) for t in stripped.split())
-        ):
-            # Check whether ALL non-\\ tokens are valid package names; if not, we
-            # might be on a command line — stop.
-            tokens = stripped.rstrip("\\").split()
-            all_pkgs = tokens and all(_PKG_NAME.match(t) for t in tokens)
-            if not all_pkgs:
-                break
-
-        # Collect package names from this continuation line.
-        payload = stripped.rstrip("\\").strip()
-        for tok in payload.split():
-            if _PKG_NAME.match(tok):
-                packages.add(tok)
-
-        # If no trailing backslash and we're not at the header, the block ended.
+        tokens = stripped.rstrip("\\").split()
+        if stripped.startswith("&&") or not all(_PKG_NAME.match(t) for t in tokens):
+            break
+        packages.update(tokens)
         if not stripped.endswith("\\"):
             break
 
