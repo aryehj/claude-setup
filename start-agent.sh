@@ -1221,9 +1221,10 @@ fi
 sync_skills
 
 # ── inject project settings ───────────────────────────────────────────────────
-# Disable bubblewrap sandbox — it cannot run inside a Docker/Colima container
-# without elevated privileges. The VM-level tinyproxy + iptables chain is the
-# real security boundary here.
+# Force sandbox off — claude-agent.Dockerfile omits the sandbox deps
+# (CAP_SYS_ADMIN would weaken the VM boundary, see Dockerfile header), but
+# Claude Code reads settings before checking deps and would error out. The
+# VM-level tinyproxy + iptables chain is the real security boundary here.
 PROJECT_SETTINGS_FILE="$PROJECT_DIR/.claude/settings.local.json"
 if [[ -f "$PROJECT_SETTINGS_FILE" ]]; then
   python3 - "$PROJECT_SETTINGS_FILE" << 'PYEOF'

@@ -76,21 +76,18 @@ COPY searxng-mcp/server.py /opt/searxng-mcp/server.py
 RUN uv venv /opt/searxng-mcp/venv \
  && uv pip install --python /opt/searxng-mcp/venv/bin/python 'mcp[cli]' httpx
 
-# ── UV cache + project venv redirects (dynamic $TMPDIR) ──────────────────────
-# UV_PROJECT_ENVIRONMENT redirects venvs out of the bind-mounted project dir,
-# which may carry a macOS-binary .venv that won't run on Linux (ADR-007).
-# UV_CACHE_DIR is colocated for symmetry with start-claude.sh (ADR-001).
-# Both resolve $TMPDIR at shell startup rather than baking in a static path.
+# ── UV project venv redirect (dynamic $TMPDIR) ───────────────────────────────
+# Redirect venvs out of the bind-mounted project dir, which may carry a
+# macOS-binary .venv that won't run on Linux (ADR-007). Resolved at shell
+# startup rather than baked in. UV_CACHE_DIR is not redirected here — unlike
+# start-claude.sh, no read-only /root/.cache mount is in play (ADR-001 does
+# not apply without the bubblewrap sandbox).
 RUN cat > /etc/profile.d/uv-cache.sh <<'UVEOF'
-export UV_CACHE_DIR="${TMPDIR:-/tmp}/uv-cache"
-mkdir -p "$UV_CACHE_DIR" 2>/dev/null || true
 export UV_PROJECT_ENVIRONMENT="${TMPDIR:-/tmp}/.venv"
 mkdir -p "$UV_PROJECT_ENVIRONMENT" 2>/dev/null || true
 UVEOF
 
 RUN cat >> /root/.bashrc <<'UVEOF'
-export UV_CACHE_DIR="${TMPDIR:-/tmp}/uv-cache"
-mkdir -p "$UV_CACHE_DIR" 2>/dev/null || true
 export UV_PROJECT_ENVIRONMENT="${TMPDIR:-/tmp}/.venv"
 mkdir -p "$UV_PROJECT_ENVIRONMENT" 2>/dev/null || true
 UVEOF
