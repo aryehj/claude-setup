@@ -8,7 +8,7 @@
 # inference to Ollama or omlx running on the macOS host.
 #
 # Usage:
-#   start-agent.sh [--rebuild] [--reload-allowlist]
+#   start-agent.sh [--rebuild] [--reset-container] [--reload-allowlist]
 #                  [--backend=ollama|omlx]
 #                  [--disable-search]
 #                  [--memory=VALUE] [--cpus=N]
@@ -20,6 +20,7 @@ set -euo pipefail
 
 # ── args ──────────────────────────────────────────────────────────────────────
 REBUILD=false
+RESET_CONTAINER=false
 RELOAD_ALLOWLIST=false
 RESEED_ALLOWLIST=false
 RESEED_GLOBAL_CLAUDEMD=false
@@ -44,6 +45,10 @@ USAGE:
 OPTIONS:
   --rebuild              Remove image + container and recreate. With
                          confirmation, also delete and recreate the Colima VM.
+  --reset-container      Remove the project container (and SearXNG container)
+                         but keep the image and VM. Cheaper than --rebuild
+                         when you only need to reset container state.
+                         Mutually exclusive with --rebuild.
   --reload-allowlist     Regenerate tinyproxy's filter file from
                          ~/.claude-agent/allowlist.txt and reload tinyproxy.
                          Fast path; does not restart the container.
@@ -92,6 +97,7 @@ USAGE
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --rebuild)           REBUILD=true ;;
+    --reset-container)   RESET_CONTAINER=true ;;
     --reload-allowlist)  RELOAD_ALLOWLIST=true ;;
     --reseed-allowlist)  RESEED_ALLOWLIST=true; RELOAD_ALLOWLIST=true ;;
     --reseed-global-claudemd) RESEED_GLOBAL_CLAUDEMD=true ;;
@@ -118,6 +124,13 @@ while [[ $# -gt 0 ]]; do
   esac
   shift
 done
+
+if $RESET_CONTAINER && $REBUILD; then
+  echo "error: --reset-container and --rebuild are mutually exclusive." >&2
+  echo "  --reset-container removes the container but keeps the image (cheap)." >&2
+  echo "  --rebuild removes both the container and image (full rebuild)." >&2
+  exit 1
+fi
 
 PROJECT_DIR="${POSITIONAL[0]:-$(pwd)}"
 PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)"
@@ -586,6 +599,16 @@ vm_put_file() {
   colima ssh -p "$COLIMA_PROFILE" -- sudo chmod "$mode" "$dest"
 }
 
+remove_containers() {
+  local label="$1"
+  if docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1; then
+    echo "==> $label: removed container '$CONTAINER_NAME'"
+  fi
+  if $LOCAL_SEARCH_ENABLED && docker rm -f "$SEARXNG_CONTAINER" >/dev/null 2>&1; then
+    echo "==> $label: removed container '$SEARXNG_CONTAINER'"
+  fi
+}
+
 # ── --rebuild: optionally destroy the Colima VM before starting it ───────────
 # Container + image removal happens AFTER the VM is up so that `docker`
 # actually has something to talk to; deleting the VM itself must happen BEFORE
@@ -623,21 +646,18 @@ if ! docker context use "colima-$COLIMA_PROFILE" &>/dev/null; then
   echo "warning: could not switch docker context to colima-$COLIMA_PROFILE; assuming current context talks to the right daemon." >&2
 fi
 
-# Now that docker is reachable, honor --rebuild by removing the container and
-# image from the VM's docker runtime. (The VM itself was handled earlier.)
+# Now that docker is reachable, honor --rebuild / --reset-container by removing
+# containers (and the image, for --rebuild) from the VM's docker runtime.
+# The VM itself was handled earlier (--rebuild only).
 if $REBUILD && ! $RELOAD_ALLOWLIST; then
-  if docker container inspect "$CONTAINER_NAME" &>/dev/null; then
-    echo "==> --rebuild: removing container '$CONTAINER_NAME'"
-    docker rm -f "$CONTAINER_NAME" >/dev/null
-  fi
-  if $LOCAL_SEARCH_ENABLED && docker container inspect "$SEARXNG_CONTAINER" &>/dev/null; then
-    echo "==> --rebuild: removing container '$SEARXNG_CONTAINER'"
-    docker rm -f "$SEARXNG_CONTAINER" >/dev/null
-  fi
+  remove_containers "--rebuild"
   if docker image inspect "$IMAGE_TAG" &>/dev/null; then
     echo "==> --rebuild: removing image '$IMAGE_TAG'"
     docker image rm "$IMAGE_TAG" >/dev/null
   fi
+elif $RESET_CONTAINER && ! $RELOAD_ALLOWLIST; then
+  remove_containers "--reset-container"
+  echo "==> --reset-container: image '$IMAGE_TAG' kept intact"
 fi
 
 # ── discover bridge IP, host IP, bridge CIDR inside the VM ───────────────────

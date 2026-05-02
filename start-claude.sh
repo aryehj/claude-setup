@@ -199,10 +199,10 @@ else
     # ── system packages ──────────────────────────────────────────────────────
     apt-get update -qq
     apt-get install -y --no-install-recommends \
-      bash curl wget git ca-certificates gnupg \
-      build-essential python3 python3-pip \
-      jq ripgrep fd-find unzip \
-      bubblewrap socat libseccomp2 libseccomp-dev
+      bash curl wget git ca-certificates \
+      python3 \
+      jq ripgrep fd-find \
+      bubblewrap socat libseccomp2
     apt-get upgrade -y
     rm -rf /var/lib/apt/lists/*
 

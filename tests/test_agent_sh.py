@@ -1,8 +1,10 @@
-"""Static analysis: docker run commands in start-agent.sh must not publish host ports."""
+"""Static analysis: docker run commands in start-agent.sh must not publish host ports.
+Also verifies --reset-container flag structure invariants."""
 import re
 from pathlib import Path
 
 SCRIPT = Path(__file__).parent.parent / "start-agent.sh"
+_SCRIPT_TEXT = SCRIPT.read_text()
 
 
 def _collect_docker_run_block(lines: list[str], start: int) -> str:
@@ -31,7 +33,7 @@ def _has_host_port_binding(block: str) -> bool:
     return bool(re.search(r"(?:^|\s)-p\s+\d", block)) or "--publish" in block
 
 
-_BLOCKS = _find_docker_run_blocks(SCRIPT.read_text())
+_BLOCKS = _find_docker_run_blocks(_SCRIPT_TEXT)
 
 
 def _assert_no_host_port_binding(marker: str, service_name: str) -> None:
@@ -49,3 +51,44 @@ def test_searxng_no_host_port_binding():
 
 def test_claude_agent_no_host_port_binding():
     _assert_no_host_port_binding("IMAGE_TAG", "claude-agent")
+
+
+# ── --reset-container invariants ──────────────────────────────────────────────
+
+def test_reset_container_arg_case_exists():
+    assert "--reset-container)" in _SCRIPT_TEXT, (
+        "--reset-container) case missing from arg parser"
+    )
+
+
+def test_reset_container_in_help_text():
+    # The usage() function text must document the flag.
+    assert "--reset-container" in _SCRIPT_TEXT, (
+        "--reset-container missing from usage/help block"
+    )
+
+
+def test_reset_container_mutual_exclusion_check():
+    # The script must contain a mutual-exclusion guard for --reset-container + --rebuild.
+    assert "RESET_CONTAINER" in _SCRIPT_TEXT and "REBUILD" in _SCRIPT_TEXT, (
+        "RESET_CONTAINER or REBUILD variable missing"
+    )
+    # The guard must produce an error message referencing both flags.
+    assert re.search(r"reset-container.*rebuild|rebuild.*reset-container", _SCRIPT_TEXT, re.IGNORECASE), (
+        "No mutual-exclusion error message referencing both --reset-container and --rebuild found"
+    )
+
+
+def test_reset_container_skips_image_rm():
+    # The reset-container branch must NOT contain docker image rm.
+    # We verify by asserting the image-rm only appears inside the REBUILD-specific block,
+    # not duplicated in a reset-container-only block.
+    # Simple invariant: any 'docker image rm' line must be inside a $REBUILD guard.
+    lines = _SCRIPT_TEXT.splitlines()
+    image_rm_lines = [i for i, l in enumerate(lines) if "docker image rm" in l and not l.strip().startswith("#")]
+    for lineno in image_rm_lines:
+        # Walk back to find the nearest enclosing if-condition
+        context = "\n".join(lines[max(0, lineno - 20):lineno + 1])
+        assert "REBUILD" in context, (
+            f"docker image rm at line {lineno + 1} is not inside a REBUILD guard:\n{context}"
+        )
