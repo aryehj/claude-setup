@@ -8,7 +8,7 @@ description: Trim unused deps, add a --reset-container flag, and persist BuildKi
 ## Status
 
 - [x] Phase 1: Drop unused dependencies
-- [ ] Phase 2: Add `--reset-container` flag
+- [x] Phase 2: Add `--reset-container` flag
 - [ ] Phase 3: Persist BuildKit layer cache across rebuilds
 
 ## Context
