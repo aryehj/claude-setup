@@ -65,8 +65,7 @@ re-attaches to the existing one rather than creating a new one.
 | `fd` | `fd-find` |
 | `jq` | JSON CLI |
 | `curl` / `wget` | |
-| `python3` | System Python + pip |
-| `build-essential` | gcc, make, etc. |
+| `python3` | System Python |
 
 ## Mounts
 
