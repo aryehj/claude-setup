@@ -1192,39 +1192,17 @@ case "$BACKEND" in
     ;;
 esac
 
-attach_existing() {
-  echo "==> Attaching to existing container '$CONTAINER_NAME'"
-  docker start "$CONTAINER_NAME" >/dev/null 2>&1 || true
-  rm -rf "$TMP_WORK"
-  trap - EXIT
-  exec docker exec -it -w "$PROJECT_DIR" "${DOCKER_ENV_ARGS[@]}" "$CONTAINER_NAME" /bin/bash
-}
-
-if docker container inspect "$CONTAINER_NAME" &>/dev/null; then
-  # Check that the existing mount matches $PROJECT_DIR. If not, recreate.
-  existing_mount=$(docker container inspect -f '{{range .Mounts}}{{if eq .Destination "'"$PROJECT_DIR"'"}}{{.Source}}{{end}}{{end}}' "$CONTAINER_NAME" 2>/dev/null || true)
-  if [[ "$existing_mount" == "$PROJECT_DIR" ]]; then
-    running_state=$(docker container inspect -f '{{.State.Running}}' "$CONTAINER_NAME" 2>/dev/null || echo "false")
-    if [[ "$running_state" == "true" ]]; then
-      if docker top "$CONTAINER_NAME" 2>/dev/null | grep -q '/bin/bash'; then
-        echo "warning: container '$CONTAINER_NAME' already has an attached shell; attaching anyway. Two shells sharing state may be confusing." >&2
-      fi
-    fi
-    attach_existing
-  else
-    echo "==> Project dir changed; recreating container"
-    docker rm -f "$CONTAINER_NAME" >/dev/null
-  fi
-fi
-
-# Fresh container: sync skills first.
-sync_skills
-
 # ── inject project settings ───────────────────────────────────────────────────
 # Force sandbox off — claude-agent.Dockerfile omits the sandbox deps
 # (CAP_SYS_ADMIN would weaken the VM boundary, see Dockerfile header), but
 # Claude Code reads settings before checking deps and would error out. The
 # VM-level tinyproxy + iptables chain is the real security boundary here.
+#
+# Runs before the existing-container fast path so re-attaches to containers
+# created prior to the bwrap-removal also pick up the migration. The settings
+# file is on the host and bind-mounted into the container, so fixing it here
+# is sufficient regardless of whether we exec straight into an existing
+# container or build a fresh one below.
 PROJECT_SETTINGS_FILE="$PROJECT_DIR/.claude/settings.local.json"
 if [[ -f "$PROJECT_SETTINGS_FILE" ]]; then
   python3 - "$PROJECT_SETTINGS_FILE" << 'PYEOF'
@@ -1264,6 +1242,34 @@ else
 JSONEOF
   echo "==> Created $PROJECT_SETTINGS_FILE"
 fi
+
+attach_existing() {
+  echo "==> Attaching to existing container '$CONTAINER_NAME'"
+  docker start "$CONTAINER_NAME" >/dev/null 2>&1 || true
+  rm -rf "$TMP_WORK"
+  trap - EXIT
+  exec docker exec -it -w "$PROJECT_DIR" "${DOCKER_ENV_ARGS[@]}" "$CONTAINER_NAME" /bin/bash
+}
+
+if docker container inspect "$CONTAINER_NAME" &>/dev/null; then
+  # Check that the existing mount matches $PROJECT_DIR. If not, recreate.
+  existing_mount=$(docker container inspect -f '{{range .Mounts}}{{if eq .Destination "'"$PROJECT_DIR"'"}}{{.Source}}{{end}}{{end}}' "$CONTAINER_NAME" 2>/dev/null || true)
+  if [[ "$existing_mount" == "$PROJECT_DIR" ]]; then
+    running_state=$(docker container inspect -f '{{.State.Running}}' "$CONTAINER_NAME" 2>/dev/null || echo "false")
+    if [[ "$running_state" == "true" ]]; then
+      if docker top "$CONTAINER_NAME" 2>/dev/null | grep -q '/bin/bash'; then
+        echo "warning: container '$CONTAINER_NAME' already has an attached shell; attaching anyway. Two shells sharing state may be confusing." >&2
+      fi
+    fi
+    attach_existing
+  else
+    echo "==> Project dir changed; recreating container"
+    docker rm -f "$CONTAINER_NAME" >/dev/null
+  fi
+fi
+
+# Fresh container: sync skills first.
+sync_skills
 
 NETWORK_ARGS=()
 if $LOCAL_SEARCH_ENABLED; then
