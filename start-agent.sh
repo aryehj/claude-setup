@@ -23,6 +23,9 @@ REBUILD=false
 RESET_CONTAINER=false
 RELOAD_ALLOWLIST=false
 RESEED_ALLOWLIST=false
+RELOAD_DENYLIST=false
+REFRESH_DENYLIST=false
+RESEED_DENYLIST=false
 RESEED_GLOBAL_CLAUDEMD=false
 CLI_MEMORY=""
 CLI_CPUS=""
@@ -208,10 +211,37 @@ OPENCODE_DATA_DIR="$HOME/.claude-agent/opencode-data"
 ALLOWLIST_DIR="$HOME/.claude-agent"
 ALLOWLIST_FILE="$ALLOWLIST_DIR/allowlist.txt"
 TINYPROXY_PORT=8888
+SQUID_PORT=8888
+DENYLIST_DIR="$HOME/.claude-agent"
+DENYLIST_SOURCES_FILE="$DENYLIST_DIR/denylist-sources.txt"
+DENYLIST_ADDITIONS_FILE="$DENYLIST_DIR/denylist-additions.txt"
+DENYLIST_OVERRIDES_FILE="$DENYLIST_DIR/denylist-overrides.txt"
+DENYLIST_CACHE_DIR="$DENYLIST_DIR/denylist-cache"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+TEMPLATE_DENYLIST_SOURCES="$SCRIPT_DIR/templates/research-denylist-sources.txt"
+TEMPLATE_DENYLIST_ADDITIONS="$SCRIPT_DIR/templates/research-denylist-additions.txt"
 SEARXNG_CONTAINER="searxng"
 SEARXNG_DIR="$HOME/.claude-agent/searxng"
 SEARXNG_SETTINGS_FILE="$SEARXNG_DIR/settings.yml"
 AGENT_NET_NAME="claude-agent-net"
+
+# ── legacy allowlist guard ───────────────────────────────────────────────────
+# Installations predating the denylist migration have allowlist.txt in
+# DENYLIST_DIR. Fail loudly so the user migrates rather than silently running
+# with a broken proxy.
+if [[ -f "$DENYLIST_DIR/allowlist.txt" ]] && ! $RELOAD_DENYLIST; then
+  cat >&2 <<LEGACY
+error: $DENYLIST_DIR/allowlist.txt exists — this installation predates the denylist migration.
+
+Manual steps required:
+  1. rm -f $DENYLIST_DIR/allowlist.txt $DENYLIST_DIR/allowlist*.txt
+  2. start-agent.sh --rebuild
+
+The old allowlist.txt is no longer used. Remove it and let
+start-agent.sh recreate state from the current denylist templates.
+LEGACY
+  exit 1
+fi
 
 # ── preflight ────────────────────────────────────────────────────────────────
 if ! command -v colima &>/dev/null; then
@@ -231,9 +261,10 @@ if [[ ! -f "$DOCKERFILE_PATH" ]]; then
   exit 1
 fi
 
-# ── seed allowlist (first run only) ──────────────────────────────────────────
-mkdir -p "$ALLOWLIST_DIR"
-if [[ ! -f "$ALLOWLIST_FILE" ]] || $RESEED_ALLOWLIST; then
+# NOTE: The old allowlist seed is kept below as dead code (wrapped in `if
+# false`) until tinyproxy is replaced by Squid in Phase 2. No allowlist.txt
+# is ever created on fresh installs.
+if false; then
   cat > "$ALLOWLIST_FILE" <<'ALLOWLIST'
 # start-agent allowlist — edit on the macOS host.
 # Apply changes:  start-agent.sh --reload-allowlist
@@ -546,6 +577,163 @@ with open(sys.argv[1]) as f:
 PYEOF
 }
 
+# ── denylist helpers ─────────────────────────────────────────────────────────
+
+seed_denylist_files() {
+  local force="${1:-false}"
+  mkdir -p "$DENYLIST_DIR" "$DENYLIST_CACHE_DIR"
+
+  if [[ ! -f "$DENYLIST_SOURCES_FILE" ]] || [[ "$force" == "true" ]]; then
+    if [[ ! -f "$TEMPLATE_DENYLIST_SOURCES" ]]; then
+      echo "error: denylist sources template not found: $TEMPLATE_DENYLIST_SOURCES" >&2
+      exit 1
+    fi
+    cp "$TEMPLATE_DENYLIST_SOURCES" "$DENYLIST_SOURCES_FILE"
+    if [[ "$force" == "true" ]]; then
+      echo "==> Reseeded denylist sources at $DENYLIST_SOURCES_FILE"
+    else
+      echo "==> Seeded denylist sources at $DENYLIST_SOURCES_FILE"
+    fi
+  fi
+
+  if [[ ! -f "$DENYLIST_ADDITIONS_FILE" ]] || [[ "$force" == "true" ]]; then
+    if [[ ! -f "$TEMPLATE_DENYLIST_ADDITIONS" ]]; then
+      echo "error: denylist additions template not found: $TEMPLATE_DENYLIST_ADDITIONS" >&2
+      exit 1
+    fi
+    cp "$TEMPLATE_DENYLIST_ADDITIONS" "$DENYLIST_ADDITIONS_FILE"
+    if [[ "$force" == "true" ]]; then
+      echo "==> Reseeded denylist additions at $DENYLIST_ADDITIONS_FILE"
+    else
+      echo "==> Seeded denylist additions at $DENYLIST_ADDITIONS_FILE"
+    fi
+  fi
+
+  if [[ ! -f "$DENYLIST_OVERRIDES_FILE" ]]; then
+    cat > "$DENYLIST_OVERRIDES_FILE" <<'OVERRIDES'
+# start-agent.sh denylist overrides — entries here are removed from the
+# final filter. Use this to undo a false positive pulled in by an
+# upstream feed. One domain per line; '#' for comments.
+OVERRIDES
+  fi
+}
+
+prune_orphan_cache_files() {
+  [[ -d "$DENYLIST_CACHE_DIR" ]] || return 0
+  python3 - "$DENYLIST_SOURCES_FILE" "$DENYLIST_CACHE_DIR" <<'PYEOF'
+import sys
+from pathlib import Path
+sources_file = Path(sys.argv[1])
+cache_dir = Path(sys.argv[2])
+urls = []
+if sources_file.exists():
+    for raw in sources_file.read_text().splitlines():
+        url = raw.split("#", 1)[0].strip()
+        if url:
+            urls.append(url)
+expected = {(url.rsplit("/", 1)[-1] or "feed.txt") for url in urls}
+for cached in sorted(cache_dir.glob("*.txt")):
+    if cached.name not in expected:
+        cached.unlink()
+        print(f"==> Pruned orphan cache file: {cached.name}")
+PYEOF
+}
+
+refresh_denylist_cache() {
+  local abort_on_any_failure="${1:-false}"
+  mkdir -p "$DENYLIST_CACHE_DIR"
+  prune_orphan_cache_files
+
+  if [[ ! -f "$DENYLIST_SOURCES_FILE" ]]; then
+    echo "==> No upstream denylist sources configured at $DENYLIST_SOURCES_FILE"
+    return 0
+  fi
+
+  local failures=0 total=0
+  while IFS= read -r url; do
+    url="$(printf '%s' "$url" | sed 's/[[:space:]]//g')"
+    [[ -z "$url" ]] && continue
+    total=$((total + 1))
+    local basename="${url##*/}"
+    [[ -z "$basename" ]] && basename="feed.txt"
+    local dest="$DENYLIST_CACHE_DIR/$basename"
+    local tmp="$dest.tmp"
+    echo "==> Fetching $url"
+    if curl -fsSL --max-time 60 -H "User-Agent: start-agent.sh/denylist" "$url" -o "$tmp" 2>/dev/null; then
+      mv "$tmp" "$dest"
+    else
+      rm -f "$tmp"
+      echo "warning: failed to fetch $url" >&2
+      failures=$((failures + 1))
+    fi
+  done < <(grep -v '^[[:space:]]*#' "$DENYLIST_SOURCES_FILE" | grep -v '^[[:space:]]*$')
+
+  if [[ $failures -gt 0 ]] && [[ "$abort_on_any_failure" == "true" ]]; then
+    echo "error: first-run denylist bootstrap failed: $failures of $total upstream feeds" >&2
+    echo "       could not be fetched. Check connectivity and re-run with" >&2
+    echo "       --refresh-denylist before the agent VM is brought up." >&2
+    exit 1
+  fi
+}
+
+compose_denylist_to_file() {
+  local out="$1"
+  python3 - "$DENYLIST_CACHE_DIR" "$DENYLIST_ADDITIONS_FILE" "$DENYLIST_OVERRIDES_FILE" > "$out" <<'PYEOF'
+import sys
+from pathlib import Path
+
+def read_domain_lines(path):
+    if not path.exists():
+        return []
+    out = []
+    for raw in path.read_text().splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line:
+            continue
+        parts = line.split()
+        if len(parts) == 2 and parts[0] in ("0.0.0.0", "127.0.0.1"):
+            line = parts[1]
+        elif len(parts) > 1:
+            continue
+        if line.startswith("*."):
+            line = line[2:]
+        out.append(line.lower())
+    return out
+
+def prune_subdomains(domains):
+    domain_set = set(domains)
+    result = []
+    for domain in domains:
+        pos = domain.find(".")
+        covered = False
+        while pos != -1:
+            if domain[pos + 1:] in domain_set:
+                covered = True
+                break
+            pos = domain.find(".", pos + 1)
+        if not covered:
+            result.append(domain)
+    return result
+
+cache_dir = Path(sys.argv[1])
+additions_file = Path(sys.argv[2])
+overrides_file = Path(sys.argv[3])
+domains = set()
+if cache_dir.is_dir():
+    for cached in sorted(cache_dir.glob("*.txt")):
+        domains.update(read_domain_lines(cached))
+domains.update(read_domain_lines(additions_file))
+overrides = set(read_domain_lines(overrides_file))
+domains -= overrides
+pruned = prune_subdomains(sorted(domains))
+for d in pruned:
+    print(f".{d}")
+PYEOF
+  local count
+  count=$(grep -c '^' "$out" 2>/dev/null || echo 0)
+  echo "==> Composed denylist: $count entries"
+}
+
 # ── Colima VM bring-up ───────────────────────────────────────────────────────
 colima_profile_running() {
   colima list -p "$COLIMA_PROFILE" --json 2>/dev/null | grep -q '"Running"'
@@ -608,6 +796,22 @@ remove_containers() {
     echo "==> $label: removed container '$SEARXNG_CONTAINER'"
   fi
 }
+
+# ── seed and bootstrap denylist ──────────────────────────────────────────────
+seed_denylist_files "$RESEED_DENYLIST"
+
+_cache_has_feeds=false
+if find "$DENYLIST_CACHE_DIR" -maxdepth 1 -name "*.txt" 2>/dev/null | grep -q .; then
+  _cache_has_feeds=true
+fi
+
+if ! $_cache_has_feeds || $REFRESH_DENYLIST; then
+  refresh_denylist_cache "$(! $_cache_has_feeds && echo true || echo false)"
+fi
+
+_TMP_DENYLIST_COUNT=$(mktemp)
+compose_denylist_to_file "$_TMP_DENYLIST_COUNT"
+rm -f "$_TMP_DENYLIST_COUNT"
 
 # ── --rebuild: optionally destroy the Colima VM before starting it ───────────
 # Container + image removal happens AFTER the VM is up so that `docker`
@@ -770,19 +974,12 @@ StatFile "/usr/share/tinyproxy/stats.html"
 LogFile "/var/log/tinyproxy/tinyproxy.log"
 LogLevel Info
 MaxClients 100
-FilterDefaultDeny Yes
-Filter "/etc/tinyproxy/filter"
-FilterExtended Yes
-FilterURLs No
 ConnectPort 443
 ConnectPort 80
 CONF
 
-generate_filter_file "$TMP_WORK/filter"
-
-# Ship both files directly into /etc/tinyproxy/ via `sudo tee` over colima ssh.
+# Ship config directly into /etc/tinyproxy/ via `sudo tee` over colima ssh.
 vm_put_file "$TMP_WORK/tinyproxy.conf" /etc/tinyproxy/tinyproxy.conf
-vm_put_file "$TMP_WORK/filter"         /etc/tinyproxy/filter
 
 # Enable and (re)start/reload tinyproxy. On first run, enable+start; otherwise
 # reload to pick up filter changes without interrupting in-flight connections.

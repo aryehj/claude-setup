@@ -1,6 +1,8 @@
 """Static analysis: docker run commands in start-agent.sh must not publish host ports.
-Also verifies --reset-container flag structure invariants."""
+Also verifies --reset-container flag structure invariants and Phase-1 denylist machinery."""
 import re
+import subprocess
+import tempfile
 from pathlib import Path
 
 SCRIPT = Path(__file__).parent.parent / "start-agent.sh"
@@ -92,3 +94,82 @@ def test_reset_container_skips_image_rm():
         assert "REBUILD" in context, (
             f"docker image rm at line {lineno + 1} is not inside a REBUILD guard:\n{context}"
         )
+
+
+# ── Phase 1: denylist machinery ───────────────────────────────────────────────
+
+def test_bash_syntax():
+    """bash -n must pass — no syntax errors in the script."""
+    result = subprocess.run(
+        ["bash", "-n", str(SCRIPT)],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, (
+        f"bash -n start-agent.sh failed:\n{result.stderr}"
+    )
+
+
+def test_denylist_constants_present():
+    """New denylist constants must exist in the script."""
+    for constant in (
+        "DENYLIST_DIR",
+        "DENYLIST_SOURCES_FILE",
+        "DENYLIST_ADDITIONS_FILE",
+        "DENYLIST_OVERRIDES_FILE",
+        "DENYLIST_CACHE_DIR",
+        "SQUID_PORT",
+        "TEMPLATE_DENYLIST_SOURCES",
+        "TEMPLATE_DENYLIST_ADDITIONS",
+    ):
+        assert constant in _SCRIPT_TEXT, f"Constant {constant} missing from start-agent.sh"
+
+
+def test_denylist_helper_functions_defined():
+    """Denylist helper bash functions must be defined in the script."""
+    for fn in (
+        "seed_denylist_files",
+        "prune_orphan_cache_files",
+        "refresh_denylist_cache",
+        "compose_denylist_to_file",
+    ):
+        assert f"{fn}()" in _SCRIPT_TEXT, f"Function {fn}() not defined in start-agent.sh"
+
+
+def test_legacy_allowlist_guard_present():
+    """The script must contain a guard that rejects legacy allowlist.txt installations."""
+    assert "allowlist.txt" in _SCRIPT_TEXT, "allowlist.txt guard missing"
+    # Must exit 1 in response to the legacy file.
+    assert re.search(r"allowlist\.txt.*exit 1|exit 1.*allowlist\.txt", _SCRIPT_TEXT, re.DOTALL), (
+        "No 'exit 1' found near allowlist.txt check in start-agent.sh"
+    )
+
+
+def test_legacy_guard_exits_on_allowlist(tmp_path):
+    """Script must exit 1 with a migration message when ~/.claude-agent/allowlist.txt exists."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    claude_agent_dir = fake_home / ".claude-agent"
+    claude_agent_dir.mkdir()
+    (claude_agent_dir / "allowlist.txt").write_text("# legacy\nexample.com\n")
+
+    result = subprocess.run(
+        ["bash", str(SCRIPT)],
+        capture_output=True,
+        text=True,
+        env={
+            "HOME": str(fake_home),
+            "PATH": "/usr/local/bin:/usr/bin:/bin",
+            # Prevent colima/docker from being found so we hit the guard first.
+            "CLAUDE_AGENT_DISABLE_SEARCH": "1",
+        },
+        cwd=str(tmp_path),
+    )
+    assert result.returncode == 1, (
+        f"Expected exit 1 from legacy guard, got {result.returncode}.\n"
+        f"stdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+    combined = result.stdout + result.stderr
+    assert "allowlist.txt" in combined, (
+        f"Migration message missing 'allowlist.txt'.\nstdout: {result.stdout}\nstderr: {result.stderr}"
+    )
