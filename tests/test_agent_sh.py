@@ -214,3 +214,52 @@ def test_rate_limit_rule_present():
     assert "hashlimit" in _SCRIPT_TEXT or re.search(r"-m limit.*--limit.*\bRETURN\b", _SCRIPT_TEXT), (
         "No rate-limit iptables rule (hashlimit or -m limit fallback) found in start-agent.sh"
     )
+
+
+# ── Phase 3: CLI flags, fast-path, container env ──────────────────────────────
+
+def test_new_denylist_flags_parsed():
+    """All three new denylist flags must have case entries in the arg parser."""
+    for flag in ("--reload-denylist)", "--refresh-denylist)", "--reseed-denylist)"):
+        assert flag in _SCRIPT_TEXT, f"Arg parser missing case for {flag}"
+
+
+def test_old_allowlist_flags_not_active():
+    """--reload-allowlist and --reseed-allowlist must not silently set RELOAD_ALLOWLIST=true."""
+    assert "RELOAD_ALLOWLIST=true" not in _SCRIPT_TEXT, (
+        "RELOAD_ALLOWLIST=true found — old flag still wired to an active internal var"
+    )
+    assert "RESEED_ALLOWLIST=true" not in _SCRIPT_TEXT, (
+        "RESEED_ALLOWLIST=true found — old flag still wired to an active internal var"
+    )
+
+
+def test_no_tinyproxy_port_in_proxy_env():
+    """Container HTTPS_PROXY/HTTP_PROXY must reference SQUID_PORT, not TINYPROXY_PORT."""
+    assert not re.search(r"HTTPS_PROXY.*TINYPROXY_PORT|HTTP_PROXY.*TINYPROXY_PORT", _SCRIPT_TEXT), (
+        "TINYPROXY_PORT still used in container proxy env vars — should be SQUID_PORT"
+    )
+
+
+def test_searxng_proxy_uses_squid_port():
+    """SearXNG settings.yml seed must use SQUID_PORT, not TINYPROXY_PORT."""
+    # Check that TINYPROXY_PORT doesn't appear in the SearXNG outgoing proxies block.
+    assert not re.search(r"outgoing:.*TINYPROXY_PORT|TINYPROXY_PORT.*outgoing:", _SCRIPT_TEXT, re.DOTALL), (
+        "TINYPROXY_PORT still in SearXNG settings.yml outgoing proxy seed"
+    )
+    # Also: the seeded-file echo must not say TINYPROXY_PORT.
+    assert "proxy=$BRIDGE_IP:$TINYPROXY_PORT" not in _SCRIPT_TEXT, (
+        "TINYPROXY_PORT still referenced in SearXNG seed echo"
+    )
+
+
+def test_denylist_fast_path_uses_reload_denylist():
+    """The fast-path exit block must gate on RELOAD_DENYLIST, not RELOAD_ALLOWLIST."""
+    # The fast path is: if $RELOAD_DENYLIST; then ... exit 0; fi
+    assert re.search(r"\$RELOAD_DENYLIST.*exit 0", _SCRIPT_TEXT, re.DOTALL), (
+        "Fast-path exit block does not check $RELOAD_DENYLIST"
+    )
+    # And there must be no 'if $RELOAD_ALLOWLIST' remaining in the Squid section.
+    assert "if $RELOAD_ALLOWLIST" not in _SCRIPT_TEXT, (
+        "'if $RELOAD_ALLOWLIST' still present — should be 'if $RELOAD_DENYLIST'"
+    )

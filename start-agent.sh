@@ -23,8 +23,6 @@ set -euo pipefail
 # ── args ──────────────────────────────────────────────────────────────────────
 REBUILD=false
 RESET_CONTAINER=false
-RELOAD_ALLOWLIST=false
-RESEED_ALLOWLIST=false
 RELOAD_DENYLIST=false
 REFRESH_DENYLIST=false
 RESEED_DENYLIST=false
@@ -111,8 +109,12 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --rebuild)           REBUILD=true ;;
     --reset-container)   RESET_CONTAINER=true ;;
-    --reload-allowlist)  RELOAD_ALLOWLIST=true ;;
-    --reseed-allowlist)  RESEED_ALLOWLIST=true; RELOAD_ALLOWLIST=true ;;
+    --reload-denylist)   RELOAD_DENYLIST=true ;;
+    --refresh-denylist)  REFRESH_DENYLIST=true; RELOAD_DENYLIST=true ;;
+    --reseed-denylist)   RESEED_DENYLIST=true; RELOAD_DENYLIST=true ;;
+    --reload-allowlist|--reseed-allowlist)
+      echo "warning: $1 is deprecated; use --reload-denylist / --reseed-denylist instead." >&2
+      ;;
     --reseed-global-claudemd) RESEED_GLOBAL_CLAUDEMD=true ;;
     --memory=*)          CLI_MEMORY="${1#--memory=}" ;;
     --memory)            CLI_MEMORY="${2:?--memory requires a value}"; shift ;;
@@ -218,9 +220,6 @@ CLAUDE_CONFIG_DIR="$HOME/.claude-containers/shared"
 CLAUDE_JSON_FILE="$HOME/.claude-containers/claude.json"
 OPENCODE_CONFIG_DIR="$HOME/.claude-agent/opencode-config"
 OPENCODE_DATA_DIR="$HOME/.claude-agent/opencode-data"
-ALLOWLIST_DIR="$HOME/.claude-agent"
-ALLOWLIST_FILE="$ALLOWLIST_DIR/allowlist.txt"
-TINYPROXY_PORT=8888
 SQUID_PORT=8888
 DENYLIST_DIR="$HOME/.claude-agent"
 DENYLIST_SOURCES_FILE="$DENYLIST_DIR/denylist-sources.txt"
@@ -511,7 +510,7 @@ rm -f "$_TMP_DENYLIST_COUNT"
 # Container + image removal happens AFTER the VM is up so that `docker`
 # actually has something to talk to; deleting the VM itself must happen BEFORE
 # `colima start` so the start-up path recreates a clean VM.
-if $REBUILD && ! $RELOAD_ALLOWLIST; then
+if $REBUILD && ! $RELOAD_DENYLIST; then
   echo
   read -r -p "Also delete and recreate the Colima VM '$COLIMA_PROFILE'? This is NOT reversible. [y/N] " confirm
   if [[ "${confirm:-}" =~ ^[Yy]$ ]]; then
@@ -547,13 +546,13 @@ fi
 # Now that docker is reachable, honor --rebuild / --reset-container by removing
 # containers (and the image, for --rebuild) from the VM's docker runtime.
 # The VM itself was handled earlier (--rebuild only).
-if $REBUILD && ! $RELOAD_ALLOWLIST; then
+if $REBUILD && ! $RELOAD_DENYLIST; then
   remove_containers "--rebuild"
   if docker image inspect "$IMAGE_TAG" &>/dev/null; then
     echo "==> --rebuild: removing image '$IMAGE_TAG'"
     docker image rm "$IMAGE_TAG" >/dev/null
   fi
-elif $RESET_CONTAINER && ! $RELOAD_ALLOWLIST; then
+elif $RESET_CONTAINER && ! $RELOAD_DENYLIST; then
   remove_containers "--reset-container"
   echo "==> --reset-container: image '$IMAGE_TAG' kept intact"
 fi
@@ -593,8 +592,8 @@ echo "==> VM network: bridge=$BRIDGE_IP cidr=$BRIDGE_CIDR host=$HOST_IP"
 # ── user-defined network for inter-container DNS (agent + searxng) ────────────
 # Docker embedded DNS resolves container names only on user-defined networks,
 # not on the default bridge. claude-agent-net provides this without changing
-# tinyproxy's Listen address — VM routing lets containers on this network reach
-# $BRIDGE_IP:$TINYPROXY_PORT through the default bridge interface.
+# Squid's listen address — VM routing lets containers on this network reach
+# $BRIDGE_IP:$SQUID_PORT through the default bridge interface.
 AGENT_NET_CIDR=""
 if $LOCAL_SEARCH_ENABLED; then
   AGENT_NET_CIDR=$(vm_ssh docker network inspect "$AGENT_NET_NAME" -f '{{(index .IPAM.Config 0).Subnet}}' 2>/dev/null | tr -d '\r' || true)
@@ -640,9 +639,9 @@ search:
 
 outgoing:
   proxies:
-    all://: "http://$BRIDGE_IP:$TINYPROXY_PORT"
+    all://: "http://$BRIDGE_IP:$SQUID_PORT"
 SXNG
-    echo "==> Seeded $SEARXNG_SETTINGS_FILE (secret_key generated, proxy=$BRIDGE_IP:$TINYPROXY_PORT)"
+    echo "==> Seeded $SEARXNG_SETTINGS_FILE (secret_key generated, proxy=$BRIDGE_IP:$SQUID_PORT)"
   fi
 fi
 
@@ -685,7 +684,7 @@ vm_put_file "$TMP_WORK/denylist.txt" /etc/squid/denylist.txt
 
 # Enable and (re)start/reload Squid. On fast-reload path use squid -k reconfigure;
 # on first-run use enable+start then restart, surfacing the journal on failure.
-if $RELOAD_ALLOWLIST; then
+if $RELOAD_DENYLIST; then
   vm_sh "sudo squid -k reconfigure 2>/dev/null || sudo systemctl restart squid"
 else
   vm_ssh sudo systemctl enable --now squid >/dev/null 2>&1 || true
@@ -771,10 +770,10 @@ FWEOF
 echo "==> Applying firewall rules in VM"
 colima ssh -p "$COLIMA_PROFILE" -- sudo sh < "$TMP_WORK/firewall-apply.sh"
 
-# ── --reload-allowlist: fast-path exit ───────────────────────────────────────
-if $RELOAD_ALLOWLIST; then
-  entry_count=$(grep -cv -E '^\s*(#|$)' "$ALLOWLIST_FILE" || echo 0)
-  echo "==> Allowlist reloaded ($entry_count entries)"
+# ── --reload-denylist: fast-path exit ────────────────────────────────────────
+if $RELOAD_DENYLIST; then
+  entry_count=$(grep -c '^' "$TMP_WORK/denylist.txt" 2>/dev/null || echo 0)
+  echo "==> Denylist reloaded ($entry_count entries)"
   rm -rf "$TMP_WORK"
   trap - EXIT
   exit 0
@@ -817,7 +816,7 @@ if ! docker image inspect "$IMAGE_TAG" &>/dev/null; then
   # Build uses --network=host so RUN steps share the VM's network namespace
   # and bypass the DOCKER-USER bridge firewall. Without this, apt/curl/npm
   # would hit "no route to host" because the default-deny rule rejects
-  # everything from the bridge CIDR except the tinyproxy allowlist path, and
+  # everything from the bridge CIDR except through Squid, and
   # legacy-builder build ARGs don't reliably forward HTTP_PROXY to every tool
   # (apt, for one, only consults lowercase http_proxy). Runtime containers
   # still attach to the bridge and are firewalled normally.
@@ -1097,8 +1096,8 @@ DOCKER_ENV_ARGS=(
   -e "GIT_AUTHOR_EMAIL=$GIT_USER_EMAIL"
   -e "GIT_COMMITTER_NAME=$GIT_USER_NAME"
   -e "GIT_COMMITTER_EMAIL=$GIT_USER_EMAIL"
-  -e "HTTPS_PROXY=http://$BRIDGE_IP:$TINYPROXY_PORT"
-  -e "HTTP_PROXY=http://$BRIDGE_IP:$TINYPROXY_PORT"
+  -e "HTTPS_PROXY=http://$BRIDGE_IP:$SQUID_PORT"
+  -e "HTTP_PROXY=http://$BRIDGE_IP:$SQUID_PORT"
   -e "NO_PROXY=localhost,127.0.0.1,$BRIDGE_IP,$HOST_IP,searxng"
   -e "NODE_USE_ENV_PROXY=1"
   -e "TMPDIR=/tmp"
@@ -1119,7 +1118,7 @@ esac
 # Force sandbox off — claude-agent.Dockerfile omits the sandbox deps
 # (CAP_SYS_ADMIN would weaken the VM boundary, see Dockerfile header), but
 # Claude Code reads settings before checking deps and would error out. The
-# VM-level tinyproxy + iptables chain is the real security boundary here.
+# VM-level Squid + iptables chain is the real security boundary here.
 #
 # Runs before the existing-container fast path so re-attaches to containers
 # created prior to the bwrap-removal also pick up the migration. The settings
