@@ -11,13 +11,14 @@ Outputs: eval/source-bias/baseline-<slug>.json and per-lever variant JSONs,
 written to /sessions/source-bias-eval/ (bound to ~/.research/sessions/).
 
 Usage:
-    python eval/source-bias/capture.py [--variants VAR,...] [--query-slugs q3,q5]
+    python eval/source-bias/capture.py [--variants VAR,...] [--query-slugs q3,creatine]
 
     --variants: comma-separated list from {baseline,scholarly-tilt,anti-seo,
-                science-categories,pages-2,pages-3,with-priors}
+                science-categories,scholarly-plus-categories,pages-2,pages-3,
+                with-priors,full-combo}
                 default: all
     --query-slugs: comma-separated subset of fixture query slugs
-                   default: q3,finance,general
+                   default: q3,csat,knee-lay,creatine,clin-mod,finance-team
 """
 import argparse
 import json
@@ -32,7 +33,17 @@ from lib import pipeline as _pipeline
 from lib import search as _search
 
 # ---------------------------------------------------------------------------
-# Fixture queries for the three representative cases.
+# Fixture queries: 3 kinds × 2 queries. Chosen so the lever sweep covers
+# both the ceiling case (academic phrasing → baseline already at the
+# science/editorial ceiling) and the stress cases where SEO/marketing
+# surface dominates and the levers have something to push against.
+#   - academic:    q3, csat               (ceiling reference)
+#   - consumer:    knee-lay, creatine     (health + product SEO/affiliate)
+#   - operational: clin-mod, finance-team (policy/business; sparse .gov +
+#                                          professional sources buried under
+#                                          consultant blogs and LinkedIn)
+# q3 ↔ knee-lay are the same topic in academic vs lay phrasing, so phrasing
+# alone is isolatable as a confound.
 # ---------------------------------------------------------------------------
 
 FIXTURE_QUERIES = {
@@ -42,12 +53,23 @@ FIXTURE_QUERIES = {
         "bike-fit and biomechanical factors contribute to each, and what clinical features "
         "would help distinguish between them?"
     ),
-    "finance": (
-        "What are the macroeconomic effects of persistent US fiscal deficits on "
-        "long-run real interest rates and dollar reserve-currency status?"
+    "csat": (
+        "Are there validated research methodologies for measuring customer satisfaction, "
+        "and what do they measure?"
     ),
-    "general": (
-        "How do cities measure and reduce urban heat island effects?"
+    "knee-lay": (
+        "what's the best treatment for knee pain from cycling"
+    ),
+    "creatine": (
+        "is creatine safe to take long term"
+    ),
+    "clin-mod": (
+        "is it common for contract mods to move money between CLINs on a firm fixed "
+        "price contract"
+    ),
+    "finance-team": (
+        "is it unusual for a 60-person software consulting company to have a 4-person "
+        "finance team"
     ),
 }
 
@@ -166,7 +188,7 @@ def main() -> None:
     parser.add_argument(
         "--query-slugs",
         default=",".join(FIXTURE_QUERIES.keys()),
-        help="comma-separated fixture query slugs (default: q3,finance,general)",
+        help="comma-separated fixture query slugs (default: q3,csat,knee-lay,creatine,clin-mod,finance-team)",
     )
     parser.add_argument(
         "--out-dir",
