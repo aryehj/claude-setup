@@ -1,5 +1,6 @@
 """Static analysis: docker run commands in start-agent.sh must not publish host ports.
-Also verifies --reset-container flag structure invariants and Phase-1 denylist machinery."""
+Also verifies --reset-container flag structure invariants, Phase-1 denylist machinery,
+and Phase-2 Squid-proxy implementation (tinyproxy removed, squid config present)."""
 import re
 import subprocess
 import tempfile
@@ -172,4 +173,44 @@ def test_legacy_guard_exits_on_allowlist(tmp_path):
     combined = result.stdout + result.stderr
     assert "allowlist.txt" in combined, (
         f"Migration message missing 'allowlist.txt'.\nstdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+
+
+# ── Phase 2: Squid proxy replaces tinyproxy ───────────────────────────────────
+
+def test_no_tinyproxy_install():
+    """apt-get install tinyproxy must not appear in live code (only purge is allowed)."""
+    assert not re.search(r"apt-get install\b.*tinyproxy", _SCRIPT_TEXT), (
+        "apt-get install tinyproxy found in start-agent.sh — tinyproxy should only be purged"
+    )
+
+
+def test_no_tinyproxy_enable():
+    """systemctl enable/start/restart tinyproxy must not appear."""
+    assert not re.search(r"systemctl\s+(enable|start|restart)\s+tinyproxy", _SCRIPT_TEXT), (
+        "systemctl enable/start/restart tinyproxy found — should use squid instead"
+    )
+
+
+def test_squid_config_content_present():
+    """The squid.conf heredoc content must be present in start-agent.sh."""
+    assert "http_access allow all" in _SCRIPT_TEXT, (
+        "squid.conf content (http_access allow all) missing from start-agent.sh"
+    )
+    assert "visible_hostname claude-agent-squid" in _SCRIPT_TEXT, (
+        "squid.conf content (visible_hostname) missing from start-agent.sh"
+    )
+
+
+def test_vm_has_hashlimit_defined():
+    """vm_has_hashlimit() must be defined in start-agent.sh."""
+    assert "vm_has_hashlimit()" in _SCRIPT_TEXT, (
+        "vm_has_hashlimit() function not defined in start-agent.sh"
+    )
+
+
+def test_rate_limit_rule_present():
+    """The iptables rate-limit rule must be present in the firewall heredoc."""
+    assert "hashlimit" in _SCRIPT_TEXT or re.search(r"-m limit.*--limit.*\bRETURN\b", _SCRIPT_TEXT), (
+        "No rate-limit iptables rule (hashlimit or -m limit fallback) found in start-agent.sh"
     )
