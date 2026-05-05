@@ -4,7 +4,7 @@
 
 - [x] Phase 1: branch + denylist state machinery
 - [x] Phase 2: replace tinyproxy with Squid in start-agent.sh
-- [ ] Phase 3: rewire CLI flags, legacy guard, container env
+- [x] Phase 3: rewire CLI flags, legacy guard, container env
 - [ ] Phase 4: smoke-verify the loosened path
 <!-- mark [x] as phases complete during implementation. -->
 
