@@ -647,7 +647,7 @@ SXNG
 fi
 
 # ── Squid install in VM (purge tinyproxy if present; idempotent) ─────────────
-if vm_ssh dpkg -s tinyproxy >/dev/null 2>&1; then
+if vm_ssh sh -c 'command -v tinyproxy' >/dev/null 2>&1; then
   echo "==> Removing tinyproxy from Colima VM"
   vm_ssh sudo systemctl disable --now tinyproxy 2>/dev/null || true
   vm_ssh sudo apt-get purge -y tinyproxy
