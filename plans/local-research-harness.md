@@ -7,7 +7,7 @@
 - [x] Phase 3: fetch + extract + per-source notes (sonnet-medium ok)
 - [x] Phase 4: round orchestration (branch proposal, dedupe, per-round digest, termination)
 - [x] Phase 5: source-quality biasing (input-side levers)
-- [ ] Phase 6: SearXNG-config tuning loop (Sonnet-driven)
+- [x] Phase 6: SearXNG-config tuning loop (Sonnet-driven)
 - [ ] Phase 7: hierarchical synthesis + bundle output
 - [ ] Phase 8: interactive CLI with multi-round gates (sonnet-medium ok)
 - [ ] Phase 9: --batch mode + q1–q6 regression eval (Opus recommended)
