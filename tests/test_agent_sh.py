@@ -263,3 +263,44 @@ def test_denylist_fast_path_uses_reload_denylist():
     assert "if $RELOAD_ALLOWLIST" not in _SCRIPT_TEXT, (
         "'if $RELOAD_ALLOWLIST' still present — should be 'if $RELOAD_DENYLIST'"
     )
+
+
+# ── Phase 6: SearXNG-tuning bind-mounts ──────────────────────────────────────
+
+def _claude_agent_run_block() -> str:
+    block = next((b for b in _BLOCKS if "IMAGE_TAG" in b), None)
+    assert block is not None, "claude-agent docker run block not found"
+    return block
+
+
+def test_phase6_searxng_dir_mount_present():
+    """The agent docker run must bind-mount $SEARXNG_DIR rw under $LOCAL_SEARCH_ENABLED."""
+    assert 'PHASE6_MOUNT_ARGS' in _SCRIPT_TEXT, "PHASE6_MOUNT_ARGS missing"
+    assert '"$SEARXNG_DIR:/host/searxng"' in _SCRIPT_TEXT, (
+        "SearXNG settings dir bind-mount missing"
+    )
+    block = _claude_agent_run_block()
+    assert "PHASE6_MOUNT_ARGS" in block, (
+        "PHASE6_MOUNT_ARGS not expanded in claude-agent docker run block:\n" + block
+    )
+
+
+def test_phase6_docker_socket_mount_present():
+    """The agent must mount /var/run/docker.sock so it can `docker restart searxng`."""
+    assert '"/var/run/docker.sock:/var/run/docker.sock"' in _SCRIPT_TEXT, (
+        "docker socket bind-mount missing from start-agent.sh"
+    )
+
+
+def test_phase6_mounts_gated_on_local_search():
+    """PHASE6_MOUNT_ARGS must only be set when LOCAL_SEARCH_ENABLED — no docker socket
+    leak in --disable-search mode where there is no searxng to restart anyway."""
+    # The block populating PHASE6_MOUNT_ARGS must be inside an `if $LOCAL_SEARCH_ENABLED`.
+    m = re.search(
+        r"if\s+\$LOCAL_SEARCH_ENABLED;\s*then\s*\n"
+        r"\s*PHASE6_MOUNT_ARGS=\(",
+        _SCRIPT_TEXT,
+    )
+    assert m is not None, (
+        "PHASE6_MOUNT_ARGS assignment not gated on $LOCAL_SEARCH_ENABLED"
+    )

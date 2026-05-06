@@ -1198,6 +1198,19 @@ if $LOCAL_SEARCH_ENABLED; then
   NETWORK_ARGS=(--network "$AGENT_NET_NAME")
 fi
 
+# Phase 6 SearXNG-tuning support: when local search is on, expose the SearXNG
+# settings dir rw and the docker socket so the agent can edit settings.yml and
+# `docker restart searxng` directly. Throwaway capability (this is a one-time
+# tuning loop), but the mount is cheap to keep around. Skipped under
+# --disable-search since there's nothing to tune.
+PHASE6_MOUNT_ARGS=()
+if $LOCAL_SEARCH_ENABLED; then
+  PHASE6_MOUNT_ARGS=(
+    -v "$SEARXNG_DIR:/host/searxng"
+    -v "/var/run/docker.sock:/var/run/docker.sock"
+  )
+fi
+
 echo "==> Creating container '$CONTAINER_NAME'"
 echo "    project : $PROJECT_DIR  →  $PROJECT_DIR"
 echo "    proxy   : http://$BRIDGE_IP:$SQUID_PORT  (denylist: $DENYLIST_SOURCES_FILE)"
@@ -1218,6 +1231,7 @@ exec docker run \
   -v "$CLAUDE_JSON_FILE:/root/.claude.json" \
   -v "$OPENCODE_CONFIG_DIR:/root/.config/opencode" \
   -v "$OPENCODE_DATA_DIR:/root/.local/share/opencode" \
+  ${PHASE6_MOUNT_ARGS[@]+"${PHASE6_MOUNT_ARGS[@]}"} \
   -w "$PROJECT_DIR" \
   "${DOCKER_ENV_ARGS[@]}" \
   "$IMAGE_TAG" \

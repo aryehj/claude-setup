@@ -4,10 +4,6 @@
 # Usage:
 #   ./tests/local-research/bootstrap.sh "my query"
 #   ./tests/local-research/bootstrap.sh --smoke
-#   ./tests/local-research/bootstrap.sh --score-searxng [--settings-file PATH]
-#
-# To run the SearXNG-config tuning loop (Phase 6), run on the host directly:
-#   OMLX_API_KEY=... ./tests/local-research/eval/searxng_config/run_loop.py
 #
 # Requires: colima "research" profile running with research-searxng and research-net.
 # If not running, start it with: ./research.py --backend=omlx
@@ -93,10 +89,6 @@ elif [ "${1:-}" = "--capture" ]; then
 elif [ "${1:-}" = "--compare" ]; then
     shift
     CMD=("python" "eval/source-bias/compare.py" "$@")
-    TTY_FLAGS=""
-elif [ "${1:-}" = "--score-searxng" ]; then
-    shift
-    CMD=("python" "-m" "eval.searxng_config.score" "$@")
     TTY_FLAGS=""
 else
     CMD=("python" "-m" "lib.cli" "$@")

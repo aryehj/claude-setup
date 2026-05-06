@@ -26,6 +26,21 @@ RUN apt-get update -qq \
  && rm -rf /var/lib/apt/lists/* \
  && touch /var/lib/apt/last-upgrade
 
+# ── docker CLI (client only) ─────────────────────────────────────────────────
+# Static binary from docker.com — ~70 MB instead of ~250 MB for the
+# debian-packaged docker.io which drags in the daemon. The daemon lives on the
+# Colima VM; this client talks to it via the mounted /var/run/docker.sock.
+# Used by the Phase 6 SearXNG-tuning loop (`docker restart searxng` from
+# inside the agent container).
+ARG DOCKER_CLI_VERSION=27.3.1
+RUN arch="$(uname -m)" \
+ && case "$arch" in x86_64) docker_arch=x86_64 ;; aarch64) docker_arch=aarch64 ;; *) echo "unsupported arch $arch" >&2; exit 1 ;; esac \
+ && curl -fsSL "https://download.docker.com/linux/static/stable/${docker_arch}/docker-${DOCKER_CLI_VERSION}.tgz" \
+      -o /tmp/docker.tgz \
+ && tar -xzf /tmp/docker.tgz -C /tmp \
+ && install -m 0755 /tmp/docker/docker /usr/local/bin/docker \
+ && rm -rf /tmp/docker /tmp/docker.tgz
+
 # ── apt staleness warning (fires on every shell attach) ──────────────────────
 RUN cat >> /etc/bash.bashrc <<'BASHRC'
 if [[ -f /var/lib/apt/last-upgrade ]]; then

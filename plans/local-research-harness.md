@@ -7,7 +7,7 @@
 - [x] Phase 3: fetch + extract + per-source notes (sonnet-medium ok)
 - [x] Phase 4: round orchestration (branch proposal, dedupe, per-round digest, termination)
 - [x] Phase 5: source-quality biasing (input-side levers)
-- [x] Phase 6: SearXNG-config tuning loop (Sonnet-driven)
+- [~] Phase 6: SearXNG-config tuning loop (agent-as-loop) — harness + pre-run defaults landed; step 4 (run the loop) not yet done
 - [ ] Phase 7: hierarchical synthesis + bundle output
 - [ ] Phase 8: interactive CLI with multi-round gates (sonnet-medium ok)
 - [ ] Phase 9: --batch mode + q1–q6 regression eval (Opus recommended)
@@ -195,9 +195,11 @@ This phase tunes what enters the funnel before rerank, so rerank and synthesis a
 
 ## Phase 6: SearXNG-config tuning loop (Sonnet-driven)
 
-This phase tunes SearXNG's `settings.yml` itself — the layer Phase 5 left untouched. Phase 5's wins live in the runner (Python code, call-site args, post-result domain priors); this phase's wins live in `render_searxng_settings()` at `research.py:428`. Same rubric as Phase 5 (`{science, editorial-considered, seo-fluff, listicle, marketing, other}`); same fixture queries; same input/output shape into the rest of the pipeline. The variable is `settings.yml`, and only `settings.yml`. Phase 5's chosen defaults are held constant so the marginal effect of SearXNG-side tuning is isolable.
+This phase tunes SearXNG's `settings.yml` itself — the layer Phase 5 left untouched. Phase 5's wins live in the runner (Python code, call-site args, post-result domain priors); this phase's wins live in `start-agent.sh`'s `SEARXNG_SETTINGS_FILE` heredoc (line ~616) — that's the SearXNG instance the agent has docker access to. After the loop converges, port the same engine list / weights / plugin selection to `render_searxng_settings()` at `research.py:428` so Phase 7+ inherits the win on the research VM too. Same rubric as Phase 5 (`{science, editorial-considered, seo-fluff, listicle, marketing, other}`); same fixture queries; same input/output shape into the rest of the pipeline. The variable is `settings.yml`, and only `settings.yml`. Phase 5's chosen defaults are held constant so the marginal effect of SearXNG-side tuning is isolable.
 
-Methodology, by user request: a single Sonnet-class session drives a ~1 h autonomous mutate-restart-rescore loop, picking the next mutation based on what it has seen so far. The plan provides the search space, the harness, the scoring function, and the stop condition; the Sonnet picks the trajectory.
+**Environment.** The agent runs the loop from inside the `claude-agent` container in the Colima VM. `start-agent.sh` bind-mounts `~/.claude-agent/searxng/` rw at `/host/searxng/` and exposes `/var/run/docker.sock`, so the agent can write `settings.yml` and `docker restart searxng` directly. Searches go to `http://searxng:8080` (the same VM-local SearXNG). No `research-runner`, no `bootstrap.sh --score-searxng` round-trip — the harness runs in-place.
+
+Methodology, by user request: **the model executing this step is itself the loop.** No `run_loop.py`, no driver script, no in-Python `while True` calling an LLM API. The agent reads `iterations.jsonl` with Read, picks the next mutation, writes `settings.yml` with Write, runs the scorer with Bash, reads the new score, decides keep/revert, and repeats — turn by turn — for ~1 h. The environment is set up specifically to make this work: liberal egress, dedicated SearXNG, no permission prompts on the relevant tool calls. The plan provides the search space, the harness, the scoring function, and the stop condition; the agent picks the trajectory using its own judgment, one Bash/Edit/Read turn per iteration.
 
 End goal: best mechanical floor on candidate-set quality from SearXNG alone, so the LLM (Phase 7's synthesizer) and the human (interactive review in Phase 8) see fewer marketing pillars, ad pages, listicles, and SEO fluff and more science / considered editorial.
 
@@ -214,29 +216,45 @@ End goal: best mechanical floor on candidate-set quality from SearXNG alone, so 
    - **Per-engine `categories` overrides.** Reassign engines so the `science` category surfaces only science-tilt engines; the `general` category remains the SEO-heavy mix. This sharpens Phase 5's Lever C (per-expansion category routing).
    - **Per-engine `timeout`.** Slow but quality engines (semantic-scholar) get dropped on default timeout (~3s). Bumping to ~10s brings them into the merged result set.
 
-3. **Add the iteration harness.** `tests/local-research/eval/searxng-config/iterate.py`:
-   - Takes a `settings.yml` candidate, writes it to `~/.research/searxng/settings.yml`, restarts `research-searxng` (`docker restart research-searxng`; poll `?q=test&format=json` until 200).
-   - Runs `gather_sources` on the 3 fixture queries with Phase 5 defaults, captures raw + ranked.
-   - Auto-labels with the Phase 5 rubric: a regex/host pre-label list first (`arxiv.org → science`, `*.gov → editorial-considered`, `/best-` substring → `listicle`, …), then the `NOTES_MODEL` LLM judge for unlabeled rows, with a fixed prompt asking for exactly one of the six labels and a one-line justification.
-   - Computes the score: `(science + editorial-considered) − (seo-fluff + listicle + marketing)` summed across the 3 queries' ranked top-15 (45 results total). Higher is better. Records score, full label distribution, top-5 first-page diff vs baseline, and a SHA of the `settings.yml` it ran.
-   - Appends a row to `tests/local-research/eval/searxng-config/iterations.jsonl` with `{ts, settings_sha, axis_touched, mutation_summary, rationale, score, label_dist_per_query, kept_or_reverted}`.
+3. **Add the iteration harness.** `tests/local-research/eval/searxng_config/iterate.py` — a small (~70 line) stdlib-only Python script. Deliberately scorer-less and pipeline-less — the agent driving the loop is the judge, and we want to expose **what SearXNG itself returns**, not what Phase 5's expand+rerank+priors stack returns (the pipeline would mask the very signal we're tuning).
+   - **Restart + poll.** When invoked with `--restart`, calls `docker restart searxng` and polls `http://searxng:8080/search?q=test&format=json` until 200 (60s deadline).
+   - **Capture.** Hits `http://searxng:8080/search?q=<fixture>&format=json` directly for each of the 3 fixture queries (q3 medical, creatine, finance-team) with no expansion / rerank / priors layered on; records the top-N raw results (`--top-n`, default 15: `url`, `title`, `content` snippet, `engines`).
+   - **Append.** Writes a row to `tests/local-research/eval/searxng_config/iterations.jsonl` with `{iter, ts, settings_sha, top_n, axis_touched, mutation_summary, rationale, kept_or_reverted, top_ranked_per_query}`. `axis_touched` and `mutation_summary` are passed in via flags so the agent can record what it just changed; `rationale` and `kept_or_reverted` are left blank by the harness and patched in by the agent's same-turn `Edit`. Any constrained-field drift the agent might inadvertently introduce (`secret_key`, `base_url`, `outgoing.proxies`) is the agent's responsibility to avoid — there's no programmatic guard, but the heredoc seed in `start-agent.sh` is the easy reset.
+   - **No labels, no score number, no LLM judge, no pipeline import.** Drop them all. `iterate.py` is stdlib-only (`json`, `urllib.request`, `subprocess`, `pathlib`, `argparse`, `datetime`, `hashlib`, `time`). Throwaway harness; what survives this phase is the winning `settings.yml` content (ported into `start-agent.sh` and `research.py`) and `RESULTS.md`.
 
-4. **Run the Sonnet loop.** A Sonnet-class session drives ~1 h of iteration:
-   - Each turn: read `iterations.jsonl`, pick the next mutation (start broad — engine list, weights — then narrow to plugin lists / timeouts), write the new `settings.yml`, call the harness, read the new score and label distribution, decide keep / revert / branch.
-   - Discipline: change one axis per iteration. If two changes look orthogonal, run them serially before stacking. Each row's `rationale` field is one sentence — short reasoning the next iteration's reader can audit.
-   - Stop conditions, whichever fires first: wall-clock ≥ 60 min, OR no improvement across 5 consecutive iterations, OR score within 5% of rolling-best for 10 iterations. Record stop reason on the final row.
-   - Constraint: leave infrastructure fields alone (`secret_key`, `base_url`, `outgoing.proxies` block); the loop touches only `engines:`, `enabled_plugins:`, `disabled_plugins:`, `hostnames:`, `search:`, and per-engine entries. The harness rejects diffs that touch the constrained fields.
-   - Container restart latency dominates wall-clock; if the loop runs out of budget on engine-list churn alone, defer plugin/timeout axes to a follow-up rather than truncate mid-axis.
+4. **Be the loop.** *You — the model executing this step — are the iteration driver.* Do not write a script that drives the loop; do not delegate to omlx, ollama, or any in-process LLM call; do not hand a "run this" command back to the user. The user has explicitly opted out of the loop. Run it yourself, agent-turn by agent-turn, until a stop condition fires.
 
-5. **Commit the winning config in place.** Update `render_searxng_settings()` at `research.py:428` to emit the winning `settings.yml`. Match the existing Python-string template style; do not introduce a separate config file. No flag for "old SearXNG config" — matches the project's no-compat-shims commit style. Downstream phases inherit the new defaults.
+   Per-turn protocol (one model turn = one iteration):
+   - **Read** `tests/local-research/eval/searxng_config/iterations.jsonl` (and the current `/host/searxng/settings.yml`) to recover prior trajectory. Skim the previous row's `top_ranked_per_query` lists; that's the evidence base.
+   - **Decide** the next mutation. One axis per iteration. Start broad — engine list, per-engine `weight` — then narrow to `hostnames`, plugin lists, `search.safe_search`, per-engine `timeout`. If two changes look orthogonal, run them serially before stacking, so the row-level marginal effect is interpretable later.
+   - **Write** the new `settings.yml` to `/host/searxng/settings.yml` with Write or Edit.
+   - **Run** the harness with Bash: `python3 tests/local-research/eval/searxng_config/iterate.py --restart --top-n 15 --axis-touched <axis> --mutation-summary "<one line>"`. The harness restarts `searxng`, polls until ready, runs the 3 fixture queries, and appends a fresh row to `iterations.jsonl`. (Restart latency, ~10–20 s, dominates wall-clock — that's the per-iteration floor.)
+   - **Judge** the appended row directly. Read the new `top_ranked_per_query` lists; compare against the prior row's lists and the running trajectory. There's no auto-score — the agent forms the verdict.
+   - **Patch** the row in-place (Edit) to set `rationale` (one sentence audit-quality reasoning) and `kept_or_reverted`. If reverted, restore the prior `settings.yml` before the next turn.
 
-6. **Write the explanation.** `tests/local-research/eval/searxng-config/RESULTS.md`:
-   - Score trajectory across iterations (terse table or sparkline).
-   - Per-axis marginal effect (which axis moved score the most).
-   - Top-N kept knobs, with one-sentence rationale per knob.
-   - Per-query before/after label distributions.
-   - Cases where the LLM judge was consistently wrong (and so were re-labeled by hand) — signals a regex pre-label rule should be added.
-   - Anything surprising — mutations that the Sonnet expected to help and didn't, or vice versa.
+   Discipline:
+   - Each `rationale` is one sentence the next iteration's reader can audit. Short, specific, mechanical (e.g., "added `pubmed`; q3 top-5 now shows two PubMed cohort studies that weren't in the prior row, kept").
+   - Constrained fields the harness rejects: `secret_key`, `base_url`, `outgoing.proxies` block. The loop touches only `engines:`, `enabled_plugins:`, `disabled_plugins:`, `hostnames:`, `search:`, and per-engine entries.
+   - If the loop runs out of budget on engine-list churn alone, defer plugin/timeout axes to a follow-up rather than truncate mid-axis.
+
+   Stop conditions, whichever fires first — record the reason on the final row's `stop_reason` field, then stop:
+   - wall-clock ≥ 60 min from the first iteration of the session,
+   - 5 consecutive iterations the agent judges as no-improvement (each `kept_or_reverted: reverted` or `kept` with rationale "no meaningful change"),
+   - the agent declares the search saturated for the chosen axes and explicitly stops.
+
+   Operational notes for the executing agent:
+   - Use `/loop` dynamic mode or just stay in the conversation and chain turns directly — either works; pick whichever keeps the per-turn context tight.
+   - Do not summarize each turn back to the user. The audit trail lives in `iterations.jsonl`. A single end-of-loop summary referencing row IDs is enough.
+   - If the harness hangs or returns malformed output, fix the underlying issue (or revert the offending settings.yml) — do not paper over with retries that pollute the iteration record.
+
+5. **Commit the winning config in place.** Update the `SXNG` heredoc inside the `LOCAL_SEARCH_ENABLED` block of `start-agent.sh` (line ~616 — the `cat > "$SEARXNG_SETTINGS_FILE"` block) so future `start-agent.sh` runs seed the winning config on first launch. Then port the same engine list / weights / plugin selection to `render_searxng_settings()` at `research.py:428` so downstream Phase 7+ runs against `research-searxng` inherit the win. Match the existing template style in each file; do not introduce a separate config file. No compat shim for "old SearXNG config" — matches the project's no-compat-shims commit style. The seed runs only on first launch; existing `~/.claude-agent/searxng/settings.yml` files keep whatever the loop converged on.
+
+6. **Write the explanation.** `tests/local-research/eval/searxng_config/RESULTS.md`:
+   - Per-iteration trajectory: ordered list of `(iter, axis_touched, mutation_summary, kept_or_reverted, rationale)`. The `rationale` column is the trajectory; there is no score column.
+   - Per-axis takeaway (which axis the agent kept the most mutations on; which axis converged fastest).
+   - Top-N kept knobs, with one-sentence rationale per knob (drawn from the iteration row that adopted the knob).
+   - Per-query before/after observations: name 2–3 specific URLs that disappeared and 2–3 that appeared, per fixture query.
+   - Anything surprising — mutations that the agent expected to help and didn't, or vice versa.
 
 7. **Write the downstream-orchestration follow-ups.** Append to `RESULTS.md` a section "Implications for Phase 8/9 round orchestration" — guidance for the LLM downstream (branch proposal in Phase 4; round selection in Phase 9; synthesizer prompts in Phase 7). Examples of the *kind* of insight that should land here (don't fabricate these — derive each one from what the iteration actually surfaced, citing iteration row IDs):
    - "arxiv `weight: 3.0` now dominates page 1 for science-tilt queries — branch proposal should issue at least one explicit non-arxiv expansion per round to recover web-of-knowledge citations from secondary literature."
@@ -247,16 +265,16 @@ End goal: best mechanical floor on candidate-set quality from SearXNG alone, so 
 
 ### Acceptance criteria
 
-- A working `settings.yml` lives in `render_searxng_settings()` at `research.py:428`, and the `research-searxng` container starts cleanly with it (`docker logs research-searxng` clean; `?q=test&format=json` returns ≥ 5 results across at least 3 distinct engines).
-- For at least one fixture query, the (science + editorial-considered) share rises by ≥ 20 percentage points and the (seo-fluff + listicle + marketing) share falls by ≥ 20 percentage points vs the Phase 5 baseline. (Lower bar than Phase 5's 30 pp because Phase 5 has already done the input-side work; the SearXNG layer is incremental.)
-- `iterations.jsonl` records ≥ 20 iterations, each with score, label distribution, axis touched, mutation summary, rationale; the final row carries a stop-reason field.
-- `RESULTS.md` exists with: score trajectory, per-axis marginals, top-N kept knobs, per-query before/after label distributions, and ≥ 3 concrete downstream-orchestration follow-ups derived from specific iteration rows (not generic priors).
+- A working `settings.yml` lives in `start-agent.sh`'s `SXNG` heredoc (~line 616), and `searxng` starts cleanly with it (`docker logs searxng` clean; `http://searxng:8080/search?q=test&format=json` returns ≥ 5 results across at least 3 distinct engines). The same config has been ported to `render_searxng_settings()` at `research.py:428`.
+- The agent's end-of-loop summary in `RESULTS.md` calls out at least one fixture query where the kept settings produced a qualitatively better top-15 (e.g., new science/editorial URLs that the prior baseline had missed, or specific SEO/listicle URLs that disappeared), citing the iteration row that drove the win.
+- `iterations.jsonl` records ≥ 20 iterations, each with `top_ranked_per_query`, `axis_touched`, `mutation_summary`, `rationale`, `kept_or_reverted`; the final row carries a `stop_reason` field.
+- `RESULTS.md` exists with: per-iteration trajectory (rationale column), per-axis takeaway, top-N kept knobs, per-query before/after URL observations, and ≥ 3 concrete downstream-orchestration follow-ups derived from specific iteration rows (not generic priors).
 - Cross-VM isolation unchanged: `tests/test-cross-vm-isolation.sh` still passes.
 
 ### Notes
 - Holds Phase 5's chosen defaults constant. If a Phase 6 win conflicts with a Phase 5 default (e.g., `tracker_url_remover` makes the runner-side URL canonicalization redundant), record in `RESULTS.md` as a follow-up; do not retroactively edit Phase 5 in this phase.
-- The LLM auto-label is a noisy proxy. Spot-check ~15 labels per block of 5 iterations; if the judge is consistently wrong on one host class, add it to the regex pre-label list and re-score affected iterations.
-- Iteration record is the audit trail. Treat `iterations.jsonl` as load-bearing — if a future plan revisits SearXNG tuning, it should be able to read this file end-to-end and reconstruct the trajectory.
+- The agent IS the judge. There is no auto-labeler, no score number gating decisions, and no LLM rubric classifier. If a future plan wants a quantitative trajectory chart, derive it post-hoc from the saved `top_ranked_per_query` lists; do not retrofit a scorer into the loop itself.
+- Iteration record is the audit trail. Treat `iterations.jsonl` as load-bearing — if a future plan revisits SearXNG tuning, it should be able to read this file end-to-end and reconstruct the trajectory from the agent's prose rationales + the raw URL lists.
 - Out of scope: trained relevance classifier, click-through priors, per-engine API key acquisition, SearXNG core code changes, adding new third-party engines that require pip-installing extra packages into the SearXNG image.
 
 ---
