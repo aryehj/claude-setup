@@ -80,11 +80,14 @@ If the named container already exists, it just starts and re-attaches it.
 - **`--backend=omlx` selects omlx as the local inference server.** MLX-based Apple Silicon inference on port 8000 with API-key auth. See ADR-012.
 - **Shared `~/.claude` state with `start-claude.sh`.** Same `~/.claude-containers/shared/` and `claude.json` mounts; run only one script at a time.
 - **`--rebuild` semantics.** Removes image + container non-interactively; Colima VM deletion requires an extra `y` because it wipes the entire VM runtime.
+- **`--reset-container` semantics.** Removes the container (and SearXNG container) but keeps the image and VM intact; mutually exclusive with `--rebuild`. Use when only container state needs resetting — avoids network egress for a full image rebuild.
 - **`NODE_USE_ENV_PROXY=1` makes Node honor the proxy natively.** Node 24 undici reads `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` when this flag is set — no shim packages needed. See ADR-013.
 - **webfetch allowed, websearch denied by default.** `opencode.json` generated with `permission.webfetch: "allow"` and `permission.websearch: "deny"`; webfetch egress bounded by the tinyproxy allowlist.
 - **SearXNG-backed websearch runs by default.** `searxng` container started alongside `claude-agent`; fans out through tinyproxy via `outgoing.proxies` (SearXNG silently ignores `HTTPS_PROXY`). See ADR-014. Pass `--disable-search` to skip.
 - **`host.docker.internal:host-gateway` set on `docker run`.** Belt-and-suspenders for Colima, where the mapping is not automatic.
 - **`docker build` runs with `--network=host`.** Bypasses the DOCKER-USER REJECT rule that blocks `apt-get update` in build-step containers. See ADR-011.
+- **Sandbox deps omitted from `claude-agent.Dockerfile`; sandbox force-disabled in project settings.** Bubblewrap inside an unprivileged Docker container requires `CAP_SYS_ADMIN`, which would weaken the Colima VM boundary. The VM-level firewall is the real isolation layer. See ADR-033.
+- **`UV_PROJECT_ENVIRONMENT` redirected to `${TMPDIR:-/tmp}/.venv`; `UV_CACHE_DIR` is not.** Unlike `start-claude.sh`, no read-only `/root/.cache` mount is in play — only the macOS-`.venv`-leak problem (ADR-007) requires a redirect here. See ADR-001.
 
 ## research.py key decisions
 

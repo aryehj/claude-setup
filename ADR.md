@@ -1901,3 +1901,65 @@ optional `### Acceptance criteria`) are both valid input.
   has to invent the spec at execution time.
 - `/plan` and `/implement` retain a clean ownership split: `/plan` declares
   outcomes, `/implement` chooses mechanism.
+
+## ADR-033: `claude-agent.Dockerfile` omits Claude Code sandbox deps; Colima VM is the isolation boundary
+
+**Date:** 2026-05-02
+**Status:** Accepted
+
+### Context
+
+`claude-agent.Dockerfile` originally included the Claude Code bubblewrap sandbox
+dependencies (`bubblewrap`, `socat`, `libseccomp2`, `@anthropic-ai/sandbox-runtime`)
+on the assumption that the image should mirror `start-claude.sh`'s environment as
+closely as possible.
+
+In practice, bubblewrap's sandbox cannot run inside an **unprivileged** Docker
+container. `bwrap` uses `CLONE_NEWUSER` (unprivileged user namespaces) on a bare
+Linux host, but Docker's default seccomp/AppArmor profile blocks `CLONE_NEWUSER`
+inside containers. Making bubblewrap work would require `--cap-add=SYS_ADMIN` or
+`--privileged` on the `docker run` call.
+
+`CAP_SYS_ADMIN` is the broadest Linux capability. It enables `mount`/`unmount`,
+namespace creation, many device ioctls, cgroup manipulation, `/proc` writes, and
+several documented container-escape paths (cgroup v1 `release_agent`, bind-mount
+abuse, etc.). Granting it to the container would collapse the trust boundary that
+the Colima VM + tinyproxy + iptables chain is designed to provide.
+
+`start-agent.sh` was already force-disabling `sandbox.enabled` in project settings
+for exactly this reason, so the sandbox deps were dead weight.
+
+### Decision
+
+Remove `bubblewrap`, `socat`, `libseccomp2` from the `apt-get install` layer and
+`@anthropic-ai/sandbox-runtime` from the `npm install -g` layer in
+`dockerfiles/claude-agent.Dockerfile`. Add a header comment documenting the
+omission and the CAP_SYS_ADMIN rationale.
+
+Keep `start-agent.sh`'s project-settings migration that force-sets
+`sandbox.enabled: false`. Claude Code reads settings before checking whether
+sandbox binaries are present and would produce an error if the setting were
+absent and the default attempted to enable sandboxing.
+
+Also align the `UV_CACHE_DIR` redirect: `start-claude.sh` redirects it to
+`${TMPDIR:-/tmp}/uv-cache` to avoid the read-only `/root/.cache` mount that the
+bubblewrap sandbox imposes (ADR-001). That constraint does not exist in
+`claude-agent` (no sandbox, no read-only cache mount), so `UV_CACHE_DIR` is no
+longer redirected in the Dockerfile. `UV_PROJECT_ENVIRONMENT` is still redirected
+to `${TMPDIR:-/tmp}/.venv` because the macOS-binary `.venv` leak problem (ADR-007)
+applies regardless of sandbox state.
+
+### Consequences
+
+- **Image is slightly smaller** (~6–16 MB, dominated by the npm package).
+- **`CAP_SYS_ADMIN` is no longer needed**, preserving the unprivileged-container
+  guarantee. The Colima VM + tinyproxy + iptables chain remains the real isolation
+  boundary.
+- **`UV_CACHE_DIR` defaults to `/root/.cache/uv`** inside the container; this is
+  writable and requires no redirect.
+- **`start-claude.sh` is unaffected.** That script still installs all four
+  sandbox deps and runs with sandbox enabled; the bubblewrap sandbox is the
+  correct isolation mechanism inside an Apple Containers microVM.
+- Any future attempt to re-enable the sandbox in `claude-agent` must address the
+  `CAP_SYS_ADMIN` trade-off explicitly before modifying `start-agent.sh` or
+  the Dockerfile.

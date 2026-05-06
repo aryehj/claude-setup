@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# NOTE: this branch (loose-agent-firewall) loosens the firewall to a denylist; this script tests the legacy allowlist behavior and will fail.
 # test-agent-firewall.sh — validate the start-agent.sh egress allowlist from
 # inside the running claude-agent container.
 #

@@ -4,11 +4,13 @@
 # Sibling to start-claude.sh. Uses one shared Colima VM (profile:
 # claude-agent), one shared docker container (claude-agent), with both the
 # Claude Code and OpenCode CLIs installed. Enforces a VM-level egress
-# allowlist via tinyproxy + iptables DOCKER-USER rules, and routes local
+# denylist via Squid + iptables DOCKER-USER rules (default-allow; composed
+# denylist blocks known ad/tracking/malware domains), and routes local
 # inference to Ollama or omlx running on the macOS host.
 #
 # Usage:
-#   start-agent.sh [--rebuild] [--reload-allowlist]
+#   start-agent.sh [--rebuild] [--reset-container] [--reload-denylist]
+#                  [--refresh-denylist] [--reseed-denylist]
 #                  [--backend=ollama|omlx]
 #                  [--disable-search]
 #                  [--memory=VALUE] [--cpus=N]
@@ -20,8 +22,10 @@ set -euo pipefail
 
 # ── args ──────────────────────────────────────────────────────────────────────
 REBUILD=false
-RELOAD_ALLOWLIST=false
-RESEED_ALLOWLIST=false
+RESET_CONTAINER=false
+RELOAD_DENYLIST=false
+REFRESH_DENYLIST=false
+RESEED_DENYLIST=false
 RESEED_GLOBAL_CLAUDEMD=false
 CLI_MEMORY=""
 CLI_CPUS=""
@@ -44,12 +48,17 @@ USAGE:
 OPTIONS:
   --rebuild              Remove image + container and recreate. With
                          confirmation, also delete and recreate the Colima VM.
-  --reload-allowlist     Regenerate tinyproxy's filter file from
-                         ~/.claude-agent/allowlist.txt and reload tinyproxy.
-                         Fast path; does not restart the container.
-  --reseed-allowlist     Overwrite ~/.claude-agent/allowlist.txt with the
-                         built-in default, then reload. Use after pulling repo
-                         updates that added new entries to the default list.
+  --reset-container      Remove the project container (and SearXNG container)
+                         but keep the image and VM. Cheaper than --rebuild
+                         when you only need to reset container state.
+                         Mutually exclusive with --rebuild.
+  --reload-denylist      Recompose the denylist from local files, push the ACL
+                         to Squid, and run squid -k reconfigure. No network
+                         traffic; does not restart the container. Fast path.
+  --refresh-denylist     Re-fetch upstream denylist feeds, then reload.
+  --reseed-denylist      Overwrite denylist-sources.txt and denylist-additions.txt
+                         from the repo templates. denylist-overrides.txt is
+                         never overwritten. Then reload.
   --reseed-global-claudemd  Overwrite ~/.claude-containers/shared/CLAUDE.md
                          with the repo template (default is seed-if-missing).
   --memory=VALUE         VM memory (e.g. 8, 8G, 8GB). Default: 8 GiB.
@@ -65,13 +74,20 @@ OPTIONS:
   --small-model=MODEL    OpenCode small model for lightweight tasks (small_model).
   -h, --help             Show this help.
 
-ALLOWLIST:
-  Edit  ~/.claude-agent/allowlist.txt  on the macOS host to change which
-  domains the container can reach. One domain per line; '#' for comments;
-  suffix match (github.com covers api.github.com). Apply changes with:
-      start-agent.sh --reload-allowlist
-  To pick up new default entries after a repo pull:
-      start-agent.sh --reseed-allowlist
+DENYLIST:
+  Egress uses a default-allow denylist; the composed denylist is
+  (cached upstream feeds ∪ additions) − overrides. All three files live in
+  ~/.claude-agent/:
+    denylist-sources.txt    — upstream feed URLs (seeded from repo template)
+    denylist-additions.txt  — per-host additions (seeded from repo template)
+    denylist-overrides.txt  — domains to remove from the denylist (never
+                               overwritten by --reseed-denylist)
+  Apply edits with:
+      start-agent.sh --reload-denylist
+  Re-fetch upstream feeds:
+      start-agent.sh --refresh-denylist
+  Pick up template updates after a repo pull:
+      start-agent.sh --reseed-denylist
 
 ENVIRONMENT:
   CLAUDE_AGENT_MEMORY    Default VM memory (overridden by --memory).
@@ -92,8 +108,13 @@ USAGE
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --rebuild)           REBUILD=true ;;
-    --reload-allowlist)  RELOAD_ALLOWLIST=true ;;
-    --reseed-allowlist)  RESEED_ALLOWLIST=true; RELOAD_ALLOWLIST=true ;;
+    --reset-container)   RESET_CONTAINER=true ;;
+    --reload-denylist)   RELOAD_DENYLIST=true ;;
+    --refresh-denylist)  REFRESH_DENYLIST=true; RELOAD_DENYLIST=true ;;
+    --reseed-denylist)   RESEED_DENYLIST=true; RELOAD_DENYLIST=true ;;
+    --reload-allowlist|--reseed-allowlist)
+      echo "warning: $1 is deprecated; use --reload-denylist / --reseed-denylist instead." >&2
+      ;;
     --reseed-global-claudemd) RESEED_GLOBAL_CLAUDEMD=true ;;
     --memory=*)          CLI_MEMORY="${1#--memory=}" ;;
     --memory)            CLI_MEMORY="${2:?--memory requires a value}"; shift ;;
@@ -118,6 +139,13 @@ while [[ $# -gt 0 ]]; do
   esac
   shift
 done
+
+if $RESET_CONTAINER && $REBUILD; then
+  echo "error: --reset-container and --rebuild are mutually exclusive." >&2
+  echo "  --reset-container removes the container but keeps the image (cheap)." >&2
+  echo "  --rebuild removes both the container and image (full rebuild)." >&2
+  exit 1
+fi
 
 PROJECT_DIR="${POSITIONAL[0]:-$(pwd)}"
 PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)"
@@ -192,13 +220,37 @@ CLAUDE_CONFIG_DIR="$HOME/.claude-containers/shared"
 CLAUDE_JSON_FILE="$HOME/.claude-containers/claude.json"
 OPENCODE_CONFIG_DIR="$HOME/.claude-agent/opencode-config"
 OPENCODE_DATA_DIR="$HOME/.claude-agent/opencode-data"
-ALLOWLIST_DIR="$HOME/.claude-agent"
-ALLOWLIST_FILE="$ALLOWLIST_DIR/allowlist.txt"
-TINYPROXY_PORT=8888
+SQUID_PORT=8888
+DENYLIST_DIR="$HOME/.claude-agent"
+DENYLIST_SOURCES_FILE="$DENYLIST_DIR/denylist-sources.txt"
+DENYLIST_ADDITIONS_FILE="$DENYLIST_DIR/denylist-additions.txt"
+DENYLIST_OVERRIDES_FILE="$DENYLIST_DIR/denylist-overrides.txt"
+DENYLIST_CACHE_DIR="$DENYLIST_DIR/denylist-cache"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+TEMPLATE_DENYLIST_SOURCES="$SCRIPT_DIR/templates/research-denylist-sources.txt"
+TEMPLATE_DENYLIST_ADDITIONS="$SCRIPT_DIR/templates/research-denylist-additions.txt"
 SEARXNG_CONTAINER="searxng"
 SEARXNG_DIR="$HOME/.claude-agent/searxng"
 SEARXNG_SETTINGS_FILE="$SEARXNG_DIR/settings.yml"
 AGENT_NET_NAME="claude-agent-net"
+
+# ── legacy allowlist guard ───────────────────────────────────────────────────
+# Installations predating the denylist migration have allowlist.txt in
+# DENYLIST_DIR. Fail loudly so the user migrates rather than silently running
+# with a broken proxy.
+if [[ -f "$DENYLIST_DIR/allowlist.txt" ]] && ! $RELOAD_DENYLIST; then
+  cat >&2 <<LEGACY
+error: $DENYLIST_DIR/allowlist.txt exists — this installation predates the denylist migration.
+
+Manual steps required:
+  1. rm -f $DENYLIST_DIR/allowlist.txt $DENYLIST_DIR/allowlist*.txt
+  2. start-agent.sh --rebuild
+
+The old allowlist.txt is no longer used. Remove it and let
+start-agent.sh recreate state from the current denylist templates.
+LEGACY
+  exit 1
+fi
 
 # ── preflight ────────────────────────────────────────────────────────────────
 if ! command -v colima &>/dev/null; then
@@ -218,319 +270,161 @@ if [[ ! -f "$DOCKERFILE_PATH" ]]; then
   exit 1
 fi
 
-# ── seed allowlist (first run only) ──────────────────────────────────────────
-mkdir -p "$ALLOWLIST_DIR"
-if [[ ! -f "$ALLOWLIST_FILE" ]] || $RESEED_ALLOWLIST; then
-  cat > "$ALLOWLIST_FILE" <<'ALLOWLIST'
-# start-agent allowlist — edit on the macOS host.
-# Apply changes:  start-agent.sh --reload-allowlist
-# Suffix match:   'github.com' also matches 'api.github.com'.
-# Comments start with '#'.
+# ── denylist helpers ─────────────────────────────────────────────────────────
 
-# === Anthropic / AI coding agents ===
-anthropic.com
-claude.ai
-claude.com
-opencode.ai
+seed_denylist_files() {
+  local force="${1:-false}"
+  mkdir -p "$DENYLIST_DIR" "$DENYLIST_CACHE_DIR"
 
-# === Source control & code hosting ===
-# Read-only hosts only. github.com / gitlab.com / bitbucket.org are
-# intentionally omitted because the HTTP-proxy allowlist can't distinguish
-# reads from writes (PRs, pushes, issue comments). Tarball/raw fetches go
-# through codeload/githubusercontent. If you need `gh` or HTTPS push from
-# inside the container, add the write host explicitly.
-githubusercontent.com
-githubassets.com
-codeload.github.com
-git-scm.com
-
-# === Package registries ===
-npmjs.org
-npmjs.com
-yarnpkg.com
-nodejs.org
-pypi.org
-pythonhosted.org
-crates.io
-rust-lang.org
-rubygems.org
-ruby-lang.org
-packagist.org
-php.net
-pkg.go.dev
-proxy.golang.org
-golang.org
-go.dev
-hex.pm
-
-# === Container / image registries ===
-# Omitted by default (docker.io / quay.io / ghcr.io) — writes (image push)
-# aren't distinguishable from reads at the proxy. Add back if you pull
-# images from inside the container.
-
-# === OS package repos ===
-debian.org
-ubuntu.com
-deb.nodesource.com
-astral.sh
-
-# === Model & dataset hubs ===
-# huggingface.co omitted — supports model/dataset uploads. Add back if
-# you need HF downloads from inside the container.
-ollama.com
-
-# === General web & reference ===
-wikipedia.org
-wikimedia.org
-wikidata.org
-britannica.com
-mozilla.org
-developer.mozilla.org
-stackoverflow.com
-stackexchange.com
-archive.org
-archive.ph
-archive.today
-
-# === Search engines ===
-google.com
-duckduckgo.com
-bing.com
-search.brave.com
-api.qwant.com
-kagi.com
-# api.github.com — targeted entry for SearXNG's GitHub code-search engine.
-# Does NOT enable github.com web writes (push, PR, issue comments).
-api.github.com
-
-# === Biomedical / life sciences ===
-ncbi.nlm.nih.gov
-nlm.nih.gov
-nih.gov
-europepmc.org
-biorxiv.org
-medrxiv.org
-chemrxiv.org
-eartharxiv.org
-plos.org
-frontiersin.org
-mdpi.com
-biomedcentral.com
-elifesciences.org
-nature.com
-cell.com
-science.org
-sciencemag.org
-mayoclinic.org
-medlineplus.gov
-nice.org.uk
-
-# === Physical sciences, engineering, math, CS ===
-arxiv.org
-semanticscholar.org
-openalex.org
-dimensions.ai
-oa.mg
-core.ac.uk
-base-search.net
-doaj.org
-dblp.org
-acm.org
-ieee.org
-aps.org
-aip.org
-acs.org
-rsc.org
-iop.org
-ams.org
-pnas.org
-royalsocietypublishing.org
-jamanetwork.com
-nejm.org
-bmj.com
-thelancet.com
-paperswithcode.com
-openreview.net
-distill.pub
-
-# === Social sciences, humanities, general journals ===
-jstor.org
-ssrn.com
-crossref.org
-doi.org
-orcid.org
-sciencedirect.com
-springer.com
-link.springer.com
-springernature.com
-wiley.com
-onlinelibrary.wiley.com
-tandfonline.com
-sagepub.com
-cambridge.org
-oup.com
-muse.jhu.edu
-
-# === Data repositories & open science ===
-# Omitted by default — zenodo/figshare/osf/dataverse/datadryad/kaggle all
-# support authenticated uploads. Add back per-host if you need reads.
-
-# === Government / statistical / standards ===
-nasa.gov
-cdc.gov
-fda.gov
-nsf.gov
-census.gov
-noaa.gov
-usgs.gov
-bls.gov
-bea.gov
-loc.gov
-gov.uk
-who.int
-europa.eu
-sec.gov
-supremecourt.gov
-federalregister.gov
-congress.gov
-uscourts.gov
-govinfo.gov
-cfpb.gov
-ftc.gov
-gao.gov
-usda.gov
-epa.gov
-data.gov
-clinicaltrials.gov
-icpsr.umich.edu
-federalreserve.gov
-fred.stlouisfed.org
-worldbank.org
-imf.org
-oecd.org
-un.org
-unicef.org
-wto.org
-
-# === News & periodicals for research context ===
-nytimes.com
-economist.com
-ft.com
-reuters.com
-apnews.com
-bbc.com
-bbc.co.uk
-washingtonpost.com
-theatlantic.com
-newyorker.com
-theguardian.com
-wsj.com
-bloomberg.com
-npr.org
-politico.com
-propublica.org
-
-# === Science publications & magazines ===
-quantamagazine.org
-scientificamerican.com
-technologyreview.com
-arstechnica.com
-wired.com
-newscientist.com
-nautil.us
-aeon.co
-
-# === Community & discussion ===
-reddit.com
-news.ycombinator.com
-lesswrong.com
-lobste.rs
-metafilter.com
-slashdot.org
-
-# === Software & language docs ===
-readthedocs.io
-readthedocs.org
-hexdocs.pm
-elixir-lang.org
-kotlinlang.org
-scala-lang.org
-clojure.org
-haskell.org
-kubernetes.io
-docs.docker.com
-docs.kernel.org
-man7.org
-gnu.org
-devdocs.io
-
-# === Standards & specs ===
-w3.org
-whatwg.org
-ietf.org
-rfc-editor.org
-iso.org
-unicode.org
-schema.org
-ecma-international.org
-khronos.org
-
-# === Legal & regulatory ===
-courtlistener.com
-law.cornell.edu
-justia.com
-oyez.org
-
-# === Major universities ===
-# Starter set; add institutions to ~/.claude-agent/allowlist.txt as needed.
-mit.edu
-stanford.edu
-harvard.edu
-berkeley.edu
-princeton.edu
-yale.edu
-columbia.edu
-cmu.edu
-caltech.edu
-uchicago.edu
-cornell.edu
-upenn.edu
-northwestern.edu
-ucla.edu
-umich.edu
-ox.ac.uk
-cam.ac.uk
-ucl.ac.uk
-lse.ac.uk
-imperial.ac.uk
-ed.ac.uk
-ethz.ch
-epfl.ch
-mpg.de
-utoronto.ca
-ALLOWLIST
-  if $RESEED_ALLOWLIST; then
-    echo "==> Reseeded allowlist at $ALLOWLIST_FILE"
-  else
-    echo "==> Seeded allowlist at $ALLOWLIST_FILE"
+  if [[ ! -f "$DENYLIST_SOURCES_FILE" ]] || [[ "$force" == "true" ]]; then
+    if [[ ! -f "$TEMPLATE_DENYLIST_SOURCES" ]]; then
+      echo "error: denylist sources template not found: $TEMPLATE_DENYLIST_SOURCES" >&2
+      exit 1
+    fi
+    cp "$TEMPLATE_DENYLIST_SOURCES" "$DENYLIST_SOURCES_FILE"
+    if [[ "$force" == "true" ]]; then
+      echo "==> Reseeded denylist sources at $DENYLIST_SOURCES_FILE"
+    else
+      echo "==> Seeded denylist sources at $DENYLIST_SOURCES_FILE"
+    fi
   fi
-fi
 
-# Generate a tinyproxy filter file on the host from the allowlist.
-# Each non-comment domain becomes an anchored regex: (^|\.)domain\.tld$
-# which matches the domain itself and any subdomain.
-generate_filter_file() {
+  if [[ ! -f "$DENYLIST_ADDITIONS_FILE" ]] || [[ "$force" == "true" ]]; then
+    if [[ ! -f "$TEMPLATE_DENYLIST_ADDITIONS" ]]; then
+      echo "error: denylist additions template not found: $TEMPLATE_DENYLIST_ADDITIONS" >&2
+      exit 1
+    fi
+    cp "$TEMPLATE_DENYLIST_ADDITIONS" "$DENYLIST_ADDITIONS_FILE"
+    if [[ "$force" == "true" ]]; then
+      echo "==> Reseeded denylist additions at $DENYLIST_ADDITIONS_FILE"
+    else
+      echo "==> Seeded denylist additions at $DENYLIST_ADDITIONS_FILE"
+    fi
+  fi
+
+  if [[ ! -f "$DENYLIST_OVERRIDES_FILE" ]]; then
+    cat > "$DENYLIST_OVERRIDES_FILE" <<'OVERRIDES'
+# start-agent.sh denylist overrides — entries here are removed from the
+# final filter. Use this to undo a false positive pulled in by an
+# upstream feed. One domain per line; '#' for comments.
+OVERRIDES
+  fi
+}
+
+prune_orphan_cache_files() {
+  [[ -d "$DENYLIST_CACHE_DIR" ]] || return 0
+  python3 - "$DENYLIST_SOURCES_FILE" "$DENYLIST_CACHE_DIR" <<'PYEOF'
+import sys
+from pathlib import Path
+sources_file = Path(sys.argv[1])
+cache_dir = Path(sys.argv[2])
+urls = []
+if sources_file.exists():
+    for raw in sources_file.read_text().splitlines():
+        url = raw.split("#", 1)[0].strip()
+        if url:
+            urls.append(url)
+expected = {(url.rsplit("/", 1)[-1] or "feed.txt") for url in urls}
+for cached in sorted(cache_dir.glob("*.txt")):
+    if cached.name not in expected:
+        cached.unlink()
+        print(f"==> Pruned orphan cache file: {cached.name}")
+PYEOF
+}
+
+refresh_denylist_cache() {
+  local abort_on_any_failure="${1:-false}"
+  mkdir -p "$DENYLIST_CACHE_DIR"
+  prune_orphan_cache_files
+
+  if [[ ! -f "$DENYLIST_SOURCES_FILE" ]]; then
+    echo "==> No upstream denylist sources configured at $DENYLIST_SOURCES_FILE"
+    return 0
+  fi
+
+  local failures=0 total=0
+  while IFS= read -r url; do
+    url="$(printf '%s' "$url" | sed 's/[[:space:]]//g')"
+    [[ -z "$url" ]] && continue
+    total=$((total + 1))
+    local basename="${url##*/}"
+    [[ -z "$basename" ]] && basename="feed.txt"
+    local dest="$DENYLIST_CACHE_DIR/$basename"
+    local tmp="$dest.tmp"
+    echo "==> Fetching $url"
+    if curl -fsSL --max-time 60 -H "User-Agent: start-agent.sh/denylist" "$url" -o "$tmp" 2>/dev/null; then
+      mv "$tmp" "$dest"
+    else
+      rm -f "$tmp"
+      echo "warning: failed to fetch $url" >&2
+      failures=$((failures + 1))
+    fi
+  done < <(grep -v '^[[:space:]]*#' "$DENYLIST_SOURCES_FILE" | grep -v '^[[:space:]]*$')
+
+  if [[ $failures -gt 0 ]] && [[ "$abort_on_any_failure" == "true" ]]; then
+    echo "error: first-run denylist bootstrap failed: $failures of $total upstream feeds" >&2
+    echo "       could not be fetched. Check connectivity and re-run with" >&2
+    echo "       --refresh-denylist before the agent VM is brought up." >&2
+    exit 1
+  fi
+}
+
+compose_denylist_to_file() {
   local out="$1"
-  python3 - "$ALLOWLIST_FILE" > "$out" <<'PYEOF'
-import re, sys
-with open(sys.argv[1]) as f:
-    for raw in f:
-        line = raw.split('#', 1)[0].strip()
+  python3 - "$DENYLIST_CACHE_DIR" "$DENYLIST_ADDITIONS_FILE" "$DENYLIST_OVERRIDES_FILE" > "$out" <<'PYEOF'
+import sys
+from pathlib import Path
+
+def read_domain_lines(path):
+    if not path.exists():
+        return []
+    out = []
+    for raw in path.read_text().splitlines():
+        line = raw.split("#", 1)[0].strip()
         if not line:
             continue
-        escaped = re.escape(line)
-        print(f"(^|\\.){escaped}$")
+        parts = line.split()
+        if len(parts) == 2 and parts[0] in ("0.0.0.0", "127.0.0.1"):
+            line = parts[1]
+        elif len(parts) > 1:
+            continue
+        if line.startswith("*."):
+            line = line[2:]
+        out.append(line.lower())
+    return out
+
+def prune_subdomains(domains):
+    domain_set = set(domains)
+    result = []
+    for domain in domains:
+        pos = domain.find(".")
+        covered = False
+        while pos != -1:
+            if domain[pos + 1:] in domain_set:
+                covered = True
+                break
+            pos = domain.find(".", pos + 1)
+        if not covered:
+            result.append(domain)
+    return result
+
+cache_dir = Path(sys.argv[1])
+additions_file = Path(sys.argv[2])
+overrides_file = Path(sys.argv[3])
+domains = set()
+if cache_dir.is_dir():
+    for cached in sorted(cache_dir.glob("*.txt")):
+        domains.update(read_domain_lines(cached))
+domains.update(read_domain_lines(additions_file))
+overrides = set(read_domain_lines(overrides_file))
+domains -= overrides
+pruned = prune_subdomains(sorted(domains))
+for d in pruned:
+    print(f".{d}")
 PYEOF
+  local count
+  count=$(grep -c '^' "$out" 2>/dev/null || echo 0)
+  echo "==> Composed denylist: $count entries"
 }
 
 # ── Colima VM bring-up ───────────────────────────────────────────────────────
@@ -586,11 +480,37 @@ vm_put_file() {
   colima ssh -p "$COLIMA_PROFILE" -- sudo chmod "$mode" "$dest"
 }
 
+remove_containers() {
+  local label="$1"
+  if docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1; then
+    echo "==> $label: removed container '$CONTAINER_NAME'"
+  fi
+  if $LOCAL_SEARCH_ENABLED && docker rm -f "$SEARXNG_CONTAINER" >/dev/null 2>&1; then
+    echo "==> $label: removed container '$SEARXNG_CONTAINER'"
+  fi
+}
+
+# ── seed and bootstrap denylist ──────────────────────────────────────────────
+seed_denylist_files "$RESEED_DENYLIST"
+
+_cache_has_feeds=false
+if find "$DENYLIST_CACHE_DIR" -maxdepth 1 -name "*.txt" 2>/dev/null | grep -q .; then
+  _cache_has_feeds=true
+fi
+
+if ! $_cache_has_feeds || $REFRESH_DENYLIST; then
+  refresh_denylist_cache "$(! $_cache_has_feeds && echo true || echo false)"
+fi
+
+_TMP_DENYLIST_COUNT=$(mktemp)
+compose_denylist_to_file "$_TMP_DENYLIST_COUNT"
+rm -f "$_TMP_DENYLIST_COUNT"
+
 # ── --rebuild: optionally destroy the Colima VM before starting it ───────────
 # Container + image removal happens AFTER the VM is up so that `docker`
 # actually has something to talk to; deleting the VM itself must happen BEFORE
 # `colima start` so the start-up path recreates a clean VM.
-if $REBUILD && ! $RELOAD_ALLOWLIST; then
+if $REBUILD && ! $RELOAD_DENYLIST; then
   echo
   read -r -p "Also delete and recreate the Colima VM '$COLIMA_PROFILE'? This is NOT reversible. [y/N] " confirm
   if [[ "${confirm:-}" =~ ^[Yy]$ ]]; then
@@ -623,21 +543,18 @@ if ! docker context use "colima-$COLIMA_PROFILE" &>/dev/null; then
   echo "warning: could not switch docker context to colima-$COLIMA_PROFILE; assuming current context talks to the right daemon." >&2
 fi
 
-# Now that docker is reachable, honor --rebuild by removing the container and
-# image from the VM's docker runtime. (The VM itself was handled earlier.)
-if $REBUILD && ! $RELOAD_ALLOWLIST; then
-  if docker container inspect "$CONTAINER_NAME" &>/dev/null; then
-    echo "==> --rebuild: removing container '$CONTAINER_NAME'"
-    docker rm -f "$CONTAINER_NAME" >/dev/null
-  fi
-  if $LOCAL_SEARCH_ENABLED && docker container inspect "$SEARXNG_CONTAINER" &>/dev/null; then
-    echo "==> --rebuild: removing container '$SEARXNG_CONTAINER'"
-    docker rm -f "$SEARXNG_CONTAINER" >/dev/null
-  fi
+# Now that docker is reachable, honor --rebuild / --reset-container by removing
+# containers (and the image, for --rebuild) from the VM's docker runtime.
+# The VM itself was handled earlier (--rebuild only).
+if $REBUILD && ! $RELOAD_DENYLIST; then
+  remove_containers "--rebuild"
   if docker image inspect "$IMAGE_TAG" &>/dev/null; then
     echo "==> --rebuild: removing image '$IMAGE_TAG'"
     docker image rm "$IMAGE_TAG" >/dev/null
   fi
+elif $RESET_CONTAINER && ! $RELOAD_DENYLIST; then
+  remove_containers "--reset-container"
+  echo "==> --reset-container: image '$IMAGE_TAG' kept intact"
 fi
 
 # ── discover bridge IP, host IP, bridge CIDR inside the VM ───────────────────
@@ -675,8 +592,8 @@ echo "==> VM network: bridge=$BRIDGE_IP cidr=$BRIDGE_CIDR host=$HOST_IP"
 # ── user-defined network for inter-container DNS (agent + searxng) ────────────
 # Docker embedded DNS resolves container names only on user-defined networks,
 # not on the default bridge. claude-agent-net provides this without changing
-# tinyproxy's Listen address — VM routing lets containers on this network reach
-# $BRIDGE_IP:$TINYPROXY_PORT through the default bridge interface.
+# Squid's listen address — VM routing lets containers on this network reach
+# $BRIDGE_IP:$SQUID_PORT through the default bridge interface.
 AGENT_NET_CIDR=""
 if $LOCAL_SEARCH_ENABLED; then
   AGENT_NET_CIDR=$(vm_ssh docker network inspect "$AGENT_NET_NAME" -f '{{(index .IPAM.Config 0).Subnet}}' 2>/dev/null | tr -d '\r' || true)
@@ -722,61 +639,85 @@ search:
 
 outgoing:
   proxies:
-    all://: "http://$BRIDGE_IP:$TINYPROXY_PORT"
+    all://: "http://$BRIDGE_IP:$SQUID_PORT"
 SXNG
-    echo "==> Seeded $SEARXNG_SETTINGS_FILE (secret_key generated, proxy=$BRIDGE_IP:$TINYPROXY_PORT)"
+    echo "==> Seeded $SEARXNG_SETTINGS_FILE (secret_key generated, proxy=$BRIDGE_IP:$SQUID_PORT)"
   fi
 fi
 
-# ── tinyproxy install in VM (idempotent) ─────────────────────────────────────
-if ! vm_ssh sh -c 'command -v tinyproxy' >/dev/null 2>&1; then
-  echo "==> Installing tinyproxy in Colima VM"
+# ── Squid install in VM (purge tinyproxy if present; idempotent) ─────────────
+if vm_ssh sh -c 'command -v tinyproxy' >/dev/null 2>&1; then
+  echo "==> Removing tinyproxy from Colima VM"
+  vm_ssh sudo systemctl disable --now tinyproxy 2>/dev/null || true
+  vm_ssh sudo apt-get purge -y tinyproxy
+fi
+if ! vm_ssh sh -c 'command -v squid' >/dev/null 2>&1; then
+  echo "==> Installing Squid in Colima VM"
   vm_ssh sudo apt-get update -qq
-  vm_ssh sudo apt-get install -y tinyproxy
+  vm_ssh sudo apt-get install -y squid
+  vm_ssh sudo systemctl stop squid 2>/dev/null || true
 fi
 
-# Build tinyproxy config and filter on the host, then push into the VM.
+# Build Squid config and denylist on the host, then push into the VM.
 TMP_WORK=$(mktemp -d)
 trap 'rm -rf "$TMP_WORK"' EXIT
 
-cat > "$TMP_WORK/tinyproxy.conf" <<CONF
-User tinyproxy
-Group tinyproxy
-Port $TINYPROXY_PORT
-Listen $BRIDGE_IP
-Timeout 600
-DefaultErrorFile "/usr/share/tinyproxy/default.html"
-StatFile "/usr/share/tinyproxy/stats.html"
-LogFile "/var/log/tinyproxy/tinyproxy.log"
-LogLevel Info
-MaxClients 100
-FilterDefaultDeny Yes
-Filter "/etc/tinyproxy/filter"
-FilterExtended Yes
-FilterURLs No
-ConnectPort 443
-ConnectPort 80
+cat > "$TMP_WORK/squid.conf" <<CONF
+http_port $BRIDGE_IP:$SQUID_PORT
+visible_hostname claude-agent-squid
+acl denylist dstdomain "/etc/squid/denylist.txt"
+acl CONNECT method CONNECT
+acl SSL_ports port 443
+acl Safe_ports port 80 443
+http_access deny denylist
+http_access deny CONNECT !SSL_ports
+http_access deny !Safe_ports
+http_access allow all
+access_log /var/log/squid/access.log
+cache deny all
 CONF
 
-generate_filter_file "$TMP_WORK/filter"
+compose_denylist_to_file "$TMP_WORK/denylist.txt"
 
-# Ship both files directly into /etc/tinyproxy/ via `sudo tee` over colima ssh.
-vm_put_file "$TMP_WORK/tinyproxy.conf" /etc/tinyproxy/tinyproxy.conf
-vm_put_file "$TMP_WORK/filter"         /etc/tinyproxy/filter
+vm_put_file "$TMP_WORK/squid.conf" /etc/squid/squid.conf
+vm_put_file "$TMP_WORK/denylist.txt" /etc/squid/denylist.txt
 
-# Enable and (re)start/reload tinyproxy. On first run, enable+start; otherwise
-# reload to pick up filter changes without interrupting in-flight connections.
-if $RELOAD_ALLOWLIST; then
-  vm_ssh sudo systemctl reload tinyproxy 2>/dev/null || vm_ssh sudo systemctl restart tinyproxy
+# Enable and (re)start/reload Squid. On fast-reload path use squid -k reconfigure;
+# on first-run use enable+start then restart, surfacing the journal on failure.
+if $RELOAD_DENYLIST; then
+  vm_sh "sudo squid -k reconfigure 2>/dev/null || sudo systemctl restart squid"
 else
-  vm_ssh sudo systemctl enable --now tinyproxy >/dev/null 2>&1 || true
-  vm_ssh sudo systemctl restart tinyproxy
+  vm_ssh sudo systemctl enable --now squid >/dev/null 2>&1 || true
+  squid_start_out=$(vm_sh \
+    "sudo systemctl restart squid 2>&1; RC=\$?; [ \$RC -ne 0 ] && sudo journalctl -u squid --no-pager -n 30 2>/dev/null || true; exit \$RC" \
+    2>&1) || {
+    echo "error: Squid failed to start:" >&2
+    printf '%s\n' "$squid_start_out" >&2
+    exit 1
+  }
 fi
+
+vm_has_hashlimit() {
+  vm_sh "sudo iptables -m hashlimit --help 2>&1 | grep -q hashlimit-name && echo ok || echo missing" \
+    | grep -q ok
+}
 
 # ── iptables rules in the VM (CLAUDE_AGENT child chain of DOCKER-USER) ───────
 # All rules live in a dedicated CLAUDE_AGENT chain, which DOCKER-USER jumps to
 # for bridge-sourced traffic. This gives atomic flush-and-repopulate without
 # walking line numbers or matching rules by comment text.
+
+if vm_has_hashlimit; then
+  FW_RATE_LIMIT_RULES='# Rate limit: max 30 new connections/sec per source IP (burst 50).
+# Defense-in-depth against bulk exfil; secondary to denylist.
+sudo iptables -A CLAUDE_AGENT -m conntrack --ctstate NEW -m hashlimit --hashlimit-above 30/sec --hashlimit-burst 50 --hashlimit-mode srcip --hashlimit-name agent_newconn -j DROP'
+else
+  echo "warning: xt_hashlimit not available in VM; using coarse '-m limit' fallback." >&2
+  FW_RATE_LIMIT_RULES='# Rate limit fallback (no xt_hashlimit): coarse global cap.
+sudo iptables -A CLAUDE_AGENT -m conntrack --ctstate NEW -m limit --limit 100/sec --limit-burst 150 -j RETURN
+sudo iptables -A CLAUDE_AGENT -m conntrack --ctstate NEW -j DROP'
+fi
+
 cat > "$TMP_WORK/firewall-apply.sh" <<FWEOF
 #!/bin/sh
 set -e
@@ -784,7 +725,7 @@ BRIDGE_IP="$BRIDGE_IP"
 BRIDGE_CIDR="$BRIDGE_CIDR"
 AGENT_NET_CIDR="$AGENT_NET_CIDR"
 HOST_IP="$HOST_IP"
-TINYPROXY_PORT="$TINYPROXY_PORT"
+SQUID_PORT="$SQUID_PORT"
 INFERENCE_PORT="$INFERENCE_PORT"
 LOCAL_SEARCH_ENABLED="$LOCAL_SEARCH_ENABLED"
 
@@ -801,7 +742,7 @@ sudo iptables -C DOCKER-USER -s "\$BRIDGE_CIDR" -j CLAUDE_AGENT 2>/dev/null \
   || sudo iptables -I DOCKER-USER 1 -s "\$BRIDGE_CIDR" -j CLAUDE_AGENT
 
 # Also jump for user-defined agent network traffic. Note: claude-agent-net →
-# tinyproxy ($BRIDGE_IP:$TINYPROXY_PORT) does NOT go through FORWARD — $BRIDGE_IP
+# squid ($BRIDGE_IP:$SQUID_PORT) does NOT go through FORWARD — $BRIDGE_IP
 # is a local address on the VM's docker0 interface, so that traffic hits the INPUT
 # chain instead and is not controlled here. This jump is load-bearing for the
 # claude-agent → searxng:8080 intra-network path, which DOES traverse FORWARD.
@@ -812,26 +753,27 @@ fi
 
 # Populate rules in order.
 sudo iptables -A CLAUDE_AGENT -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
-sudo iptables -A CLAUDE_AGENT -d "\$BRIDGE_IP" -p tcp --dport "\$TINYPROXY_PORT" -j RETURN
+sudo iptables -A CLAUDE_AGENT -d "\$BRIDGE_IP" -p tcp --dport "\$SQUID_PORT" -j RETURN
 sudo iptables -A CLAUDE_AGENT -d "\$HOST_IP"   -p tcp --dport "\$INFERENCE_PORT" -j RETURN
 sudo iptables -A CLAUDE_AGENT -d "\$BRIDGE_IP" -p udp --dport 53 -j RETURN
 sudo iptables -A CLAUDE_AGENT -d "\$BRIDGE_IP" -p tcp --dport 53 -j RETURN
 # Allow inter-container traffic on port 8080 for claude-agent → searxng MCP.
 # Both containers are on AGENT_NET_CIDR (claude-agent-net user-defined network).
-# SearXNG → tinyproxy at BRIDGE_IP:8888 is already covered by the rule above.
+# SearXNG → squid at BRIDGE_IP:$SQUID_PORT is already covered by the rule above.
 if [ "\$LOCAL_SEARCH_ENABLED" = "true" ] && [ -n "\$AGENT_NET_CIDR" ]; then
   sudo iptables -A CLAUDE_AGENT -s "\$AGENT_NET_CIDR" -d "\$AGENT_NET_CIDR" -p tcp --dport 8080 -j RETURN
 fi
+$FW_RATE_LIMIT_RULES
 sudo iptables -A CLAUDE_AGENT -j REJECT --reject-with icmp-admin-prohibited
 FWEOF
 
 echo "==> Applying firewall rules in VM"
 colima ssh -p "$COLIMA_PROFILE" -- sudo sh < "$TMP_WORK/firewall-apply.sh"
 
-# ── --reload-allowlist: fast-path exit ───────────────────────────────────────
-if $RELOAD_ALLOWLIST; then
-  entry_count=$(grep -cv -E '^\s*(#|$)' "$ALLOWLIST_FILE" || echo 0)
-  echo "==> Allowlist reloaded ($entry_count entries)"
+# ── --reload-denylist: fast-path exit ────────────────────────────────────────
+if $RELOAD_DENYLIST; then
+  entry_count=$(grep -c '^' "$TMP_WORK/denylist.txt" 2>/dev/null || echo 0)
+  echo "==> Denylist reloaded ($entry_count entries)"
   rm -rf "$TMP_WORK"
   trap - EXIT
   exit 0
@@ -874,7 +816,7 @@ if ! docker image inspect "$IMAGE_TAG" &>/dev/null; then
   # Build uses --network=host so RUN steps share the VM's network namespace
   # and bypass the DOCKER-USER bridge firewall. Without this, apt/curl/npm
   # would hit "no route to host" because the default-deny rule rejects
-  # everything from the bridge CIDR except the tinyproxy allowlist path, and
+  # everything from the bridge CIDR except through Squid, and
   # legacy-builder build ARGs don't reliably forward HTTP_PROXY to every tool
   # (apt, for one, only consults lowercase http_proxy). Runtime containers
   # still attach to the bridge and are firewalled normally.
@@ -1154,8 +1096,8 @@ DOCKER_ENV_ARGS=(
   -e "GIT_AUTHOR_EMAIL=$GIT_USER_EMAIL"
   -e "GIT_COMMITTER_NAME=$GIT_USER_NAME"
   -e "GIT_COMMITTER_EMAIL=$GIT_USER_EMAIL"
-  -e "HTTPS_PROXY=http://$BRIDGE_IP:$TINYPROXY_PORT"
-  -e "HTTP_PROXY=http://$BRIDGE_IP:$TINYPROXY_PORT"
+  -e "HTTPS_PROXY=http://$BRIDGE_IP:$SQUID_PORT"
+  -e "HTTP_PROXY=http://$BRIDGE_IP:$SQUID_PORT"
   -e "NO_PROXY=localhost,127.0.0.1,$BRIDGE_IP,$HOST_IP,searxng"
   -e "NODE_USE_ENV_PROXY=1"
   -e "TMPDIR=/tmp"
@@ -1172,38 +1114,17 @@ case "$BACKEND" in
     ;;
 esac
 
-attach_existing() {
-  echo "==> Attaching to existing container '$CONTAINER_NAME'"
-  docker start "$CONTAINER_NAME" >/dev/null 2>&1 || true
-  rm -rf "$TMP_WORK"
-  trap - EXIT
-  exec docker exec -it -w "$PROJECT_DIR" "${DOCKER_ENV_ARGS[@]}" "$CONTAINER_NAME" /bin/bash
-}
-
-if docker container inspect "$CONTAINER_NAME" &>/dev/null; then
-  # Check that the existing mount matches $PROJECT_DIR. If not, recreate.
-  existing_mount=$(docker container inspect -f '{{range .Mounts}}{{if eq .Destination "'"$PROJECT_DIR"'"}}{{.Source}}{{end}}{{end}}' "$CONTAINER_NAME" 2>/dev/null || true)
-  if [[ "$existing_mount" == "$PROJECT_DIR" ]]; then
-    running_state=$(docker container inspect -f '{{.State.Running}}' "$CONTAINER_NAME" 2>/dev/null || echo "false")
-    if [[ "$running_state" == "true" ]]; then
-      if docker top "$CONTAINER_NAME" 2>/dev/null | grep -q '/bin/bash'; then
-        echo "warning: container '$CONTAINER_NAME' already has an attached shell; attaching anyway. Two shells sharing state may be confusing." >&2
-      fi
-    fi
-    attach_existing
-  else
-    echo "==> Project dir changed; recreating container"
-    docker rm -f "$CONTAINER_NAME" >/dev/null
-  fi
-fi
-
-# Fresh container: sync skills first.
-sync_skills
-
 # ── inject project settings ───────────────────────────────────────────────────
-# Disable bubblewrap sandbox — it cannot run inside a Docker/Colima container
-# without elevated privileges. The VM-level tinyproxy + iptables chain is the
-# real security boundary here.
+# Force sandbox off — claude-agent.Dockerfile omits the sandbox deps
+# (CAP_SYS_ADMIN would weaken the VM boundary, see Dockerfile header), but
+# Claude Code reads settings before checking deps and would error out. The
+# VM-level Squid + iptables chain is the real security boundary here.
+#
+# Runs before the existing-container fast path so re-attaches to containers
+# created prior to the bwrap-removal also pick up the migration. The settings
+# file is on the host and bind-mounted into the container, so fixing it here
+# is sufficient regardless of whether we exec straight into an existing
+# container or build a fresh one below.
 PROJECT_SETTINGS_FILE="$PROJECT_DIR/.claude/settings.local.json"
 if [[ -f "$PROJECT_SETTINGS_FILE" ]]; then
   python3 - "$PROJECT_SETTINGS_FILE" << 'PYEOF'
@@ -1244,6 +1165,34 @@ JSONEOF
   echo "==> Created $PROJECT_SETTINGS_FILE"
 fi
 
+attach_existing() {
+  echo "==> Attaching to existing container '$CONTAINER_NAME'"
+  docker start "$CONTAINER_NAME" >/dev/null 2>&1 || true
+  rm -rf "$TMP_WORK"
+  trap - EXIT
+  exec docker exec -it -w "$PROJECT_DIR" "${DOCKER_ENV_ARGS[@]}" "$CONTAINER_NAME" /bin/bash
+}
+
+if docker container inspect "$CONTAINER_NAME" &>/dev/null; then
+  # Check that the existing mount matches $PROJECT_DIR. If not, recreate.
+  existing_mount=$(docker container inspect -f '{{range .Mounts}}{{if eq .Destination "'"$PROJECT_DIR"'"}}{{.Source}}{{end}}{{end}}' "$CONTAINER_NAME" 2>/dev/null || true)
+  if [[ "$existing_mount" == "$PROJECT_DIR" ]]; then
+    running_state=$(docker container inspect -f '{{.State.Running}}' "$CONTAINER_NAME" 2>/dev/null || echo "false")
+    if [[ "$running_state" == "true" ]]; then
+      if docker top "$CONTAINER_NAME" 2>/dev/null | grep -q '/bin/bash'; then
+        echo "warning: container '$CONTAINER_NAME' already has an attached shell; attaching anyway. Two shells sharing state may be confusing." >&2
+      fi
+    fi
+    attach_existing
+  else
+    echo "==> Project dir changed; recreating container"
+    docker rm -f "$CONTAINER_NAME" >/dev/null
+  fi
+fi
+
+# Fresh container: sync skills first.
+sync_skills
+
 NETWORK_ARGS=()
 if $LOCAL_SEARCH_ENABLED; then
   NETWORK_ARGS=(--network "$AGENT_NET_NAME")
@@ -1251,7 +1200,7 @@ fi
 
 echo "==> Creating container '$CONTAINER_NAME'"
 echo "    project : $PROJECT_DIR  →  $PROJECT_DIR"
-echo "    proxy   : http://$BRIDGE_IP:$TINYPROXY_PORT  (allowlist: $ALLOWLIST_FILE)"
+echo "    proxy   : http://$BRIDGE_IP:$SQUID_PORT  (denylist: $DENYLIST_SOURCES_FILE)"
 echo "    inference: $INFERENCE_LABEL at http://$HOST_IP:$INFERENCE_PORT"
 $LOCAL_SEARCH_ENABLED && echo "    search  : SearXNG on $AGENT_NET_NAME"
 

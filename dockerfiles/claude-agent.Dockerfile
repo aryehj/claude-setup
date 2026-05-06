@@ -1,12 +1,15 @@
 # syntax=docker/dockerfile:1.6
 #
 # claude-agent base image — Debian bookworm with Claude Code + OpenCode CLIs,
-# Node LTS, uv, git, ripgrep, fd, jq, and Claude Code sandbox dependencies.
+# Node LTS, uv, git, ripgrep, fd, jq.
 # Built by start-agent.sh into Colima's docker runtime as claude-agent:latest.
 #
-# Mirrors the setup embedded in start-claude.sh so both scripts produce a
-# functionally equivalent Claude Code environment; the only additions here are
-# the OpenCode CLI and the proxy-aware env knobs for the VM-level allowlist.
+# Unlike start-claude.sh, this image omits the Claude Code bubblewrap sandbox
+# dependencies (bubblewrap, socat, libseccomp2, @anthropic-ai/sandbox-runtime).
+# The sandbox cannot run inside an unprivileged Docker container — making it
+# work would require CAP_SYS_ADMIN, which would weaken the Colima VM boundary
+# that is already the real isolation layer here. start-agent.sh force-disables
+# sandbox.enabled in project settings.
 
 FROM debian:bookworm-slim
 
@@ -16,10 +19,9 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # ── system packages ──────────────────────────────────────────────────────────
 RUN apt-get update -qq \
  && apt-get install -y --no-install-recommends \
-      bash curl wget git ca-certificates gnupg \
-      build-essential python3 python3-pip \
-      jq ripgrep fd-find unzip \
-      bubblewrap socat libseccomp2 libseccomp-dev \
+      bash curl wget git ca-certificates \
+      python3 \
+      jq ripgrep fd-find \
  && apt-get upgrade -y \
  && rm -rf /var/lib/apt/lists/* \
  && touch /var/lib/apt/last-upgrade
@@ -39,7 +41,7 @@ BASHRC
 RUN curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - \
  && apt-get install -y nodejs \
  && rm -rf /var/lib/apt/lists/* \
- && npm install -g npm@latest @anthropic-ai/sandbox-runtime
+ && npm install -g npm@latest
 
 # ── uv ───────────────────────────────────────────────────────────────────────
 # UV_INSTALL_DIR puts binaries directly in /usr/local/bin, so no PATH fixup and
@@ -74,21 +76,18 @@ COPY searxng-mcp/server.py /opt/searxng-mcp/server.py
 RUN uv venv /opt/searxng-mcp/venv \
  && uv pip install --python /opt/searxng-mcp/venv/bin/python 'mcp[cli]' httpx
 
-# ── UV cache + project venv redirects (dynamic $TMPDIR) ──────────────────────
-# Claude Code's bubblewrap sandbox mounts /root/.cache read-only and /tmp
-# read-only at the mount layer, but exports a writable $TMPDIR. Resolve both
-# UV_CACHE_DIR and UV_PROJECT_ENVIRONMENT at shell startup rather than bake in
-# a static path. See ADR-001 and ADR-007 in ADR.md.
+# ── UV project venv redirect (dynamic $TMPDIR) ───────────────────────────────
+# Redirect venvs out of the bind-mounted project dir, which may carry a
+# macOS-binary .venv that won't run on Linux (ADR-007). Resolved at shell
+# startup rather than baked in. UV_CACHE_DIR is not redirected here — unlike
+# start-claude.sh, no read-only /root/.cache mount is in play (ADR-001 does
+# not apply without the bubblewrap sandbox).
 RUN cat > /etc/profile.d/uv-cache.sh <<'UVEOF'
-export UV_CACHE_DIR="${TMPDIR:-/tmp}/uv-cache"
-mkdir -p "$UV_CACHE_DIR" 2>/dev/null || true
 export UV_PROJECT_ENVIRONMENT="${TMPDIR:-/tmp}/.venv"
 mkdir -p "$UV_PROJECT_ENVIRONMENT" 2>/dev/null || true
 UVEOF
 
 RUN cat >> /root/.bashrc <<'UVEOF'
-export UV_CACHE_DIR="${TMPDIR:-/tmp}/uv-cache"
-mkdir -p "$UV_CACHE_DIR" 2>/dev/null || true
 export UV_PROJECT_ENVIRONMENT="${TMPDIR:-/tmp}/.venv"
 mkdir -p "$UV_PROJECT_ENVIRONMENT" 2>/dev/null || true
 UVEOF
