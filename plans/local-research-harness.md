@@ -7,11 +7,12 @@
 - [x] Phase 3: fetch + extract + per-source notes (sonnet-medium ok)
 - [x] Phase 4: round orchestration (branch proposal, dedupe, per-round digest, termination)
 - [x] Phase 5: source-quality biasing (input-side levers)
-- [ ] Phase 6: hierarchical synthesis + bundle output
-- [ ] Phase 7: interactive CLI with multi-round gates (sonnet-medium ok)
-- [ ] Phase 8: --batch mode + q1–q6 regression eval (Opus recommended)
-- [ ] Phase 9: synthesis-quality evaluation harness (Opus recommended)
-<!-- mark [x] as phases complete during implementation. Effort annotations: `(sonnet-medium ok)` for mechanical phases where the spec leaves few decisions (wrapper code, fixed prompts, scaffolding); `(Opus recommended)` for judgment-heavy phases (autonomous decisions, eval design, novel rubric work); unannotated phases default to sonnet-high — typically because the prompt itself is the product (Phases 4, 5, 6) and wording materially affects downstream quality. -->
+- [ ] Phase 6: SearXNG-config tuning loop (Sonnet-driven)
+- [ ] Phase 7: hierarchical synthesis + bundle output
+- [ ] Phase 8: interactive CLI with multi-round gates (sonnet-medium ok)
+- [ ] Phase 9: --batch mode + q1–q6 regression eval (Opus recommended)
+- [ ] Phase 10: synthesis-quality evaluation harness (Opus recommended)
+<!-- mark [x] as phases complete during implementation. Effort annotations: `(sonnet-medium ok)` for mechanical phases where the spec leaves few decisions (wrapper code, fixed prompts, scaffolding); `(Opus recommended)` for judgment-heavy phases (autonomous decisions, eval design, novel rubric work); unannotated phases default to sonnet-high — typically because the prompt itself is the product (Phases 4, 5, 6, 7) and wording materially affects downstream quality. -->
 
 ## Context
 
@@ -32,7 +33,7 @@ Per-stage models, per the user's stated prior:
 - Branch proposal (gap-driven, after each round): 26b-a4b (judgment call over accumulated digests)
 - Per-round digest: 26b-a4b
 - Per-source notes: 26b-a4b (daily driver — nearly E4B speed, more reliable)
-- Final synthesis: 26b-a4b by default in Phases 1–8; Phase 9 sweeps over context-shape, model tier, prompt template, and thinking.
+- Final synthesis: 26b-a4b by default in Phases 1–9; Phase 10 sweeps over context-shape, model tier, prompt template, and thinking.
 
 ## Goals
 
@@ -40,7 +41,7 @@ Per-stage models, per the user's stated prior:
 - Output: tree of markdown files under `~/.research/sessions/<timestamp-slug>/` with `query.md`, `rounds/<n>/sources/<m>-<slug>.md`, `rounds/<n>/digest.md`, `synthesis.md`, `manifest.md`. Plus a flat `handoff.md` concatenation for one-shot frontier paste.
 - Each round's digest is preserved as a debuggable artifact even though final synthesis cites at source-level `[N]`.
 - Final synthesis is hierarchical: digests are primary context; per-source notes are supplemental for the top-K relevance-ranked sources across all rounds.
-- `--batch` and `--no-synth` flags. `--batch` selects branches autonomously and terminates on a hybrid hard-cap + novelty-floor heuristic (Phase 8).
+- `--batch` and `--no-synth` flags. `--batch` selects branches autonomously and terminates on a hybrid hard-cap + novelty-floor heuristic (Phase 9).
 - Reuses `experiments/vane-eval/queries.md` for q1–q6 regression eval. Direct comparability with the Vane run.
 - Lives in `tests/local-research/`.
 - New container `research-runner` joins existing `research-net`; no new VM, no new firewall rules.
@@ -49,9 +50,9 @@ Per-stage models, per the user's stated prior:
 
 Replace Vane with a thin Python CLI in a sibling container `research-runner` joined to `research-net`, reusing the existing Squid proxy + `RESEARCH` iptables chain rather than introducing any new firewall surface. The pipeline is a loop: each round does `expand → search → rerank → fetch → extract → notes → digest → branch-proposal`. The orchestrator accumulates sources across rounds with URL dedupe. Round termination is human-driven in interactive mode, hybrid hard-cap-plus-novelty-floor in batch mode. After the final round, hierarchical synthesis runs over the per-round digests + top-K source notes with source-level `[N]` citations.
 
-Phases ladder bottom-up: 1 stands up infra, 2–3 build the per-round inner loop, 4 builds the orchestration layer (branch proposal, dedupe, digest, termination scaffolding), 5 tunes the input side of the funnel so what enters rerank is biased toward science / considered editorial and away from SEO / listicle / marketing fluff, 6 wraps up final synthesis + bundle, 7 wraps it all in an interactive CLI, 8 nails down `--batch` semantics with the autonomous termination heuristic and runs q1–q6, 9 runs the synthesis-quality input-variable sweep. Each phase is independently exercisable; a regression in one doesn't block experimenting with the next.
+Phases ladder bottom-up: 1 stands up infra, 2–3 build the per-round inner loop, 4 builds the orchestration layer (branch proposal, dedupe, digest, termination scaffolding), 5 tunes the input side of the funnel so what enters rerank is biased toward science / considered editorial and away from SEO / listicle / marketing fluff, 6 tunes SearXNG itself in an autonomous loop so the candidate set is best-quality before runner-side levers act on it, 7 wraps up final synthesis + bundle, 8 wraps it all in an interactive CLI, 9 nails down `--batch` semantics with the autonomous termination heuristic and runs q1–q6, 10 runs the synthesis-quality input-variable sweep. Each phase is independently exercisable; a regression in one doesn't block experimenting with the next.
 
-The biggest open risk is still that the q3/q6 retrieval gap is engine-side (SearXNG's enabled engines simply don't index the relevant medical/training-load content), in which case the new architecture won't move the needle on the same engines. Phase 8's Vane comparison is the explicit check; mitigation (adding PubMed via `research.py:432`) is called out in Notes — outside this plan but a one-liner.
+The biggest open risk is still that the q3/q6 retrieval gap is engine-side (SearXNG's enabled engines simply don't index the relevant medical/training-load content), in which case the new architecture won't move the needle on the same engines. Phase 9's Vane comparison is the explicit check; Phase 6 attacks this risk directly by letting the engine list itself be a tunable.
 
 ## Unknowns / To Verify
 
@@ -62,8 +63,9 @@ The biggest open risk is still that the q3/q6 retrieval gap is engine-side (Sear
 5. **Default research-net intra-bridge connectivity.** Verify `curl http://research-searxng:8080/` from inside a throwaway container during Phase 1 setup.
 6. **Bridge IP stability across `research.py` runs.** Phase 1's bootstrap needs `HTTP_PROXY=http://<bridge_ip>:8888`. Resolve at runtime per `bootstrap.sh` invocation; do not bake into the image. See `research.py:543`.
 7. **`OMLX_API_KEY` plumbing.** `research.py` already passes it into the research VM environment. Forward via `-e OMLX_API_KEY=$OMLX_API_KEY` in `bootstrap.sh`; the omlx client helper attaches the header when set. `--smoke` fails loud if missing.
-8. **Rerank score scale across models.** Use a per-run normalised threshold rather than a fixed cutoff — embedder-agnostic and self-calibrating. Exact normalisation strategy (within-round vs re-embedded against the seed query) is an implementation detail for Phase 8; calibrate the sigma multiple after a real q1 run.
+8. **Rerank score scale across models.** Use a per-run normalised threshold rather than a fixed cutoff — embedder-agnostic and self-calibrating. Exact normalisation strategy (within-round vs re-embedded against the seed query) is an implementation detail for Phase 9; calibrate the sigma multiple after a real q1 run.
 9. **Long-context degradation thresholds for synthesis.** Both 26b-a4b and 31b claim 250k context windows; the testing host has 64 GB RAM. Set ceilings at where we'd expect long-context performance to degrade, not to minimise resource use. Targets: per-round digest ≤5k tokens (≈800–1200 words), final synthesis input ≤40–50k tokens (digests + top-K notes + instructions). Well under typical "lost in the middle" degradation regimes for capable long-context models, but ~3× more input than the prior plan. Measure a 4-round run after Phase 4; loosen further if quality holds.
+10. **SearXNG engine catalog as of run time.** Engine names and per-engine option shapes for Phase 6's mutations need to come from SearXNG's upstream `settings.yml` (e.g. `pubmed`, `crossref`, `core.ac.uk`, `openairepository` may or may not be first-party; some live in third-party engine plugins). Verify by reading the running container's `/etc/searxng/settings.yml` and `/usr/local/searxng/searx/engines/` before treating any engine as "drop-in".
 
 ---
 
@@ -76,7 +78,7 @@ The biggest open risk is still that the q3/q6 retrieval gap is engine-side (Sear
    - Base: `python:3.12-slim` (or whatever matches conventions in the repo — verify against any existing Python Dockerfiles before picking).
    - Install: `requests`, `trafilatura`, `pyyaml`. No node, no model server.
    - `WORKDIR /app`, copy `lib/` and entrypoint script.
-3. Add `tests/local-research/lib/config.py` with module-level constants and env-var overrides. **omlx is the default and only supported backend for v1** — it hosts both the chat models and the embedder. Constants needed: SearXNG URL, omlx base URL + API key, four model IDs (embedder, expand, notes, synth), session root (bind-mounted from host `~/.research/sessions/`), and the round-budget constants (`MAX_ROUNDS`, `MAX_SOURCES`) consumed by Phase 8. Model IDs resolved per Unknowns #1; all model constants env-var overridable.
+3. Add `tests/local-research/lib/config.py` with module-level constants and env-var overrides. **omlx is the default and only supported backend for v1** — it hosts both the chat models and the embedder. Constants needed: SearXNG URL, omlx base URL + API key, four model IDs (embedder, expand, notes, synth), session root (bind-mounted from host `~/.research/sessions/`), and the round-budget constants (`MAX_ROUNDS`, `MAX_SOURCES`) consumed by Phase 9. Model IDs resolved per Unknowns #1; all model constants env-var overridable.
 4. Add `tests/local-research/bootstrap.sh`:
    - Verify the `research` Colima context has `research-searxng` running and `research-net` exists. If not, print "run `./research.py --backend=omlx` first" and exit non-zero.
    - Build `research-runner:latest` if missing or stale (compare Dockerfile mtime to image creation time).
@@ -136,15 +138,15 @@ The biggest open risk is still that the q3/q6 retrieval gap is engine-side (Sear
 
 ## Phase 4: round orchestration (branch proposal, dedupe, per-round digest, termination)
 
-This phase builds the loop layer that Phase 2–3 plugs into. Branch proposal uses gap-driven reflection (per Phase 8's literature review). Termination scaffolding lands here; the actual `--batch` policy lives in Phase 8.
+This phase builds the loop layer that Phase 2–3 plugs into. Branch proposal uses gap-driven reflection (per Phase 9's literature review). Termination scaffolding lands here; the actual `--batch` policy lives in Phase 9.
 
 ### Steps
 
 1. `lib/round_state.py` — accumulator + URL-dedupe registry across rounds. Tracks seen URLs, accumulated source metas (with their round and branch labels), digest paths, branch history, and round count. Pickled per round for crash debug; not used for warm-resume. Canonicalize URLs before insert: strip tracking query params (`utm_*`, `srsltid`, `fbclid`, `gclid`, `ref`), normalize percent-encoding (`%27` → `'`), drop fragments, lowercase scheme+host. Phase 2 testing surfaced the same Incrediwear page appearing 3× under different `srsltid` values and Physiopedia twice via `%27` vs `'`; canonicalization here also tightens within-round dedupe in `lib/rerank.py` if reused.
 2. `lib/branch.py` — `propose_branches(seed_query, accumulated_digests, k=4)`. Calls `NOTES_MODEL` with a gap-driven prompt: read accumulated digests, name K follow-up queries targeting still-missing facts or unexplored peripheral domains. Output one per line as `query | rationale` (instruct format explicitly in the prompt). Parser is tolerant: strip leading bullets/numbers, split each non-empty line on the first `|`. Round 1 has no digests; the seed query is the only branch.
 3. `lib/digest.py` — `digest_round(round_idx, source_metas)`. Calls `NOTES_MODEL` with a prompt asking for an 800–1200 word digest covering what was learned, which subdomains were touched, and what remains unanswered, with `[r.N]` round-local citations. Written to `rounds/<n>/digest.md`. Feeds back into branch proposal and final synthesis.
-4. `lib/orchestrate.py` — top-level `research(seed_query, mode)` drives the round loop. Per round: branch proposal → (interactive: branch gate) → per-branch `gather_sources(exclude_urls=state.seen_urls)` → top-K rerank → (interactive: source gate, combined across branches) → fetch + notes → digest → update state → continue? Continuation is a callable injected by the CLI: interactive returns the user's round-end gate; batch calls `lib/batch.should_stop` (Phase 8). Final round-end emits `synthesis.md` via Phase 6.
-5. Acceptance harness: a forced 2-round driver in `test_orchestrate.py` that bypasses the continuation callable. Validates Phase 4 in isolation before Phase 7/8 wire up real termination.
+4. `lib/orchestrate.py` — top-level `research(seed_query, mode)` drives the round loop. Per round: branch proposal → (interactive: branch gate) → per-branch `gather_sources(exclude_urls=state.seen_urls)` → top-K rerank → (interactive: source gate, combined across branches) → fetch + notes → digest → update state → continue? Continuation is a callable injected by the CLI: interactive returns the user's round-end gate; batch calls `lib/batch.should_stop` (Phase 9). Final round-end emits `synthesis.md` via Phase 7.
+5. Acceptance harness: a forced 2-round driver in `test_orchestrate.py` that bypasses the continuation callable. Validates Phase 4 in isolation before Phase 8/9 wire up real termination.
 
 ### Acceptance criteria
 
@@ -191,13 +193,81 @@ This phase tunes what enters the funnel before rerank, so rerank and synthesis a
 
 ---
 
-## Phase 6: hierarchical synthesis + bundle output
+## Phase 6: SearXNG-config tuning loop (Sonnet-driven)
+
+This phase tunes SearXNG's `settings.yml` itself — the layer Phase 5 left untouched. Phase 5's wins live in the runner (Python code, call-site args, post-result domain priors); this phase's wins live in `render_searxng_settings()` at `research.py:428`. Same rubric as Phase 5 (`{science, editorial-considered, seo-fluff, listicle, marketing, other}`); same fixture queries; same input/output shape into the rest of the pipeline. The variable is `settings.yml`, and only `settings.yml`. Phase 5's chosen defaults are held constant so the marginal effect of SearXNG-side tuning is isolable.
+
+Methodology, by user request: a single Sonnet-class session drives a ~1 h autonomous mutate-restart-rescore loop, picking the next mutation based on what it has seen so far. The plan provides the search space, the harness, the scoring function, and the stop condition; the Sonnet picks the trajectory.
+
+End goal: best mechanical floor on candidate-set quality from SearXNG alone, so the LLM (Phase 7's synthesizer) and the human (interactive review in Phase 8) see fewer marketing pillars, ad pages, listicles, and SEO fluff and more science / considered editorial.
+
+### Steps
+
+1. **Freeze the upstream baseline.** Run `gather_sources` on the 3 fixture queries from Phase 5 step 1 with Phase 5's chosen defaults applied. Save under `tests/local-research/eval/searxng-config/baseline-<query-slug>.json`. Reuse Phase 5's hand-labels where the URL is unchanged; LLM-judge label new URLs (see step 3). This baseline is Phase 6's reference for "did the SearXNG change help".
+
+2. **Enumerate the search space.** SearXNG-native levers worth varying — verify each option's name and shape against the running container's `/etc/searxng/settings.yml` and `/usr/local/searxng/searx/engines/` per Unknowns #10 before treating any as drop-in:
+   - **Engine list.** Add candidates: `pubmed`, `crossref`, `core.ac.uk`, `openairepository`, `lobste.rs`, `hackernews`, `peertube`. Disable any engine that consistently surfaces SEO-pillar content (likely candidates: `brave` for some categories). The current 9-engine list is in `render_searxng_settings()` at `research.py:432`; treat it as the starting point.
+   - **Per-engine `weight`.** SearXNG's engine entry accepts `weight: <float>` to bias the merged-result rank. Boost arxiv, scholar, semantic-scholar, wikipedia, pubmed; deweight google, bing, brave (which over-represent SEO surface).
+   - **`hostnames` plugin.** SearXNG-native `low_priority` / `high_priority` / `remove` regex lists at the result-aggregation stage (before SearXNG returns to the caller). This is the SearXNG-side equivalent of Phase 5's Lever E. Crucial contrast: Phase 5's Lever E filters within the runner's already-fetched result set; the `hostnames` plugin filters or reweights before SearXNG even returns. They may stack additively; record explicitly when they don't.
+   - **`enabled_plugins` / `disabled_plugins`.** `tracker_url_remover` strips `utm_*`, `srsltid`, `gclid` etc. before result aggregation, which can collapse cross-engine duplicates. Overlaps with Phase 4's `lib/round_state.py` URL canonicalization but acts earlier; both can coexist. `oa_doi_rewrite` rewrites publisher-paywall DOIs to open-access mirrors — high-leverage for the science-tilt goal.
+   - **`search.safe_search`.** `0/1/2`. Higher values may filter adversarial / promotional content as a side effect; document the trade-off if it also drops legitimate content.
+   - **Per-engine `categories` overrides.** Reassign engines so the `science` category surfaces only science-tilt engines; the `general` category remains the SEO-heavy mix. This sharpens Phase 5's Lever C (per-expansion category routing).
+   - **Per-engine `timeout`.** Slow but quality engines (semantic-scholar) get dropped on default timeout (~3s). Bumping to ~10s brings them into the merged result set.
+
+3. **Add the iteration harness.** `tests/local-research/eval/searxng-config/iterate.py`:
+   - Takes a `settings.yml` candidate, writes it to `~/.research/searxng/settings.yml`, restarts `research-searxng` (`docker restart research-searxng`; poll `?q=test&format=json` until 200).
+   - Runs `gather_sources` on the 3 fixture queries with Phase 5 defaults, captures raw + ranked.
+   - Auto-labels with the Phase 5 rubric: a regex/host pre-label list first (`arxiv.org → science`, `*.gov → editorial-considered`, `/best-` substring → `listicle`, …), then the `NOTES_MODEL` LLM judge for unlabeled rows, with a fixed prompt asking for exactly one of the six labels and a one-line justification.
+   - Computes the score: `(science + editorial-considered) − (seo-fluff + listicle + marketing)` summed across the 3 queries' ranked top-15 (45 results total). Higher is better. Records score, full label distribution, top-5 first-page diff vs baseline, and a SHA of the `settings.yml` it ran.
+   - Appends a row to `tests/local-research/eval/searxng-config/iterations.jsonl` with `{ts, settings_sha, axis_touched, mutation_summary, rationale, score, label_dist_per_query, kept_or_reverted}`.
+
+4. **Run the Sonnet loop.** A Sonnet-class session drives ~1 h of iteration:
+   - Each turn: read `iterations.jsonl`, pick the next mutation (start broad — engine list, weights — then narrow to plugin lists / timeouts), write the new `settings.yml`, call the harness, read the new score and label distribution, decide keep / revert / branch.
+   - Discipline: change one axis per iteration. If two changes look orthogonal, run them serially before stacking. Each row's `rationale` field is one sentence — short reasoning the next iteration's reader can audit.
+   - Stop conditions, whichever fires first: wall-clock ≥ 60 min, OR no improvement across 5 consecutive iterations, OR score within 5% of rolling-best for 10 iterations. Record stop reason on the final row.
+   - Constraint: leave infrastructure fields alone (`secret_key`, `base_url`, `outgoing.proxies` block); the loop touches only `engines:`, `enabled_plugins:`, `disabled_plugins:`, `hostnames:`, `search:`, and per-engine entries. The harness rejects diffs that touch the constrained fields.
+   - Container restart latency dominates wall-clock; if the loop runs out of budget on engine-list churn alone, defer plugin/timeout axes to a follow-up rather than truncate mid-axis.
+
+5. **Commit the winning config in place.** Update `render_searxng_settings()` at `research.py:428` to emit the winning `settings.yml`. Match the existing Python-string template style; do not introduce a separate config file. No flag for "old SearXNG config" — matches the project's no-compat-shims commit style. Downstream phases inherit the new defaults.
+
+6. **Write the explanation.** `tests/local-research/eval/searxng-config/RESULTS.md`:
+   - Score trajectory across iterations (terse table or sparkline).
+   - Per-axis marginal effect (which axis moved score the most).
+   - Top-N kept knobs, with one-sentence rationale per knob.
+   - Per-query before/after label distributions.
+   - Cases where the LLM judge was consistently wrong (and so were re-labeled by hand) — signals a regex pre-label rule should be added.
+   - Anything surprising — mutations that the Sonnet expected to help and didn't, or vice versa.
+
+7. **Write the downstream-orchestration follow-ups.** Append to `RESULTS.md` a section "Implications for Phase 8/9 round orchestration" — guidance for the LLM downstream (branch proposal in Phase 4; round selection in Phase 9; synthesizer prompts in Phase 7). Examples of the *kind* of insight that should land here (don't fabricate these — derive each one from what the iteration actually surfaced, citing iteration row IDs):
+   - "arxiv `weight: 3.0` now dominates page 1 for science-tilt queries — branch proposal should issue at least one explicit non-arxiv expansion per round to recover web-of-knowledge citations from secondary literature."
+   - "`pubmed` enabled but only fires usefully for medical queries — Phase 4's `propose_branches` should suppress medical-jargon expansions for non-medical seeds, otherwise a round wastes budget on PubMed misses."
+   - "the `hostnames.low_priority` list now downweights ~12 SEO hosts before aggregation — Phase 5's `lib/source_priors.py` `penalize_patterns` for those same hosts is now redundant; remove to keep one source of truth."
+   - "`oa_doi_rewrite` plugin returned more open-access PDFs in the candidate set; Phase 7 synthesis can lean harder on full-text citations rather than abstracts."
+   These are *follow-ups for the next planning turn*, not implementation tasks for this phase. List them clearly so the next `/plan` invocation can pick them up.
+
+### Acceptance criteria
+
+- A working `settings.yml` lives in `render_searxng_settings()` at `research.py:428`, and the `research-searxng` container starts cleanly with it (`docker logs research-searxng` clean; `?q=test&format=json` returns ≥ 5 results across at least 3 distinct engines).
+- For at least one fixture query, the (science + editorial-considered) share rises by ≥ 20 percentage points and the (seo-fluff + listicle + marketing) share falls by ≥ 20 percentage points vs the Phase 5 baseline. (Lower bar than Phase 5's 30 pp because Phase 5 has already done the input-side work; the SearXNG layer is incremental.)
+- `iterations.jsonl` records ≥ 20 iterations, each with score, label distribution, axis touched, mutation summary, rationale; the final row carries a stop-reason field.
+- `RESULTS.md` exists with: score trajectory, per-axis marginals, top-N kept knobs, per-query before/after label distributions, and ≥ 3 concrete downstream-orchestration follow-ups derived from specific iteration rows (not generic priors).
+- Cross-VM isolation unchanged: `tests/test-cross-vm-isolation.sh` still passes.
+
+### Notes
+- Holds Phase 5's chosen defaults constant. If a Phase 6 win conflicts with a Phase 5 default (e.g., `tracker_url_remover` makes the runner-side URL canonicalization redundant), record in `RESULTS.md` as a follow-up; do not retroactively edit Phase 5 in this phase.
+- The LLM auto-label is a noisy proxy. Spot-check ~15 labels per block of 5 iterations; if the judge is consistently wrong on one host class, add it to the regex pre-label list and re-score affected iterations.
+- Iteration record is the audit trail. Treat `iterations.jsonl` as load-bearing — if a future plan revisits SearXNG tuning, it should be able to read this file end-to-end and reconstruct the trajectory.
+- Out of scope: trained relevance classifier, click-through priors, per-engine API key acquisition, SearXNG core code changes, adding new third-party engines that require pip-installing extra packages into the SearXNG image.
+
+---
+
+## Phase 7: hierarchical synthesis + bundle output
 
 ### Steps
 
 1. `lib/synthesize.py` — `synthesize(seed_query, digests, top_source_metas, config=DEFAULT)`. Caller (orchestrator or sweep driver) assembles `digests` and `top_source_metas` per `config.context_shape` and passes them in; the function builds the prompt and calls the model. Top-K source notes are ranked against the seed query — re-rerank all accumulated sources against the seed embedding before selection, since per-round rerank scores were computed against per-round branch queries and aren't directly comparable. Anchor sources `[1]..[K]`, digests `[R1]..[RN]`.
 
-   `SynthConfig` is a frozen dataclass with five orthogonal axes — `context_shape` ∈ `{digests_only, digests_plus_topk, raw_notes}`, `model` (str), `prompt_template` ∈ `{free_form, structured}`, `thinking` (bool), `top_k` (int, default 30). Provides `slug()` for filenames and `to_dict()` for manifest rows. Default ships with `digests_plus_topk`, `SYNTH_MODEL` env var (or 26b-a4b), `structured`, `thinking=False`, `top_k=30`. Phase 9 may overturn any axis.
+   `SynthConfig` is a frozen dataclass with five orthogonal axes — `context_shape` ∈ `{digests_only, digests_plus_topk, raw_notes}`, `model` (str), `prompt_template` ∈ `{free_form, structured}`, `thinking` (bool), `top_k` (int, default 30). Provides `slug()` for filenames and `to_dict()` for manifest rows. Default ships with `digests_plus_topk`, `SYNTH_MODEL` env var (or 26b-a4b), `structured`, `thinking=False`, `top_k=30`. Phase 10 may overturn any axis.
 
    `structured` template: TL;DR (3 sentences), key claims with `[N]` source citations and `[Rn]` round refs where helpful, contradictions/uncertainties between sources, gaps that retrieval did not fill. `free_form` is an unstructured "synthesise these sources" instruction.
 2. Extend `lib/bundle.py` to write `query.md`, per-round dirs `rounds/<n>/{sources/, digest.md}`, `synthesis.md`, and `manifest.md` (rounds, models, timings, source counts per round, gates passed, termination reason). API shape decided at the keyboard.
@@ -211,7 +281,7 @@ This phase tunes what enters the funnel before rerank, so rerank and synthesis a
 
 ---
 
-## Phase 7: interactive CLI with multi-round gates
+## Phase 8: interactive CLI with multi-round gates
 
 ### Steps
 
@@ -222,7 +292,7 @@ This phase tunes what enters the funnel before rerank, so rerank and synthesis a
    - Final synthesis gate: accumulated source count + each round's digest first sentence. Confirm or abort.
    - Synthesis stage: print model + rough time hint (≤8 min for 26b-a4b, 10–20 min for 31b). Print on completion (no streaming — synchronous POST is simpler than SSE parsing).
    - Exit prints session-dir path on stdout.
-2. `--batch` flag: skip all gates. Branches from `propose_branches`; round count and termination governed by Phase 8's `should_stop`.
+2. `--batch` flag: skip all gates. Branches from `propose_branches`; round count and termination governed by Phase 9's `should_stop`.
 3. `--no-synth` flag: stop after the final round-end gate.
 
 ### Acceptance criteria
@@ -233,7 +303,7 @@ This phase tunes what enters the funnel before rerank, so rerank and synthesis a
 
 ---
 
-## Phase 8: --batch mode + q1–q6 regression eval (Opus recommended)
+## Phase 9: --batch mode + q1–q6 regression eval (Opus recommended)
 
 This phase's batch logic is judgment-heavy because there's no human in the loop and termination has to be defensible. Bakes in research from recent deep-research literature.
 
@@ -268,7 +338,7 @@ Across GPT-Researcher, LangGraph's open-deep-research, local-deep-researcher, Op
 
 ---
 
-## Phase 9: synthesis-quality evaluation harness (Opus recommended)
+## Phase 10: synthesis-quality evaluation harness (Opus recommended)
 
 Replaces the earlier model bake-off. The right question is which input variables move synthesis quality and what mechanical scaffolding makes a small-N (~24-cell) eval productive.
 
@@ -284,22 +354,22 @@ Across MT-Bench / Chatbot Arena, G-Eval, Prometheus 2, RAGAS, ALCE, ARES, and th
 
 1. Add a per-query reference file `tests/local-research/eval/references/q<n>.md` with: gold-answer paragraph, must-hit facts list, and known contradictions. Curate from `experiments/vane-eval/queries.md` and the prior eval's reference notes. Used by both fact-recall scoring and citation-grounding eval.
 2. `tests/local-research/eval/run_synth_sweep.py`:
-   - Take a Phase 8 run-dir as input (`--from <run-dir>`); reuse its per-round notes + digests verbatim. Synthesis is the only variable.
+   - Take a Phase 9 run-dir as input (`--from <run-dir>`); reuse its per-round notes + digests verbatim. Synthesis is the only variable.
    - 24-cell sweep per query: 3 (context-shape) × 2 (model tier) × 2 (prompt template) × 2 (thinking toggle).
      - context-shape: `{digests-only, digests + top-30 notes, raw-notes}`. With ~50–100 sources × ~500 tokens per note, raw-notes lands ~25–50k tokens — within the claimed 250k window and within the long-context-degradation ceiling from Unknowns #9. If a cell exceeds the synth model's effective limit on a longer run, log and skip rather than crash.
      - model tier: `{26b-a4b, 31b}`
      - prompt template: `{free-form, structured (TL;DR/claims/contradictions/gaps)}`
      - thinking: `{off, on}` (omlx flag if available; skip cells if unsupported)
-   - Sweep driver iterates the Cartesian product of `SynthConfig` axes (Phase 6), calling `synthesize(...)` once per cell. File names use `config.slug()`; `manifest.md` rows use `config.to_dict()`. Save outputs as `synthesis-<slug>.md` under `tests/local-research/eval/results/synth-sweep-<UTC-timestamp>/q<n>/`. Record per-call latency and (if reported) `usage` tokens.
+   - Sweep driver iterates the Cartesian product of `SynthConfig` axes (Phase 7), calling `synthesize(...)` once per cell. File names use `config.slug()`; `manifest.md` rows use `config.to_dict()`. Save outputs as `synthesis-<slug>.md` under `tests/local-research/eval/results/synth-sweep-<UTC-timestamp>/q<n>/`. Record per-call latency and (if reported) `usage` tokens.
    - Sequential per Unknowns #3.
 3. `lib/eval/citation_grounding.py` — ALCE-style mechanical metrics. Parse `[N]` markers per sentence, run an LLM judge with a 3-class entailment prompt (entailed / partial / unsupported) over `(claim, cited-source-bullets)` pairs, aggregate to `citation_precision = supported / cited` and `citation_recall = supported_claims / total_claims`. Use a different model family from the writer to mitigate self-preference bias.
 4. `lib/eval/fact_recall.py` — `score_fact_hits(synthesis, must_hits)`. Regex match each must-hit against the synthesis; optional embedding-similarity fallback for paraphrased hits (rerank embedder, threshold per Unknowns #8).
 5. `tests/local-research/eval/sweep_manifest.py` — per-query and aggregate `MANIFEST.md` with mechanical metrics per cell, per-axis marginal means at the top, and pairwise A/B markdown for the two hardest queries (q3, q6) to break rubric ties.
-6. Document in `tests/local-research/README.md` how to run the sweep against any Phase 8 run-dir. Include a one-paragraph "what to read for in the rubric" note: prioritise faithfulness and citation accuracy, then coverage, then coherence, then contradiction-handling.
+6. Document in `tests/local-research/README.md` how to run the sweep against any Phase 9 run-dir. Include a one-paragraph "what to read for in the rubric" note: prioritise faithfulness and citation accuracy, then coverage, then coherence, then contradiction-handling.
 
 ### Acceptance criteria
 
-- A sweep against the Phase 8 q1 bundle produces up to 24 synthesis files with mechanical metrics in `MANIFEST.md`. No cell crashes (raw-notes cells may exceed effective context on long runs — log and skip rather than crash).
+- A sweep against the Phase 9 q1 bundle produces up to 24 synthesis files with mechanical metrics in `MANIFEST.md`. No cell crashes (raw-notes cells may exceed effective context on long runs — log and skip rather than crash).
 - Citation-precision and -recall numbers are non-trivially distinguished across cells (range > 0.1 between best and worst); confirms the metric is not floored.
 - Per-axis marginal means show context-shape as the largest mover (per literature priors); if not, that's an interesting result and worth noting in the plan's Notes.
 - Decision recorded in this plan's Notes section after the run: which (context-shape, model, prompt, thinking) combination becomes the new default for `synthesize()`. Lifted to a `--synth-config` CLI flag if the answer is "depends on query."
@@ -308,7 +378,7 @@ Across MT-Bench / Chatbot Arena, G-Eval, Prometheus 2, RAGAS, ALCE, ARES, and th
 
 ## Notes
 
-**Per-stage model assignments** are env-var overridable via `bootstrap.sh`. Phase 9 sweeps over the synthesis-stage assignments specifically.
+**Per-stage model assignments** are env-var overridable via `bootstrap.sh`. Phase 10 sweeps over the synthesis-stage assignments specifically.
 
 **No prompt-template versioning.** When a template's text changes, replace in place; rely on git tags for re-runnable historical bundles. Matches the project's no-compat-shims commit style.
 
@@ -324,6 +394,8 @@ Across MT-Bench / Chatbot Arena, G-Eval, Prometheus 2, RAGAS, ALCE, ARES, and th
 
 **Parallelism deferred.** Per Unknowns #3, omlx may serialise concurrent calls anyway. Sequential per-source notes within a round keep stderr legible and make pacing natural. The 50–100-source target raises the stakes — revisit if profiling shows wall-clock pain.
 
+**Phase 5 vs Phase 6 split.** Phase 5 changes runner-side Python; Phase 6 changes SearXNG's `settings.yml`. Both target the same metric (label distribution into rerank) with the same rubric. Order matters: Phase 5 first because its levers are cheaper to iterate (no container restart) and surface the rubric first; Phase 6 then squeezes the engine layer with Phase 5's wins held constant.
+
 **Out of scope for v1:**
 - TUI library / pretty UI.
 - Cross-session corpus / persistent index. Sessions are independent dirs on disk.
@@ -332,4 +404,4 @@ Across MT-Bench / Chatbot Arena, G-Eval, Prometheus 2, RAGAS, ALCE, ARES, and th
 - Learned value head for batch termination (Stop-RAG-style; would require training data).
 - Frontier API integration. The bundle is the API; user pastes/uploads it manually.
 
-**Adjacent risk worth flagging.** If the q3 retrieval gap persists after Phase 8 (saphenous nerve / training-load still absent from any retrieved source across multiple rounds), the cause is upstream of this harness — SearXNG's enabled engines don't index the relevant content. Adding PubMed via SearXNG's `pubmed` engine is a one-line `render_searxng_settings()` change in `research.py:432`. Worth a pre-eval edit if you want to give the new architecture its best chance to demonstrate retrieval gains independent of engine-list changes.
+**Adjacent risk worth flagging.** If the q3 retrieval gap persists after Phase 9 (saphenous nerve / training-load still absent from any retrieved source across multiple rounds), the cause is upstream of this harness — SearXNG's enabled engines don't index the relevant content. Phase 6 is where adding PubMed via SearXNG's `pubmed` engine should land naturally; if the Phase 6 Sonnet loop ends up not exploring engine additions, edit `render_searxng_settings()` at `research.py:432` directly as a pre-Phase-9 mitigation.
