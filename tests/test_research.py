@@ -101,7 +101,7 @@ def test_searxng_settings_contains_secret():
 
 def test_searxng_settings_contains_engines():
     result = render_searxng_settings("172.17.0.1", 8888, "x")
-    for engine in ("google", "bing", "duckduckgo", "wikipedia", "arxiv"):
+    for engine in ("google", "pubmed", "google scholar", "duckduckgo", "wikipedia", "arxiv"):
         assert engine in result
 
 

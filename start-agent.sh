@@ -618,26 +618,72 @@ use_default_settings:
   engines:
     keep_only:
       - google
-      - bing
       - duckduckgo
       - brave
-      - qwant
       - wikipedia
       - arxiv
       - github
       - stack overflow
+      - pubmed
+      - google scholar
+
+engines:
+  - name: pubmed
+    weight: 3
+    timeout: 15
+    categories: [general, science, "scientific publications"]
+  - name: google scholar
+    weight: 1.5
+  - name: arxiv
+    weight: 1
+  - name: wikipedia
+    weight: 1.5
+  - name: google
+    weight: 1.0
+  - name: brave
+    weight: 0.5
 
 server:
   secret_key: "$SECRET_KEY"
   base_url: "http://searxng:8080/"
   limiter: false
 
+plugins:
+  searx.plugins.oa_doi_rewrite.SXNGPlugin:
+    active: true
+
+hostnames:
+  high_priority:
+    - '(.*\.)?ncbi\.nlm\.nih\.gov$'
+    - '(.*\.)?nih\.gov$'
+    - '(.*\.)?nature\.com$'
+    - '(.*\.)?science\.org$'
+    - '(.*\.)?bmj\.com$'
+    - '(.*\.)?thelancet\.com$'
+    - '(.*\.)?nejm\.org$'
+    - '(.*\.)?academic\.oup\.com$'
+    - '(.*\.)?jamanetwork\.com$'
+    - '(.*\.)?journals\.lww\.com$'
+    - '(.*\.)?clinorthop\.org$'
+    - '(.*\.)?bjsm\.bmj\.com$'
+  low_priority:
+    - '(.*\.)?verywellhealth\.com$'
+    - '(.*\.)?healthline\.com$'
+    - '(.*\.)?medicalnewstoday\.com$'
+  remove:
+    - '(.*\.)?cookedbytaste\.com$'
+    - '(.*\.)?buckedup\.com$'
+    - '(.*\.)?ubiehealth\.com$'
+
 search:
+  safe_search: 1
   formats:
     - html
     - json
 
 outgoing:
+  request_timeout: 8.0
+  max_request_timeout: 15.0
   proxies:
     all://: "http://$BRIDGE_IP:$SQUID_PORT"
 SXNG

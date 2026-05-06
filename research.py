@@ -428,64 +428,76 @@ def denylist_to_squid_acl(domains: List[str]) -> str:
 def render_searxng_settings(bridge_ip: str, proxy_port: int, secret: str) -> str:
     """Return the body of settings.yml for the research SearXNG instance.
 
-    Knobs chosen after Phase 6 SearXNG-config tuning loop:
-    - pubmed added: surfaces medical literature for clinical queries (q3 target)
-    - arxiv weight 3.0, semantic scholar weight 2.5: boost academic sources
-    - semantic scholar timeout 10s: default 3s drops it from results; 10s brings it in
-    - brave weight 0.5: over-represents SEO surface; deweighted but retained for coverage
-    - tracker_url_remover enabled: strips utm_*/srsltid/gclid before aggregation;
-      catches duplicates earlier than runner-side URL canonicalization (Phase 4)
-    - oa_doi_rewrite enabled: rewrites publisher-paywall DOIs to open-access mirrors;
-      more full-text papers in candidate set for Phase 7 synthesis
-    - hostnames.low_priority: downweights known SEO-pillar hosts before SearXNG
-      returns results; complements Phase 5's source_priors.py runner-side penalties
+    Knobs from Phase 6 SearXNG-config tuning loop (21 iterations):
+    - pubmed in general+science categories: surfaces medical literature for clinical queries
+    - google scholar science-only: avoids polluting general/finance queries with academic PDFs
+    - arxiv science-only: prevents CS/math preprint flooding on non-CS queries
+    - oa_doi_rewrite: rewrites publisher-paywall DOIs to open-access mirrors
+    - hostnames.high_priority: boosts NIH/nature/lancet/LWW journals
+    - hostnames.low_priority: downweights consumer health SEO sites
+    - semantic scholar omitted: CloudFront WAF returns 202 challenge for automated clients
     """
     return f"""\
 use_default_settings:
   engines:
     keep_only:
       - google
-      - bing
       - duckduckgo
       - brave
-      - qwant
       - wikipedia
       - arxiv
-      - google scholar
-      - semantic scholar
+      - github
+      - stack overflow
       - pubmed
+      - google scholar
 
 engines:
-  - name: arxiv
-    weight: 3.0
-  - name: semantic scholar
-    weight: 2.5
-    timeout: 10.0
-  - name: google scholar
-    weight: 2.0
   - name: pubmed
-    weight: 2.0
-    timeout: 8.0
+    weight: 3
+    timeout: 15
+    categories: [general, science, "scientific publications"]
+  - name: google scholar
+    weight: 1.5
+  - name: arxiv
+    weight: 1
   - name: wikipedia
     weight: 1.5
+  - name: google
+    weight: 1.0
   - name: brave
     weight: 0.5
-
-enabled_plugins:
-  - tracker_url_remover
-  - oa_doi_rewrite
-  - ahmia_filter
-
-hostnames:
-  low_priority:
-    - "(.*)(healthline|webmd|medicalnewstoday|verywell|everydayhealth)\\.com(.*)"
-    - "(.*)(investopedia|thebalancemoney|nerdwallet)\\.com(.*)"
-    - "(.*)/(best-|top-\\d+|top\\d+|best-\\d+|guide-to-|how-to-)"
 
 server:
   secret_key: "{secret}"
   base_url: "http://research-searxng:8080/"
   limiter: false
+
+plugins:
+  searx.plugins.oa_doi_rewrite.SXNGPlugin:
+    active: true
+
+hostnames:
+  high_priority:
+    - '(.*\\.)?ncbi\\.nlm\\.nih\\.gov$'
+    - '(.*\\.)?nih\\.gov$'
+    - '(.*\\.)?nature\\.com$'
+    - '(.*\\.)?science\\.org$'
+    - '(.*\\.)?bmj\\.com$'
+    - '(.*\\.)?thelancet\\.com$'
+    - '(.*\\.)?nejm\\.org$'
+    - '(.*\\.)?academic\\.oup\\.com$'
+    - '(.*\\.)?jamanetwork\\.com$'
+    - '(.*\\.)?journals\\.lww\\.com$'
+    - '(.*\\.)?clinorthop\\.org$'
+    - '(.*\\.)?bjsm\\.bmj\\.com$'
+  low_priority:
+    - '(.*\\.)?verywellhealth\\.com$'
+    - '(.*\\.)?healthline\\.com$'
+    - '(.*\\.)?medicalnewstoday\\.com$'
+  remove:
+    - '(.*\\.)?cookedbytaste\\.com$'
+    - '(.*\\.)?buckedup\\.com$'
+    - '(.*\\.)?ubiehealth\\.com$'
 
 search:
   safe_search: 0
@@ -494,6 +506,8 @@ search:
     - json
 
 outgoing:
+  request_timeout: 8.0
+  max_request_timeout: 15.0
   proxies:
     all://: "http://{bridge_ip}:{proxy_port}"
 """
