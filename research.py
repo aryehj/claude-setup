@@ -426,7 +426,20 @@ def denylist_to_squid_acl(domains: List[str]) -> str:
 
 
 def render_searxng_settings(bridge_ip: str, proxy_port: int, secret: str) -> str:
-    """Return the body of settings.yml for the research SearXNG instance."""
+    """Return the body of settings.yml for the research SearXNG instance.
+
+    Knobs chosen after Phase 6 SearXNG-config tuning loop:
+    - pubmed added: surfaces medical literature for clinical queries (q3 target)
+    - arxiv weight 3.0, semantic scholar weight 2.5: boost academic sources
+    - semantic scholar timeout 10s: default 3s drops it from results; 10s brings it in
+    - brave weight 0.5: over-represents SEO surface; deweighted but retained for coverage
+    - tracker_url_remover enabled: strips utm_*/srsltid/gclid before aggregation;
+      catches duplicates earlier than runner-side URL canonicalization (Phase 4)
+    - oa_doi_rewrite enabled: rewrites publisher-paywall DOIs to open-access mirrors;
+      more full-text papers in candidate set for Phase 7 synthesis
+    - hostnames.low_priority: downweights known SEO-pillar hosts before SearXNG
+      returns results; complements Phase 5's source_priors.py runner-side penalties
+    """
     return f"""\
 use_default_settings:
   engines:
@@ -440,6 +453,34 @@ use_default_settings:
       - arxiv
       - google scholar
       - semantic scholar
+      - pubmed
+
+engines:
+  - name: arxiv
+    weight: 3.0
+  - name: semantic scholar
+    weight: 2.5
+    timeout: 10.0
+  - name: google scholar
+    weight: 2.0
+  - name: pubmed
+    weight: 2.0
+    timeout: 8.0
+  - name: wikipedia
+    weight: 1.5
+  - name: brave
+    weight: 0.5
+
+enabled_plugins:
+  - tracker_url_remover
+  - oa_doi_rewrite
+  - ahmia_filter
+
+hostnames:
+  low_priority:
+    - "(.*)(healthline|webmd|medicalnewstoday|verywell|everydayhealth)\\.com(.*)"
+    - "(.*)(investopedia|thebalancemoney|nerdwallet)\\.com(.*)"
+    - "(.*)/(best-|top-\\d+|top\\d+|best-\\d+|guide-to-|how-to-)"
 
 server:
   secret_key: "{secret}"
@@ -447,6 +488,7 @@ server:
   limiter: false
 
 search:
+  safe_search: 0
   formats:
     - html
     - json
